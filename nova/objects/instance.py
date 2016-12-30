@@ -479,7 +479,17 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if self.obj_attr_is_set('id'):
             raise exception.ObjectActionError(action='create',
                                               reason='already created')
+        if self.obj_attr_is_set('deleted') and self.deleted:
+            raise exception.ObjectActionError(action='create',
+                                              reason='already deleted')
         updates = self.obj_get_changes()
+
+        # NOTE(danms): We know because of the check above that deleted
+        # is either unset or false. Since we need to avoid passing False
+        # down to the DB layer (which uses an integer), we can always
+        # default it to zero here.
+        updates['deleted'] = 0
+
         expected_attrs = [attr for attr in INSTANCE_DEFAULT_FIELDS
                           if attr in updates]
         if 'security_groups' in updates:
@@ -830,8 +840,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         self.fault = objects.InstanceFault.get_latest_for_instance(
             self._context, self.uuid)
 
-    def _load_numa_topology(self, db_topology=None):
-        if db_topology is not None:
+    def _load_numa_topology(self, db_topology=_NO_DATA_SENTINEL):
+        if db_topology is None:
+            self.numa_topology = None
+        elif db_topology is not _NO_DATA_SENTINEL:
             self.numa_topology = \
                 objects.InstanceNUMATopology.obj_from_db_obj(self.uuid,
                                                              db_topology)
@@ -843,9 +855,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             except exception.NumaTopologyNotFound:
                 self.numa_topology = None
 
-    def _load_pci_requests(self, db_requests=None):
-        # FIXME: also do this if none!
-        if db_requests is not None:
+    def _load_pci_requests(self, db_requests=_NO_DATA_SENTINEL):
+        if db_requests is not _NO_DATA_SENTINEL:
             self.pci_requests = objects.InstancePCIRequests.obj_from_db(
                 self._context, self.uuid, db_requests)
         else:
@@ -853,8 +864,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 objects.InstancePCIRequests.get_by_instance_uuid(
                     self._context, self.uuid)
 
-    def _load_device_metadata(self, db_dev_meta=None):
-        if db_dev_meta is not None:
+    def _load_device_metadata(self, db_dev_meta=_NO_DATA_SENTINEL):
+        if db_dev_meta is None:
+            self.device_metadata = None
+        elif db_dev_meta is not _NO_DATA_SENTINEL:
             self.device_metadata = \
                 objects.InstanceDeviceMetadata.obj_from_db(
                 self._context, db_dev_meta)
@@ -881,8 +894,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         instance.system_metadata.update(self.get('system_metadata', {}))
         self.system_metadata = instance.system_metadata
 
-    def _load_vcpu_model(self, db_vcpu_model=None):
+    def _load_vcpu_model(self, db_vcpu_model=_NO_DATA_SENTINEL):
         if db_vcpu_model is None:
+            self.vcpu_model = None
+        elif db_vcpu_model is _NO_DATA_SENTINEL:
             self.vcpu_model = objects.VirtCPUModel.get_by_instance_uuid(
                 self._context, self.uuid)
         else:
@@ -1169,7 +1184,8 @@ def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):
 class InstanceList(base.ObjectListBase, base.NovaObject):
     # Version 2.0: Initial Version
     # Version 2.1: Add get_uuids_by_host()
-    VERSION = '2.1'
+    # Version 2.2: Pagination for get_active_by_window_joined()
+    VERSION = '2.2'
 
     fields = {
         'objects': fields.ListOfObjectsField('Instance'),
@@ -1254,16 +1270,16 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
     @db.select_db_reader_mode
     def _db_instance_get_active_by_window_joined(
             context, begin, end, project_id, host, columns_to_join,
-            use_slave=False):
+            use_slave=False, limit=None, marker=None):
         return db.instance_get_active_by_window_joined(
             context, begin, end, project_id, host,
-            columns_to_join=columns_to_join)
+            columns_to_join=columns_to_join, limit=limit, marker=marker)
 
     @base.remotable_classmethod
     def _get_active_by_window_joined(cls, context, begin, end=None,
                                     project_id=None, host=None,
-                                    expected_attrs=None,
-                                    use_slave=False):
+                                    expected_attrs=None, use_slave=False,
+                                    limit=None, marker=None):
         # NOTE(mriedem): We need to convert the begin/end timestamp strings
         # to timezone-aware datetime objects for the DB API call.
         begin = timeutils.parse_isotime(begin)
@@ -1271,15 +1287,15 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         db_inst_list = cls._db_instance_get_active_by_window_joined(
             context, begin, end, project_id, host,
             columns_to_join=_expected_cols(expected_attrs),
-            use_slave=use_slave)
+            use_slave=use_slave, limit=limit, marker=marker)
         return _make_instance_list(context, cls(), db_inst_list,
                                    expected_attrs)
 
     @classmethod
     def get_active_by_window_joined(cls, context, begin, end=None,
                                     project_id=None, host=None,
-                                    expected_attrs=None,
-                                    use_slave=False):
+                                    expected_attrs=None, use_slave=False,
+                                    limit=None, marker=None):
         """Get instances and joins active during a certain time window.
 
         :param:context: nova request context
@@ -1290,6 +1306,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         :param:expected_attrs: list of related fields that can be joined
         in the database layer when querying for instances
         :param use_slave if True, ship this query off to a DB slave
+        :param limit: maximum number of instances to return per page
+        :param marker: last instance uuid from the previous page
         :returns: InstanceList
 
         """
@@ -1300,7 +1318,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return cls._get_active_by_window_joined(context, begin, end,
                                                 project_id, host,
                                                 expected_attrs,
-                                                use_slave=use_slave)
+                                                use_slave=use_slave,
+                                                limit=limit, marker=marker)
 
     @base.remotable_classmethod
     def get_by_security_group_id(cls, context, security_group_id):
@@ -1354,7 +1373,7 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return [inst['uuid'] for inst in db_instances]
 
 
-@db_api.main_context_manager.writer
+@db_api.pick_context_manager_writer
 def _migrate_instance_keypairs(ctxt, count):
     db_extras = ctxt.session.query(models.InstanceExtra).\
         options(joinedload('instance')).\

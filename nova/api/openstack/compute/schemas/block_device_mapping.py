@@ -15,9 +15,7 @@
 import copy
 
 from nova.api.openstack.compute.schemas import block_device_mapping_v1
-from nova.api.openstack.compute.schemas import server_tags
 from nova.api.validation import parameter_types
-from nova.objects import fields
 
 
 block_device_mapping_new_item = {
@@ -34,11 +32,9 @@ block_device_mapping_new_item = {
         'pattern': '^[a-zA-Z0-9._-]*$',
     },
     'image_id': parameter_types.image_id,
-    # Defined as varchar(255) in column "destination_type" in table
-    # "block_device_mapping"
     'destination_type': {
         'type': 'string',
-        'enum': fields.BlockDeviceDestinationType.ALL,
+        'enum': ['local', 'volume'],
     },
     # Defined as varchar(255) in column "guest_format" in table
     # "block_device_mapping"
@@ -69,12 +65,12 @@ block_device_mapping['properties'].update(block_device_mapping_new_item)
 server_create = {
     'block_device_mapping_v2': {
         'type': 'array',
-        'items': [block_device_mapping]
+        'items': block_device_mapping
     }
 }
 
 block_device_mapping_v232_new_item = {
-    'tag': server_tags.tag
+    'tag': parameter_types.tag
 }
 
 block_device_mapping_v232 = copy.deepcopy(block_device_mapping)
@@ -84,6 +80,6 @@ block_device_mapping_v232['properties'].update(
 server_create_v232 = {
     'block_device_mapping_v2': {
         'type': 'array',
-        'items': [block_device_mapping_v232]
+        'items': block_device_mapping_v232
     }
 }

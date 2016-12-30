@@ -127,7 +127,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             'id': None,
             'address': 'DE:AD:BE:EF:00:00',
             'network': network,
-            'type': None,
+            'type': network_model.VIF_TYPE_OVS,
             'devname': None,
             'ovs_interfaceid': None,
             'rxtx_cap': 3
@@ -966,6 +966,12 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         mock_debug.side_effect = fake_debug
         self.flags(flat_injected=False)
         self.flags(enabled=False, group='vnc')
+
+        mock_vi = mock.Mock()
+        mock_vi.root_gb = 1
+        mock_vi.ii.file_size = 2 * units.Gi
+        mock_vi.instance.flavor.root_gb = 1
+        mock_get_vm_config_info.return_value = mock_vi
 
         # Call spawn(). We don't care what it does as long as it generates
         # the log message, which we check below.
@@ -2439,7 +2445,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         base_folder = self._vmops._get_base_folder()
         self.assertEqual('my_prefix_base', base_folder)
 
-    def _test_reboot_vm(self, reboot_type="SOFT"):
+    def _test_reboot_vm(self, reboot_type="SOFT", tool_status=True):
 
         expected_methods = ['get_object_properties_dict']
         if reboot_type == "SOFT":
@@ -2447,16 +2453,16 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         else:
             expected_methods.append('ResetVM_Task')
 
-        query = {}
-        query['runtime.powerState'] = "poweredOn"
-        query['summary.guest.toolsStatus'] = "toolsOk"
-        query['summary.guest.toolsRunningStatus'] = "guestToolsRunning"
-
         def fake_call_method(module, method, *args, **kwargs):
             expected_method = expected_methods.pop(0)
             self.assertEqual(expected_method, method)
-            if expected_method == 'get_object_properties_dict':
-                return query
+            if expected_method == 'get_object_properties_dict' and tool_status:
+                return {
+                    "runtime.powerState": "poweredOn",
+                    "summary.guest.toolsStatus": "toolsOk",
+                    "summary.guest.toolsRunningStatus": "guestToolsRunning"}
+            elif expected_method == 'get_object_properties_dict':
+                return {"runtime.powerState": "poweredOn"}
             elif expected_method == 'ResetVM_Task':
                 return 'fake-task'
 
@@ -2476,6 +2482,9 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
 
     def test_reboot_vm_soft(self):
         self._test_reboot_vm()
+
+    def test_reboot_vm_hard_toolstatus(self):
+        self._test_reboot_vm(reboot_type="HARD", tool_status=False)
 
     def test_reboot_vm_hard(self):
         self._test_reboot_vm(reboot_type="HARD")
@@ -2527,8 +2536,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                                     self._network_values)
         extra_specs = vm_util.ExtraSpecs()
         mock_extra_specs.return_value = extra_specs
-        self._vmops.attach_interface(self._instance, self._image_meta,
-                                     self._network_values)
+        self._vmops.attach_interface(self._context, self._instance,
+                                     self._image_meta, self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
         mock_get_attach_port_index(self._session, 'fake-ref')
         mock_get_network_attach_config_spec.assert_called_once_with(
@@ -2556,7 +2565,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
 
         with mock.patch.object(self._session, '_call_method',
                                return_value='hardware-devices'):
-            self._vmops.detach_interface(self._instance, self._network_values)
+            self._vmops.detach_interface(self._context, self._instance,
+                                         self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
         mock_get_detach_port_index(self._session, 'fake-ref')
         mock_get_network_detach_config_spec.assert_called_once_with(
@@ -2632,7 +2642,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                                     shares_share=40)
         extra_specs = vm_util.ExtraSpecs(vif_limits=vif_limits)
         mock_extra_specs.return_value = extra_specs
-        self._vmops.attach_interface(self._instance, self._image_meta,
+        self._vmops.attach_interface(self._context, self._instance,
+                                     self._image_meta,
                                      self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
         mock_get_attach_port_index(self._session, 'fake-ref')

@@ -23,10 +23,10 @@ from oslo_config import cfg
 from oslo_utils import fileutils
 import six
 
-from nova.compute import arch
 from nova import context
 from nova import exception
 from nova import objects
+from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.unit import fake_instance
 from nova.tests import uuidsentinel as uuids
@@ -494,9 +494,12 @@ disk size: 4.4M
                                   dest_format='raw', out_format='raw'):
         libvirt_utils.extract_snapshot('/path/to/disk/image', src_format,
                                        '/extracted/snap', dest_format)
-        mock_execute.assert_called_once_with(
-            'qemu-img', 'convert', '-f', src_format, '-O', out_format,
-            '/path/to/disk/image', '/extracted/snap')
+        qemu_img_cmd = ('qemu-img', 'convert', '-f',
+                        src_format, '-O', out_format)
+        if CONF.libvirt.snapshot_compression and dest_format == "qcow2":
+            qemu_img_cmd += ('-c',)
+        qemu_img_cmd += ('/path/to/disk/image', '/extracted/snap')
+        mock_execute.assert_called_once_with(*qemu_img_cmd)
 
     @mock.patch.object(utils, 'execute')
     def test_extract_snapshot_raw(self, mock_execute):
@@ -508,6 +511,12 @@ disk size: 4.4M
 
     @mock.patch.object(utils, 'execute')
     def test_extract_snapshot_qcow2(self, mock_execute):
+        self._do_test_extract_snapshot(mock_execute,
+                                       dest_format='qcow2', out_format='qcow2')
+
+    @mock.patch.object(utils, 'execute')
+    def test_extract_snapshot_qcow2_and_compression(self, mock_execute):
+        self.flags(snapshot_compression=True, group='libvirt')
         self._do_test_extract_snapshot(mock_execute,
                                        dest_format='qcow2', out_format='qcow2')
 
@@ -649,8 +658,8 @@ disk size: 4.4M
         target = 't.qcow2'
         self.executes = []
         expected_commands = [('qemu-img', 'convert', '-O', 'raw',
-                              't.qcow2.part', 't.qcow2.converted',
-                              '-f', 'qcow2'),
+                              '-f', 'qcow2',
+                              't.qcow2.part', 't.qcow2.converted'),
                              ('rm', 't.qcow2.part'),
                              ('mv', 't.qcow2.converted', 't.qcow2')]
         images.fetch_to_raw(context, image_id, target)
@@ -723,7 +732,7 @@ disk size: 4.4M
         image_meta = objects.ImageMeta.from_dict(
             {'properties': {'architecture': "X86_64"}})
         image_arch = libvirt_utils.get_arch(image_meta)
-        self.assertEqual(arch.X86_64, image_arch)
+        self.assertEqual(obj_fields.Architecture.X86_64, image_arch)
 
     def test_update_mtime_error(self):
         with mock.patch.object(libvirt_utils, 'execute',

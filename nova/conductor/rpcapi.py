@@ -188,8 +188,8 @@ class ConductorAPI(object):
 
     * 3.0  - Drop backwards compatibility
 
-    ... Liberty and Mitaka support message version 3.0.  So, any changes to
-    existing methods in 3.x after that point should be done such
+    ... Liberty, Mitaka, and Newton support message version 3.0.  So, any
+    changes to existing methods in 3.x after that point should be done such
     that they can handle the version_cap being set to 3.0.
 
     * Remove provider_fw_rule_get_all()
@@ -203,6 +203,7 @@ class ConductorAPI(object):
         'kilo': '2.1',
         'liberty': '3.0',
         'mitaka': '3.0',
+        'newton': '3.0',
     }
 
     def __init__(self):
@@ -267,6 +268,7 @@ class ComputeTaskAPI(object):
     1.13 - Added request_spec to migrate_server()
     1.14 - Added request_spec to unshelve_instance()
     1.15 - Added live_migrate_instance
+    1.16 - Added schedule_and_build_instances
     """
 
     def __init__(self):
@@ -345,6 +347,23 @@ class ComputeTaskAPI(object):
 
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'build_instances', **kw)
+
+    def schedule_and_build_instances(self, context, build_requests,
+                                      request_specs,
+                                      image, admin_password, injected_files,
+                                      requested_networks,
+                                      block_device_mapping):
+        version = '1.16'
+        kw = {'build_requests': build_requests,
+              'request_specs': request_specs,
+              'image': jsonutils.to_primitive(image),
+              'admin_password': admin_password,
+              'injected_files': injected_files,
+              'requested_networks': requested_networks,
+              'block_device_mapping': block_device_mapping}
+
+        cctxt = self.client.prepare(version=version)
+        cctxt.cast(context, 'schedule_and_build_instances', **kw)
 
     def unshelve_instance(self, context, instance, request_spec=None):
         version = '1.14'

@@ -28,6 +28,7 @@ import string
 
 from oslo_log import log as logging
 from oslo_messaging import exceptions as oslo_exceptions
+from oslo_serialization import base64 as base64utils
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import strutils
@@ -73,7 +74,6 @@ from nova.objects import block_device as block_device_obj
 from nova.objects import fields as fields_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
-from nova.objects import security_group as security_group_obj
 from nova.pci import request as pci_request
 import nova.policy
 from nova import rpc
@@ -409,14 +409,37 @@ class API(base.Base):
     def _check_requested_secgroups(self, context, secgroups):
         """Check if the security group requested exists and belongs to
         the project.
+
+        :param context: The nova request context.
+        :type context: nova.context.RequestContext
+        :param secgroups: list of requested security group names, or uuids in
+            the case of Neutron.
+        :type secgroups: list
+        :returns: list of requested security group names unmodified if using
+            nova-network. If using Neutron, the list returned is all uuids.
+            Note that 'default' is a special case and will be unmodified if
+            it's requested.
         """
+        security_groups = []
         for secgroup in secgroups:
             # NOTE(sdague): default is handled special
             if secgroup == "default":
+                security_groups.append(secgroup)
                 continue
-            if not self.security_group_api.get(context, secgroup):
+            secgroup_dict = self.security_group_api.get(context, secgroup)
+            if not secgroup_dict:
                 raise exception.SecurityGroupNotFoundForProject(
                     project_id=context.project_id, security_group_id=secgroup)
+
+            # Check to see if it's a nova-network or neutron type.
+            if isinstance(secgroup_dict['id'], int):
+                # This is nova-network so just return the requested name.
+                security_groups.append(secgroup)
+            else:
+                # The id for neutron is a uuid, so we return the id (uuid).
+                security_groups.append(secgroup_dict['id'])
+
+        return security_groups
 
     def _check_requested_networks(self, context, requested_networks,
                                   max_count):
@@ -810,11 +833,20 @@ class API(base.Base):
                     length=l, maxsize=MAX_USERDATA_SIZE)
 
             try:
-                base64.decodestring(user_data)
+                # TODO(gcb): Just use base64utils.decode_as_bytes(user_data)
+                # when https://review.openstack.org/#/c/410797/ is merged and
+                # ensure oslo.serialization >=2.15.0 in Nova requirements.txt.
+                if six.PY3:
+                    base64utils.decode_as_bytes(user_data)
+                else:
+                    base64.decodestring(user_data)
             except base64.binascii.Error:
                 raise exception.InstanceUserDataMalformed()
 
-        self._check_requested_secgroups(context, security_groups)
+        # When using Neutron, _check_requested_secgroups will translate and
+        # return any requested security group names to uuids.
+        security_groups = (
+            self._check_requested_secgroups(context, security_groups))
 
         # Note:  max_count is the number of instances requested by the user,
         # max_network_count is the maximum number of instances taking into
@@ -900,7 +932,7 @@ class API(base.Base):
 
         # return the validated options and maximum number of instances allowed
         # by the network quotas
-        return base_options, max_network_count, key_pair
+        return base_options, max_network_count, key_pair, security_groups
 
     def _provision_instances(self, context, instance_type, min_count,
             max_count, base_options, boot_meta, security_groups,
@@ -914,9 +946,7 @@ class API(base.Base):
                 security_groups)
         self.security_group_api.ensure_default(context)
         LOG.debug("Going to run %s instances...", num_instances)
-        instances = []
-        instance_mappings = []
-        build_requests = []
+        instances_to_build = []
         try:
             for i in range(num_instances):
                 # Create a uuid for the instance so we can store the
@@ -927,7 +957,8 @@ class API(base.Base):
                         instance_uuid, boot_meta, instance_type,
                         base_options['numa_topology'],
                         base_options['pci_requests'], filter_properties,
-                        instance_group, base_options['availability_zone'])
+                        instance_group, base_options['availability_zone'],
+                        security_groups=security_groups)
                 req_spec.create()
 
                 # Create an instance object, but do not store in db yet.
@@ -945,12 +976,16 @@ class API(base.Base):
                     self._bdm_validate_set_size_and_instance(context,
                         instance, instance_type, block_device_mapping))
 
+                # NOTE(danms): BDMs are still not created, so we need to pass
+                # a clone and then reset them on our object after create so
+                # that they're still dirty for later in this process
                 build_request = objects.BuildRequest(context,
                         instance=instance, instance_uuid=instance.uuid,
                         project_id=instance.project_id,
-                        block_device_mappings=block_device_mapping)
+                        block_device_mappings=block_device_mapping.obj_clone())
                 build_request.create()
-                build_requests.append(build_request)
+                build_request.block_device_mappings = block_device_mapping
+
                 # Create an instance_mapping.  The null cell_mapping indicates
                 # that the instance doesn't yet exist in a cell, and lookups
                 # for it need to instead look for the RequestSpec.
@@ -962,17 +997,9 @@ class API(base.Base):
                 inst_mapping.project_id = context.project_id
                 inst_mapping.cell_mapping = None
                 inst_mapping.create()
-                instance_mappings.append(inst_mapping)
-                # TODO(alaski): Cast to conductor here which will call the
-                # scheduler and defer instance creation until the scheduler
-                # has picked a cell/host. Set the instance_mapping to the cell
-                # that the instance is scheduled to.
-                # NOTE(alaski): Instance and block device creation are going
-                # to move to the conductor.
-                instance.create()
-                instances.append(instance)
 
-                self._create_block_device_mapping(block_device_mapping)
+                instances_to_build.append(
+                    (req_spec, build_request, inst_mapping))
 
                 if instance_group:
                     if check_server_group_quota:
@@ -995,29 +1022,22 @@ class API(base.Base):
                     # instance
                     instance_group.members.extend(members)
 
-                # send a state update notification for the initial create to
-                # show it going from non-existent to BUILDING
-                notifications.send_update_with_states(context, instance, None,
-                        vm_states.BUILDING, None, None, service="api")
-
         # In the case of any exceptions, attempt DB cleanup and rollback the
         # quota reservations.
         except Exception:
             with excutils.save_and_reraise_exception():
                 try:
-                    for instance in instances:
+                    for rs, br, im in instances_to_build:
                         try:
-                            instance.destroy()
-                        except exception.ObjectActionError:
+                            rs.destroy()
+                        except exception.RequestSpecNotFound:
                             pass
-                    for instance_mapping in instance_mappings:
                         try:
-                            instance_mapping.destroy()
+                            im.destroy()
                         except exception.InstanceMappingNotFound:
                             pass
-                    for build_request in build_requests:
                         try:
-                            build_request.destroy()
+                            br.destroy()
                         except exception.BuildRequestNotFound:
                             pass
                 finally:
@@ -1025,7 +1045,8 @@ class API(base.Base):
 
         # Commit the reservations
         quotas.commit()
-        return instances
+
+        return instances_to_build
 
     def _get_bdm_image_metadata(self, context, block_device_mapping,
                                 legacy_bdm=True):
@@ -1086,6 +1107,30 @@ class API(base.Base):
 
         return objects.InstanceGroup.get_by_uuid(context, group_hint)
 
+    def _safe_destroy_instance_residue(self, instances, instances_to_build):
+        """Delete residue left over from a failed instance build with
+           reckless abandon.
+
+        :param instances: List of Instance objects to destroy
+        :param instances_to_build: List of tuples, output from
+            _provision_instances, which is:
+             request_spec, build_request, instance_mapping
+        """
+        for instance in instances:
+            try:
+                instance.destroy()
+            except Exception as e:
+                LOG.debug('Failed to destroy instance residue: %s', e,
+                          instance=instance)
+        for to_destroy in instances_to_build:
+            for thing in to_destroy:
+                try:
+                    thing.destroy()
+                except Exception as e:
+                    LOG.debug(
+                        'Failed to destroy %s during residue cleanup: %s',
+                        thing, e)
+
     def _create_instance(self, context, instance_type,
                image_href, kernel_id, ramdisk_id,
                min_count, max_count,
@@ -1120,7 +1165,7 @@ class API(base.Base):
         self._check_auto_disk_config(image=boot_meta,
                                      auto_disk_config=auto_disk_config)
 
-        base_options, max_net_count, key_pair = \
+        base_options, max_net_count, key_pair, security_groups = \
                 self._validate_and_build_base_options(
                     context, instance_type, boot_meta, image_href, image_id,
                     kernel_id, ramdisk_id, display_name, display_description,
@@ -1154,11 +1199,36 @@ class API(base.Base):
         instance_group = self._get_requested_instance_group(context,
                                    filter_properties)
 
-        instances = self._provision_instances(context, instance_type,
+        instances_to_build = self._provision_instances(context, instance_type,
                 min_count, max_count, base_options, boot_meta, security_groups,
                 block_device_mapping, shutdown_terminate,
                 instance_group, check_server_group_quota, filter_properties,
                 key_pair)
+
+        instances = []
+        build_requests = []
+        # TODO(alaski): Cast to conductor here which will call the
+        # scheduler and defer instance creation until the scheduler
+        # has picked a cell/host. Set the instance_mapping to the cell
+        # that the instance is scheduled to.
+        # NOTE(alaski): Instance and block device creation are going
+        # to move to the conductor.
+        try:
+            for rs, build_request, im in instances_to_build:
+                build_requests.append(build_request)
+                instance = build_request.get_new_instance(context)
+                instance.create()
+                instances.append(instance)
+                self._create_block_device_mapping(
+                    build_request.block_device_mappings)
+                # send a state update notification for the initial create to
+                # show it going from non-existent to BUILDING
+                notifications.send_update_with_states(context, instance, None,
+                        vm_states.BUILDING, None, None, service="api")
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                self._safe_destroy_instance_residue(instances,
+                                                    instances_to_build)
 
         for instance in instances:
             self._record_action_start(context, instance,
@@ -1421,7 +1491,13 @@ class API(base.Base):
 
         instance.system_metadata.update(system_meta)
 
-        instance.security_groups = security_groups
+        if CONF.use_neutron:
+            # For Neutron we don't actually store anything in the database, we
+            # proxy the security groups on the instance from the ports
+            # attached to the instance.
+            instance.security_groups = objects.SecurityGroupList()
+        else:
+            instance.security_groups = security_groups
 
         self._populate_instance_names(instance, num_instances)
         instance.shutdown_terminate = shutdown_terminate
@@ -2324,10 +2400,14 @@ class API(base.Base):
             cell0_instances = objects.InstanceList(objects=[])
         else:
             with nova_context.target_cell(context, cell0_mapping):
-                cell0_instances = self._get_instances_by_filters(
-                    context, filters, limit=limit, marker=marker,
-                    expected_attrs=expected_attrs, sort_keys=sort_keys,
-                    sort_dirs=sort_dirs)
+                try:
+                    cell0_instances = self._get_instances_by_filters(
+                        context, filters, limit=limit, marker=marker,
+                        expected_attrs=expected_attrs, sort_keys=sort_keys,
+                        sort_dirs=sort_dirs)
+                except exception.MarkerNotFound:
+                    # We can ignore this since we need to look in the cell DB
+                    cell0_instances = objects.InstanceList(objects=[])
         # Only subtract from limit if it is not None
         limit = (limit - len(cell0_instances)) if limit else limit
 
@@ -4774,9 +4854,3 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
             return self.db.security_group_get_by_instance(context,
                                                           instance.uuid)
         return [{'name': group.name} for group in instance.security_groups]
-
-    def populate_security_groups(self, security_groups):
-        if not security_groups:
-            # Make sure it's an empty SecurityGroupList and not None
-            return objects.SecurityGroupList()
-        return security_group_obj.make_secgroup_list(security_groups)

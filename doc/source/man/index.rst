@@ -25,7 +25,6 @@ Reference
 .. toctree::
    :maxdepth: 1
 
-   nova-all
    nova-api-metadata
    nova-api-os-compute
    nova-api
@@ -42,7 +41,7 @@ Reference
    nova-novncproxy
    nova-rootwrap
    nova-scheduler
-   nova-spicehtml5proxy
-   nova-xvpvncproxy
    nova-serialproxy
-
+   nova-spicehtml5proxy
+   nova-status
+   nova-xvpvncproxy

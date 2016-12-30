@@ -1,3 +1,6 @@
+# Copyright 2016 OpenStack Foundation
+# All Rights Reserved.
+#
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -10,36 +13,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-POLICY_FORCE = 'force'
-POLICY_REQUIRE = 'require'
-POLICY_OPTIONAL = 'optional'
-POLICY_DISABLE = 'disable'
-POLICY_FORBID = 'forbid'
+from nova.api.openstack import common
 
-ALL_POLICIES = [
-    POLICY_FORCE,
-    POLICY_REQUIRE,
-    POLICY_OPTIONAL,
-    POLICY_DISABLE,
-    POLICY_FORBID,
-]
 
-MODE_CUSTOM = 'custom'
-MODE_HOST_MODEL = 'host-model'
-MODE_HOST_PASSTHROUGH = 'host-passthrough'
+class ViewBuilder(common.ViewBuilder):
 
-ALL_CPUMODES = [
-    MODE_CUSTOM,
-    MODE_HOST_MODEL,
-    MODE_HOST_PASSTHROUGH,
-]
+    _collection_name = "os-simple-tenant-usage"
 
-MATCH_MINIMUM = 'minimum'
-MATCH_EXACT = 'exact'
-MATCH_STRICT = 'strict'
-
-ALL_MATCHES = [
-    MATCH_MINIMUM,
-    MATCH_EXACT,
-    MATCH_STRICT,
-]
+    def get_links(self, request, server_usages, tenant_id=None):
+        coll_name = self._collection_name
+        if tenant_id:
+            coll_name = self._collection_name + '/{}'.format(tenant_id)
+        return self._get_collection_links(
+            request, server_usages, coll_name, 'instance_id')

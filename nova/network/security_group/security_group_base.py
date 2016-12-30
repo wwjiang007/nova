@@ -17,10 +17,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import encodeutils
 from six.moves import urllib
 
 from nova import exception
 from nova.i18n import _
+from nova.objects import security_group as security_group_obj
 from nova import utils
 
 
@@ -29,7 +31,7 @@ class SecurityGroupBase(object):
     def parse_cidr(self, cidr):
         if cidr:
             try:
-                cidr = urllib.parse.unquote(cidr).decode()
+                cidr = encodeutils.safe_decode(urllib.parse.unquote(cidr))
             except Exception as e:
                 self.raise_invalid_cidr(cidr, e)
 
@@ -167,10 +169,16 @@ class SecurityGroupBase(object):
         pass
 
     def populate_security_groups(self, security_groups):
-        """Called when populating the database for an instances
-        security groups.
+        """Build and return a SecurityGroupList.
+
+        :param security_groups: list of requested security group names or uuids
+        :type security_groups: list
+        :returns: nova.objects.security_group.SecurityGroupList
         """
-        raise NotImplementedError()
+        if not security_groups:
+            # Make sure it's an empty SecurityGroupList and not None
+            return security_group_obj.SecurityGroupList()
+        return security_group_obj.make_secgroup_list(security_groups)
 
     def create_security_group(self, context, name, description):
         raise NotImplementedError()

@@ -1,18 +1,19 @@
 .. -*- rst -*-
-.. needs:body_verification
 
 ========================================
  Usage reports (os-simple-tenant-usage)
 ========================================
 
-Reports usage statistics on compute and storage resources.
+Reports usage statistics of compute and storage resources periodically
+for an individual tenant or all tenants. The usage statistics will include
+all instances' CPU, memory and local disk during a specific period.
 
-List Tenant Usage For All Tenants
-=================================
+List Tenant Usage Statistics For All Tenants
+============================================
 
 .. rest_method:: GET /os-simple-tenant-usage
 
-Lists usage information for all tenants.
+Lists usage statistics for all tenants.
 
 Normal response codes: 200
 
@@ -26,6 +27,8 @@ Request
   - detailed: detailed_simple_tenant_usage
   - end: end_simple_tenant_usage
   - start: start_simple_tenant_usage
+  - limit: usage_limit
+  - marker: usage_marker
 
 Response
 --------
@@ -59,22 +62,22 @@ Response
 If the ``detailed`` query parameter is not specified or
 is set to other than 1 (e.g. ``detailed=0``), the response is as follows:
 
-.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/simple-tenant-usage-get.json
+.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/v2.40/simple-tenant-usage-get.json
    :language: javascript
 
 If the ``detailed`` query parameter is set to one (``detailed=1``),
 the response includes ``server_usages`` information for each tenant.
 The response is as follows:
 
-.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/simple-tenant-usage-get-detail.json
+.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/v2.40/simple-tenant-usage-get-detail.json
    :language: javascript
 
-Show Usage Details For Tenant
-=============================
+Show Usage Statistics For Tenant
+================================
 
 .. rest_method:: GET /os-simple-tenant-usage/{tenant_id}
 
-Shows usage details for a tenant.
+Shows usage statistics for a tenant.
 
 Normal response codes: 200
 
@@ -88,6 +91,8 @@ Request
   - tenant_id: tenant_id
   - end: end_simple_tenant_usage
   - start: start_simple_tenant_usage
+  - limit: usage_limit
+  - marker: usage_marker
 
 Response
 --------
@@ -118,5 +123,5 @@ Response
 
 **Example Show Usage Details For Tenant: JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/simple-tenant-usage-get-specific.json
+.. literalinclude:: ../../doc/api_samples/os-simple-tenant-usage/v2.40/simple-tenant-usage-get-specific.json
    :language: javascript

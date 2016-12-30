@@ -229,7 +229,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         return self._vmops.migrate_disk_and_power_off(context, instance,
                                                       dest, flavor)
 
-    def confirm_migration(self, migration, instance, network_info):
+    def confirm_migration(self, context, migration, instance, network_info):
         """Confirms a resize, destroying the source VM."""
         self._vmops.confirm_migration(migration, instance, network_info)
 
@@ -492,13 +492,13 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Efficient override of base instance_exists method."""
         return self._vmops.instance_exists(instance)
 
-    def attach_interface(self, instance, image_meta, vif):
+    def attach_interface(self, context, instance, image_meta, vif):
         """Attach an interface to the instance."""
-        self._vmops.attach_interface(instance, image_meta, vif)
+        self._vmops.attach_interface(context, instance, image_meta, vif)
 
-    def detach_interface(self, instance, vif):
+    def detach_interface(self, context, instance, vif):
         """Detach an interface from the instance."""
-        self._vmops.detach_interface(instance, vif)
+        self._vmops.detach_interface(context, instance, vif)
 
 
 class VMwareAPISession(api.VMwareAPISession):

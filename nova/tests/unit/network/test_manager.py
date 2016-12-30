@@ -2001,7 +2001,7 @@ class CommonNetworkTestCase(test.TestCase):
     def setUp(self):
         super(CommonNetworkTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
-        self.flags(ipv6_backend='rfc2462')
+        self.flags(ipv6_backend='rfc2462', use_neutron=False)
         ipv6.reset_backend()
 
     def test_validate_instance_zone_for_dns_domain(self):
@@ -3006,8 +3006,8 @@ class FloatingIPTestCase(test.TestCase):
                        lambda *args, **kwargs: None)
         instance = objects.Instance(context=self.context)
         instance.project_id = self.project_id
-        instance.deleted = True
         instance.create()
+        instance.destroy()
         network = db.network_create_safe(self.context.elevated(), {
                 'project_id': self.project_id,
                 'host': CONF.host,
@@ -3439,6 +3439,7 @@ domain1 = "example.org"
 domain2 = "example.com"
 
 
+@testtools.skipIf(six.PY3, 'python-ldap is not compatible for Python 3.')
 class LdapDNSTestCase(test.NoDBTestCase):
     """Tests nova.network.ldapdns.LdapDNS."""
     def setUp(self):

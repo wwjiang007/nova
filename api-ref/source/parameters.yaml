@@ -8,7 +8,7 @@ tag_location:
   type: string
   min_version: 2.26
 x-openstack-request-id:
-  description: >
+  description: |
     A unique ID for tracking the request. The request ID associated with the request
     appears in the log lines for that request. By default, the middleware configuration
     ensures that the request ID appears in the log files.
@@ -17,12 +17,6 @@ x-openstack-request-id:
   type: string
 
 # variables in path
-admin_tenant_id:
-  description: |
-    The UUID of the administrative tenant.
-  in: path
-  required: true
-  type: string
 agent_build_id:
   description: |
     The id of the agent build.
@@ -64,18 +58,6 @@ before_timestamp:
 cell_id:
   description: |
     The UUID of the cell.
-  in: path
-  required: true
-  type: string
-certificate_id:
-  description: |
-    The certificate ID, as a string. The only valid value is ``root``.
-  in: path
-  required: true
-  type: string
-class_id:
-  description: |
-    The UUID of the quota class.
   in: path
   required: true
   type: string
@@ -181,6 +163,12 @@ keypair_name_path:
   in: path
   required: true
   type: string
+migration_id_path:
+  description: |
+    The ID of the server migration.
+  in: path
+  required: true
+  type: integer
 network_id:
   description: |
     The UUID of the network.
@@ -269,12 +257,6 @@ tenant_id:
 volume_id_path:
   description: |
     The unique ID for a volume.
-  in: path
-  required: true
-  type: string
-volume_type_id:
-  description: |
-    The unique ID for a volume type.
   in: path
   required: true
   type: string
@@ -421,14 +403,6 @@ flavor_query:
   in: query
   required: false
   type: string
-host_query:
-  description: |
-    Filters the response by a host name, as a string. This query parameter is typically
-    available to only administrative users. If you are a non-administrative user,
-    the API ignores this parameter.
-  in: query
-  required: false
-  type: string
 hypervisor_limit:
   description: |
     Requests a page size of items. Returns a number of items up to a limit value.
@@ -547,6 +521,15 @@ limit:
   in: query
   required: false
   type: integer
+limit_simple:
+  description: |
+    Used in conjunction with ``offset`` to return a slice of items. ``limit``
+    is the maximum number of items to return. If ``limit`` is not specified,
+    or exceeds the configurable ``max_limit``, then ``max_limit`` will be
+    used instead.
+  in: query
+  required: false
+  type: integer
 marker:
   description: |
     The ID of the last-seen item. Use the ``limit`` parameter to make an initial limited
@@ -621,6 +604,13 @@ not_tags_query:
     match all tags in this list will be returned. Boolean expression in this
     case is 'NOT (t1 AND t2)'. Tags in query must be separated by comma.
   min_version: 2.26
+offset_simple:
+  description: |
+    Used in conjunction with ``limit`` to return a slice of items. ``offset``
+    is where to start in the list.
+  in: query
+  required: false
+  type: integer
 reservation_id_query:
   in: query
   required: false
@@ -727,6 +717,25 @@ tags_query:
     all tags in this list will be returned. Boolean expression in this
     case is 't1 AND t2'. Tags in query must be separated by comma.
   min_version: 2.26
+usage_limit:
+  description: |
+    Requests a page size of items. Calculate usage for the limited number of
+    instances. Use the ``limit`` parameter to make an initial limited request
+    and use the last-seen instance UUID from the response as the ``marker``
+    parameter value in a subsequent limited request.
+  in: query
+  required: false
+  type: integer
+  min_version: 2.40
+usage_marker:
+  description: |
+    The last-seen item. Use the ``limit`` parameter to make an initial limited
+    request and use the last-seen instance UUID from the response as the
+    ``marker`` parameter value in a subsequent limited request.
+  in: query
+  required: false
+  type: string
+  min_version: 2.40
 user_id_query_quota:
   description: |
     ID of user to list the quotas for.
@@ -1001,6 +1010,12 @@ attachment_device_resp:
   in: body
   required: false
   type: string
+attachment_id_required:
+  description: |
+    The UUID of the attachment.
+  in: body
+  required: true
+  type: string
 attachment_id_resp:
   description: |
     The UUID of the attachment.
@@ -1161,6 +1176,15 @@ block_device_mapping_v2:
   in: body
   required: false
   type: object
+block_device_uuid:
+  description: |
+    This is the uuid of source resource. The uuid is point to different resource
+    based on the source_type. For example if source_type is ``image`` as the above
+    sample, the block device is created based on the specified image which is gotten
+    from the image service.
+  in: body
+  required: false
+  type: string
 block_migration:
   description: |
     Set to ``True`` to migrate local disks by using block migration. If the source
@@ -1371,7 +1395,7 @@ createBackup:
     The action.
   in: body
   required: true
-  type: string
+  type: object
 created:
   description: |
     The date and time when the resource was created. The date and time
@@ -1440,12 +1464,6 @@ deleted_at:
 description:
   description: |
     Security group description.
-  in: body
-  required: true
-  type: string
-description_2:
-  description: |
-    The security group description.
   in: body
   required: true
   type: string
@@ -1944,6 +1962,23 @@ floating_ip_bulk_object:
   in: body
   required: true
   type: object
+floating_ip_id_value:
+  description: |
+    The floating IP id value.
+
+    .. note::
+
+      For nova-network, the value will be of type integer, whereas for
+      neutron, the value will be of type string.
+  in: body
+  required: true
+  type: string
+floating_ip_obj:
+  description: |
+    A floating IP address object.
+  in: body
+  required: true
+  type: object
 floating_ip_pool_name:
   description: |
     The name of the floating ip pool.
@@ -2011,6 +2046,13 @@ force_live_migrate:
   required: false
   type: boolean
   min_version: 2.30
+force_migration_complete:
+  description: |
+    The action.
+  in: body
+  required: true
+  type: string
+  min_version: 2.22
 force_snapshot:
   description: |
     Indicates whether to create a snapshot, even if the volume is attached.
@@ -2353,6 +2395,15 @@ image_id_body:
   in: body
   required: true
   type: string
+image_metadata_items:
+  description: |
+    The number of allowed metadata items for each image. Starting from
+    version 2.39 this field is dropped from 'os-limits' response, because
+    'image-metadata' proxy API was deprecated.
+  in: body
+  required: true
+  type: integer
+  max_version: 2.38
 image_name:
   description: |
     The display name of an Image.
@@ -2407,12 +2458,6 @@ images:
   in: body
   required: true
   type: array
-in_use:
-  description: |
-    The in-use quota value.
-  in: body
-  required: true
-  type: integer
 injected_file_content_bytes:
   description: |
     The number of allowed bytes of content for each injected file.
@@ -2753,12 +2798,6 @@ limits_absolutes:
   in: body
   required: true
   type: object
-limits_rate_regex:
-  description: |
-    A regular expression defining the URI path to apply the limit to.
-  in: body
-  required: true
-  type: string
 limits_rate_uri:
   description: |
     A human readable URI that is used as a friendly description of where the api rate limit is applied.
@@ -2812,6 +2851,13 @@ lock:
   in: body
   required: true
   type: string
+locked:
+  description: |
+    True if the instance is locked otherwise False.
+  in: body
+  required: true
+  type: boolean
+  min_version: 2.9
 mac_addr:
   description: |
     The MAC address.
@@ -2941,6 +2987,96 @@ migrate:
   in: body
   required: true
   type: string
+migrate_dest_compute:
+  description: |
+    The target compute for a migration.
+  in: body
+  required: true
+  type: string
+migrate_dest_host:
+  description: |
+    The target host for a migration.
+  in: body
+  required: true
+  type: string
+migrate_dest_node:
+  description: |
+    The target node for a migration.
+  in: body
+  required: true
+  type: string
+migrate_disk_processed_bytes:
+  description: |
+    The amount of disk, in bytes, that has been processed during the migration.
+  in: body
+  required: true
+  type: integer
+migrate_disk_remaining_bytes:
+  description: |
+    The amount of disk, in bytes, that still needs to be migrated.
+  in: body
+  required: true
+  type: integer
+migrate_disk_total_bytes:
+  description: |
+    The total amount of disk, in bytes, that needs to be migrated.
+  in: body
+  required: true
+  type: integer
+migrate_memory_processed_bytes:
+  description: |
+    The amount of memory, in bytes, that has been processed during the migration.
+  in: body
+  required: true
+  type: integer
+migrate_memory_remaining_bytes:
+  description: |
+    The amount of memory, in bytes, that still needs to be migrated.
+  in: body
+  required: true
+  type: integer
+migrate_memory_total_bytes:
+  description: |
+    The total amount of memory, in bytes, that needs to be migrated.
+  in: body
+  required: true
+  type: integer
+migrate_source_compute:
+  description: |
+    The source compute for a migration.
+  in: body
+  required: true
+  type: string
+migrate_source_node:
+  description: |
+    The source node for a migration.
+  in: body
+  required: true
+  type: string
+migrate_status:
+  description: |
+    The current status of the migration.
+  in: body
+  required: true
+  type: string
+migration:
+  description: |
+    The server migration object.
+  in: body
+  required: true
+  type: object
+migration_id:
+  description: |
+    The ID of the server migration.
+  in: body
+  required: true
+  type: integer
+migrations:
+  description: |
+    The list of server migration objects.
+  in: body
+  required: true
+  type: array
 minDisk_body:
   description: |
     The minimum amount of disk space an image requires to boot, in GiB. For example, ``100``.
@@ -2958,31 +3094,6 @@ name:
     The security group name.
   in: body
   required: true
-  type: string
-name_3:
-  description: |
-    The name to associate with the keypair.
-  in: body
-  required: true
-  type: string
-name_4:
-  description: |
-    The source security group name.
-  in: body
-  required: true
-  type: string
-name_5:
-  description: |
-    The server group name. A non-empty string with no leading or trailing spaces.
-    Maximum length is 255 characters.
-  in: body
-  required: true
-  type: string
-name_9:
-  description: |
-    The name of floating IP pools.
-  in: body
-  required: false
   type: string
 name_server_group:
   description: |
@@ -3070,13 +3181,6 @@ new_file:
     image for the VM.
   in: body
   required: true
-  type: string
-next:
-  description: |
-    Moves to the next metadata item.
-  format: uri
-  in: body
-  required: false
   type: string
 on_shared_storage:
   description: |
@@ -3243,12 +3347,18 @@ os-getVNCConsole-type:
   in: body
   required: true
   type: string
+os-migrateLive:
+  description: |
+    The action.
+  in: body
+  required: true
+  type: object
 os-resetState:
   description: |
     The action.
   in: body
   required: true
-  type: string
+  type: object
 os-resetState_state:
   description: |
     The state of the server to be set, ``active`` or ``error`` are valid.
@@ -3704,7 +3814,7 @@ security_group_default_rules:
     A list of the ``security_group_default_rule`` object.
   in: body
   required: true
-  type: object
+  type: array
 security_group_rule:
   description: |
     A ``security_group_rule`` object.
@@ -3764,12 +3874,6 @@ security_groups_quota_optional:
   required: false
   type: integer
 server:
-  description: |
-    A ``server`` object.
-  in: body
-  required: true
-  type: object
-server_2:
   description: |
     A ``server`` object.
   in: body

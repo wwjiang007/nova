@@ -16,6 +16,8 @@
 import base64
 import time
 
+import six
+
 from nova.api.openstack import api_version_request as avr
 from nova.tests.functional.api_sample_tests import api_sample_base
 from nova.tests.unit.api.openstack import fakes
@@ -26,7 +28,7 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
     microversion = None
     sample_dir = 'servers'
 
-    user_data_contents = '#!/bin/bash\n/bin/su\necho "I am in you!"\n'
+    user_data_contents = six.b('#!/bin/bash\n/bin/su\necho "I am in you!"\n')
     user_data = base64.b64encode(user_data_contents)
 
     common_req_names = [
@@ -44,7 +46,7 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
                     avr.APIVersionRequest(min), avr.APIVersionRequest(max)):
                 return name
 
-    def _post_server(self, use_common_server_api_samples=True):
+    def _post_server(self, use_common_server_api_samples=True, name=None):
         # param use_common_server_api_samples: Boolean to set whether tests use
         # common sample files for server post request and response.
         # Default is True which means _get_sample_path method will fetch the
@@ -61,6 +63,7 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
             'user_data': self.user_data,
             'uuid': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}'
                     '-[0-9a-f]{4}-[0-9a-f]{12}',
+            'name': 'new-server-test' if name is None else name,
         }
 
         orig_value = self.__class__._use_common_server_api_samples

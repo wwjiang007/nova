@@ -40,12 +40,12 @@ class HideServerAddressesTestV21(test.TestCase):
     base_url = '/v2/fake/servers'
 
     def _setup_wsgi(self):
-        self.wsgi_app = fakes.wsgi_app_v21(
-            init_only=('servers', 'os-hide-server-addresses'))
+        self.wsgi_app = fakes.wsgi_app_v21()
 
     def setUp(self):
         super(HideServerAddressesTestV21, self).setUp()
         fakes.stub_out_nw_api(self)
+        fakes.stub_out_secgroup_api(self)
         return_server = fakes.fake_instance_get()
         self.stub_out('nova.db.instance_get_by_uuid', return_server)
         self._setup_wsgi()

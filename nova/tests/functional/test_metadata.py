@@ -16,7 +16,6 @@
 import fixtures
 import requests
 
-from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 
@@ -24,9 +23,6 @@ from nova import context
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-
-
-LOG = logging.getLogger(__name__)
 
 
 class fake_result(object):
@@ -38,7 +34,7 @@ class fake_result(object):
 real_request = requests.request
 
 
-def fake_request(method, url, **kwargs):
+def fake_request(obj, url, method, **kwargs):
     if url.startswith('http://127.0.0.1:123'):
         return fake_result({'a': 1, 'b': 'foo'})
     if url.startswith('http://127.0.0.1:124'):
@@ -68,6 +64,9 @@ class MetadataTest(test.TestCase):
         # NOTE(mikal): We could create a network and a fixed IP here, but it
         # turns out to be heaps of fiddly boiler plate code, so let's just
         # fake it and hope mriedem doesn't notice.
+        # TODO(mriedem): Make this all work with the Neutron fixture.
+        self.flags(use_neutron=False)
+
         def fake_get_fixed_ip_by_address(self, ctxt, address):
             return {'instance_uuid': instance.uuid}
 
@@ -111,8 +110,8 @@ class MetadataTest(test.TestCase):
             group='api'
             )
 
-        self.useFixture(fixtures.MonkeyPatch('requests.request',
-                                             fake_request))
+        self.useFixture(fixtures.MonkeyPatch(
+                'keystoneauth1.session.Session.request', fake_request))
 
         url = '%sopenstack/2016-10-06/vendor_data2.json' % self.md_url
         res = requests.request('GET', url, timeout=5)
@@ -135,8 +134,8 @@ class MetadataTest(test.TestCase):
             group='api'
             )
 
-        self.useFixture(fixtures.MonkeyPatch('requests.request',
-                                             fake_request))
+        self.useFixture(fixtures.MonkeyPatch(
+                'keystoneauth1.session.Session.request', fake_request))
 
         url = '%sopenstack/2016-10-06/vendor_data2.json' % self.md_url
         res = requests.request('GET', url, timeout=5)
@@ -162,8 +161,8 @@ class MetadataTest(test.TestCase):
             group='api'
             )
 
-        self.useFixture(fixtures.MonkeyPatch('requests.request',
-                                             fake_request))
+        self.useFixture(fixtures.MonkeyPatch(
+                'keystoneauth1.session.Session.request', fake_request))
 
         url = '%sopenstack/2016-10-06/vendor_data2.json' % self.md_url
         res = requests.request('GET', url, timeout=5)

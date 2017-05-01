@@ -23,22 +23,23 @@ __all__ = [
     'get_client',
     'get_server',
     'get_notifier',
-    'TRANSPORT_ALIASES',
 ]
 
 import functools
 
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_messaging.rpc import dispatcher
 from oslo_serialization import jsonutils
 from oslo_service import periodic_task
-from oslo_utils import timeutils
+from oslo_utils import importutils
 
 import nova.conf
 import nova.context
 import nova.exception
 from nova.i18n import _
-from nova import objects
+
+profiler = importutils.try_import("osprofiler.profiler")
 
 
 CONF = nova.conf.CONF
@@ -55,44 +56,34 @@ ALLOWED_EXMODS = [
 ]
 EXTRA_EXMODS = []
 
-# NOTE(markmc): The nova.openstack.common.rpc entries are for backwards compat
-# with Havana rpc_backend configuration values. The nova.rpc entries are for
-# compat with Essex values.
-TRANSPORT_ALIASES = {
-    'nova.openstack.common.rpc.impl_kombu': 'rabbit',
-    'nova.openstack.common.rpc.impl_qpid': 'qpid',
-    'nova.openstack.common.rpc.impl_zmq': 'zmq',
-    'nova.rpc.impl_kombu': 'rabbit',
-    'nova.rpc.impl_qpid': 'qpid',
-    'nova.rpc.impl_zmq': 'zmq',
-}
-
 
 def init(conf):
     global TRANSPORT, NOTIFICATION_TRANSPORT, LEGACY_NOTIFIER, NOTIFIER
     exmods = get_allowed_exmods()
     TRANSPORT = create_transport(get_transport_url())
     NOTIFICATION_TRANSPORT = messaging.get_notification_transport(
-        conf, allowed_remote_exmods=exmods, aliases=TRANSPORT_ALIASES)
+        conf, allowed_remote_exmods=exmods)
     serializer = RequestContextSerializer(JsonPayloadSerializer())
-    if conf.notification_format == 'unversioned':
+    if conf.notifications.notification_format == 'unversioned':
         LEGACY_NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
                                              serializer=serializer)
         NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
                                       serializer=serializer, driver='noop')
-    elif conf.notification_format == 'both':
+    elif conf.notifications.notification_format == 'both':
         LEGACY_NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
                                              serializer=serializer)
-        NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
-                                      serializer=serializer,
-                                      topics=['versioned_notifications'])
+        NOTIFIER = messaging.Notifier(
+            NOTIFICATION_TRANSPORT,
+            serializer=serializer,
+            topics=conf.notifications.versioned_notifications_topics)
     else:
         LEGACY_NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
                                              serializer=serializer,
                                              driver='noop')
-        NOTIFIER = messaging.Notifier(NOTIFICATION_TRANSPORT,
-                                      serializer=serializer,
-                                      topics=['versioned_notifications'])
+        NOTIFIER = messaging.Notifier(
+            NOTIFICATION_TRANSPORT,
+            serializer=serializer,
+            topics=conf.notifications.versioned_notifications_topics)
 
 
 def cleanup():
@@ -150,13 +141,45 @@ class RequestContextSerializer(messaging.Serializer):
         return nova.context.RequestContext.from_dict(context)
 
 
+class ProfilerRequestContextSerializer(RequestContextSerializer):
+    def serialize_context(self, context):
+        _context = super(ProfilerRequestContextSerializer,
+                         self).serialize_context(context)
+
+        prof = profiler.get()
+        if prof:
+            # FIXME(DinaBelova): we'll add profiler.get_info() method
+            # to extract this info -> we'll need to update these lines
+            trace_info = {
+                "hmac_key": prof.hmac_key,
+                "base_id": prof.get_base_id(),
+                "parent_id": prof.get_id()
+            }
+            _context.update({"trace_info": trace_info})
+
+        return _context
+
+    def deserialize_context(self, context):
+        trace_info = context.pop("trace_info", None)
+        if trace_info:
+            profiler.init(**trace_info)
+
+        return super(ProfilerRequestContextSerializer,
+                     self).deserialize_context(context)
+
+
 def get_transport_url(url_str=None):
-    return messaging.TransportURL.parse(CONF, url_str, TRANSPORT_ALIASES)
+    return messaging.TransportURL.parse(CONF, url_str)
 
 
 def get_client(target, version_cap=None, serializer=None):
     assert TRANSPORT is not None
-    serializer = RequestContextSerializer(serializer)
+
+    if profiler:
+        serializer = ProfilerRequestContextSerializer(serializer)
+    else:
+        serializer = RequestContextSerializer(serializer)
+
     return messaging.RPCClient(TRANSPORT,
                                target,
                                version_cap=version_cap,
@@ -165,12 +188,18 @@ def get_client(target, version_cap=None, serializer=None):
 
 def get_server(target, endpoints, serializer=None):
     assert TRANSPORT is not None
-    serializer = RequestContextSerializer(serializer)
+
+    if profiler:
+        serializer = ProfilerRequestContextSerializer(serializer)
+    else:
+        serializer = RequestContextSerializer(serializer)
+    access_policy = dispatcher.DefaultRPCAccessPolicy
     return messaging.get_rpc_server(TRANSPORT,
                                     target,
                                     endpoints,
                                     executor='eventlet',
-                                    serializer=serializer)
+                                    serializer=serializer,
+                                    access_policy=access_policy)
 
 
 def get_notifier(service, host=None, publisher_id=None):
@@ -186,12 +215,24 @@ def get_versioned_notifier(publisher_id):
     return NOTIFIER.prepare(publisher_id=publisher_id)
 
 
+def if_notifications_enabled(f):
+    """Calls decorated method only if versioned notifications are enabled."""
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        if (NOTIFIER.is_enabled() and
+                CONF.notifications.notification_format in ('both',
+                                                           'versioned')):
+            return f(*args, **kwargs)
+        else:
+            return None
+    return wrapped
+
+
 def create_transport(url):
     exmods = get_allowed_exmods()
     return messaging.get_transport(CONF,
                                    url=url,
-                                   allowed_remote_exmods=exmods,
-                                   aliases=TRANSPORT_ALIASES)
+                                   allowed_remote_exmods=exmods)
 
 
 class LegacyValidatingNotifier(object):
@@ -252,6 +293,7 @@ class LegacyValidatingNotifier(object):
         'compute.instance.power_on.end',
         'compute.instance.power_on.start',
         'compute.instance.reboot.end',
+        'compute.instance.reboot.error',
         'compute.instance.reboot.start',
         'compute.instance.rebuild.end',
         'compute.instance.rebuild.error',
@@ -352,27 +394,14 @@ class LegacyValidatingNotifier(object):
         getattr(self.notifier, priority)(ctxt, event_type, payload)
 
 
-class ClientWrapper(object):
-    def __init__(self, client):
-        self._client = client
-        self.last_access_time = timeutils.utcnow()
-
-    @property
-    def client(self):
-        self.last_access_time = timeutils.utcnow()
-        return self._client
-
-
 class ClientRouter(periodic_task.PeriodicTasks):
-    """Creates and caches RPC clients that route to cells or the default.
-
-    The default client connects to the API cell message queue. The rest of the
-    clients connect to compute cell message queues.
+    """Creates RPC clients that honor the context's RPC transport
+    or provides a default.
     """
+
     def __init__(self, default_client):
         super(ClientRouter, self).__init__(CONF)
-        self.clients = {}
-        self.clients['default'] = ClientWrapper(default_client)
+        self.default_client = default_client
         self.target = default_client.target
         self.version_cap = default_client.version_cap
         # NOTE(melwitt): Cells v1 does its own serialization and won't
@@ -381,55 +410,11 @@ class ClientRouter(periodic_task.PeriodicTasks):
         # Prevent this empty context from overwriting the thread local copy
         self.run_periodic_tasks(nova.context.RequestContext(overwrite=False))
 
-    def _client(self, context, cell_mapping=None):
-        if cell_mapping:
-            client_id = cell_mapping.uuid
+    def client(self, context):
+        transport = context.mq_connection
+        if transport:
+            return messaging.RPCClient(transport, self.target,
+                                       version_cap=self.version_cap,
+                                       serializer=self.serializer)
         else:
-            client_id = 'default'
-
-        try:
-            client = self.clients[client_id].client
-        except KeyError:
-            transport = create_transport(cell_mapping.transport_url)
-            client = messaging.RPCClient(transport, self.target,
-                                         version_cap=self.version_cap,
-                                         serializer=self.serializer)
-            self.clients[client_id] = ClientWrapper(client)
-
-        return client
-
-    @periodic_task.periodic_task
-    def _remove_stale_clients(self, context):
-        timeout = 60
-
-        def stale(client_id, last_access_time):
-            if timeutils.is_older_than(last_access_time, timeout):
-                LOG.debug('Removing stale RPC client: %s as it was last '
-                          'accessed at %s', client_id, last_access_time)
-                return True
-            return False
-
-        # Never expire the default client
-        items_copy = list(self.clients.items())
-        for client_id, client_wrapper in items_copy:
-            if (client_id != 'default' and
-                    stale(client_id, client_wrapper.last_access_time)):
-                del self.clients[client_id]
-
-    def by_instance(self, context, instance):
-        try:
-            cell_mapping = objects.InstanceMapping.get_by_instance_uuid(
-                               context, instance.uuid).cell_mapping
-        except nova.exception.InstanceMappingNotFound:
-            # Not a cells v2 deployment
-            cell_mapping = None
-        return self._client(context, cell_mapping=cell_mapping)
-
-    def by_host(self, context, host):
-        try:
-            cell_mapping = objects.HostMapping.get_by_host(
-                               context, host).cell_mapping
-        except nova.exception.HostMappingNotFound:
-            # Not a cells v2 deployment
-            cell_mapping = None
-        return self._client(context, cell_mapping=cell_mapping)
+            return self.default_client

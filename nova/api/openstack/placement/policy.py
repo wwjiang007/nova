@@ -35,8 +35,7 @@ def placement_init():
         # convenient for initial exploration. We will need to
         # determine how to manage authorization/policy and
         # implement that, probably per handler.
-        rules = policy.Rules.load_json(
-            jsonutils.dumps({'placement': 'role:admin'}))
+        rules = policy.Rules.load(jsonutils.dumps({'placement': 'role:admin'}))
         # Enforcer is initialized so that the above rule is loaded in and no
         # policy file is read.
         # TODO(alaski): Register a default rule rather than loading it in like
@@ -61,8 +60,8 @@ def placement_authorize(context, action, target=None):
     """
     placement_init()
     if target is None:
-        target = {'project_id': context.tenant,
-                  'user_id': context.user}
+        target = {'project_id': context.project_id,
+                  'user_id': context.user_id}
     credentials = context.to_policy_values()
     # TODO(alaski): Change this to use authorize() when rules are registered.
     # noqa the following line because a hacking check disallows using enforce.

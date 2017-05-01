@@ -21,6 +21,7 @@ from oslo_config import cfg
 from oslo_serialization import jsonutils
 from oslo_utils import units
 
+from nova.objects import fields as obj_fields
 from nova.tests.unit.virt.hyperv import test_base
 from nova.virt.hyperv import constants
 from nova.virt.hyperv import hostops
@@ -133,6 +134,26 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
         self.assertEqual(0, ret_val['used_video_ram'])
         self._hostops._hostutils.get_remotefx_gpu_info.assert_not_called()
 
+    @mock.patch.object(hostops.objects, 'NUMACell')
+    @mock.patch.object(hostops.objects, 'NUMATopology')
+    def test_get_host_numa_topology(self, mock_NUMATopology, mock_NUMACell):
+        numa_node = {'id': mock.sentinel.id, 'memory': mock.sentinel.memory,
+                     'memory_usage': mock.sentinel.memory_usage,
+                     'cpuset': mock.sentinel.cpuset,
+                     'cpu_usage': mock.sentinel.cpu_usage}
+        self._hostops._hostutils.get_numa_nodes.return_value = [
+            numa_node.copy()]
+
+        result = self._hostops._get_host_numa_topology()
+
+        self.assertEqual(mock_NUMATopology.return_value, result)
+        mock_NUMACell.assert_called_once_with(
+            pinned_cpus=set([]), mempages=[], siblings=[], **numa_node)
+        mock_NUMATopology.assert_called_once_with(
+            cells=[mock_NUMACell.return_value])
+
+    @mock.patch.object(hostops.HostOps, '_get_pci_passthrough_devices')
+    @mock.patch.object(hostops.HostOps, '_get_host_numa_topology')
     @mock.patch.object(hostops.HostOps, '_get_remotefx_gpu_info')
     @mock.patch.object(hostops.HostOps, '_get_cpu_info')
     @mock.patch.object(hostops.HostOps, '_get_memory_info')
@@ -143,7 +164,8 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
                                     mock_get_storage_info_gb,
                                     mock_get_hypervisor_version,
                                     mock_get_memory_info, mock_get_cpu_info,
-                                    mock_get_gpu_info):
+                                    mock_get_gpu_info, mock_get_numa_topology,
+                                    mock_get_pci_devices):
         mock_get_storage_info_gb.return_value = (mock.sentinel.LOCAL_GB,
                                                  mock.sentinel.LOCAL_GB_FREE,
                                                  mock.sentinel.LOCAL_GB_USED)
@@ -153,6 +175,9 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
         mock_cpu_info = self._get_mock_cpu_info()
         mock_get_cpu_info.return_value = mock_cpu_info
         mock_get_hypervisor_version.return_value = mock.sentinel.VERSION
+        mock_get_numa_topology.return_value._to_json.return_value = (
+            mock.sentinel.numa_topology_json)
+        mock_get_pci_devices.return_value = mock.sentinel.pcis
 
         mock_gpu_info = self._get_mock_gpu_info()
         mock_get_gpu_info.return_value = mock_gpu_info
@@ -162,6 +187,7 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
         mock_get_memory_info.assert_called_once_with()
         mock_get_cpu_info.assert_called_once_with()
         mock_get_hypervisor_version.assert_called_once_with()
+        mock_get_pci_devices.assert_called_once_with()
         expected = {'supported_instances': [("i686", "hyperv", "hvm"),
                                             ("x86_64", "hyperv", "hvm")],
                     'hypervisor_hostname': mock_node(),
@@ -174,12 +200,35 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
                     'vcpus': self.FAKE_NUM_CPUS,
                     'vcpus_used': 0,
                     'hypervisor_type': 'hyperv',
-                    'numa_topology': None,
+                    'numa_topology': mock.sentinel.numa_topology_json,
                     'remotefx_available_video_ram': 2048,
                     'remotefx_gpu_info': mock.sentinel.FAKE_GPU_INFO,
                     'remotefx_total_video_ram': 4096,
+                    'pci_passthrough_devices': mock.sentinel.pcis,
                     }
         self.assertEqual(expected, response)
+
+    @mock.patch.object(hostops.jsonutils, 'dumps')
+    def test_get_pci_passthrough_devices(self, mock_jsonutils_dumps):
+        mock_pci_dev = {'vendor_id': 'fake_vendor_id',
+                        'product_id': 'fake_product_id',
+                        'dev_id': 'fake_dev_id',
+                        'address': 'fake_address'}
+        mock_get_pcis = self._hostops._hostutils.get_pci_passthrough_devices
+        mock_get_pcis.return_value = [mock_pci_dev]
+
+        expected_label = 'label_%(vendor_id)s_%(product_id)s' % {
+            'vendor_id': mock_pci_dev['vendor_id'],
+            'product_id': mock_pci_dev['product_id']}
+        expected_pci_dev = mock_pci_dev.copy()
+        expected_pci_dev.update(dev_type=obj_fields.PciDeviceType.STANDARD,
+                                label= expected_label,
+                                numa_node=None)
+
+        result = self._hostops._get_pci_passthrough_devices()
+
+        self.assertEqual(mock_jsonutils_dumps.return_value, result)
+        mock_jsonutils_dumps.assert_called_once_with([expected_pci_dev])
 
     def _test_host_power_action(self, action):
         self._hostops._hostutils.host_power_action = mock.Mock()

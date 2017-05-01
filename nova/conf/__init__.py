@@ -39,7 +39,6 @@ from nova.conf import floating_ips
 from nova.conf import glance
 from nova.conf import guestfs
 from nova.conf import hyperv
-from nova.conf import image_file_url
 from nova.conf import ipv6
 from nova.conf import ironic
 from nova.conf import key_manager
@@ -60,11 +59,12 @@ from nova.conf import remote_debug
 from nova.conf import scheduler
 from nova.conf import serial_console
 from nova.conf import service
+from nova.conf import service_token
 from nova.conf import servicegroup
 from nova.conf import spice
 from nova.conf import ssl
 from nova.conf import upgrade_levels
-from nova.conf import virt
+from nova.conf import vendordata
 from nova.conf import vmware
 from nova.conf import vnc
 from nova.conf import workarounds
@@ -95,7 +95,6 @@ glance.register_opts(CONF)
 guestfs.register_opts(CONF)
 hyperv.register_opts(CONF)
 mks.register_opts(CONF)
-image_file_url.register_opts(CONF)
 ipv6.register_opts(CONF)
 ironic.register_opts(CONF)
 key_manager.register_opts(CONF)
@@ -114,11 +113,12 @@ rdp.register_opts(CONF)
 scheduler.register_opts(CONF)
 serial_console.register_opts(CONF)
 service.register_opts(CONF)
+service_token.register_opts(CONF)
 servicegroup.register_opts(CONF)
 spice.register_opts(CONF)
 ssl.register_opts(CONF)
 upgrade_levels.register_opts(CONF)
-virt.register_opts(CONF)
+vendordata.register_opts(CONF)
 vmware.register_opts(CONF)
 vnc.register_opts(CONF)
 workarounds.register_opts(CONF)

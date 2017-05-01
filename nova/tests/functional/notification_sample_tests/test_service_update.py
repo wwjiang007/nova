@@ -14,6 +14,7 @@
 
 from oslo_utils import fixture as utils_fixture
 
+from nova.tests import fixtures
 from nova.tests.functional.notification_sample_tests \
     import notification_sample_base
 from nova.tests.unit.api.openstack.compute import test_services
@@ -29,6 +30,7 @@ class TestServiceUpdateNotificationSample(
         self.stub_out("nova.db.service_update",
                       test_services.fake_service_update)
         self.useFixture(utils_fixture.TimeFixture(test_services.fake_utcnow()))
+        self.useFixture(fixtures.SingleCellSimple())
 
     def test_service_enable(self):
         body = {'host': 'host1',
@@ -56,7 +58,6 @@ class TestServiceUpdateNotificationSample(
         body = {'host': 'host1',
                 'binary': 'nova-compute',
                 'forced_down': True}
-        self.admin_api.microversion = '2.12'
         self.admin_api.api_put('os-services/force-down', body)
         self._verify_notification('service-update',
                                   replacements={'forced_down': True,

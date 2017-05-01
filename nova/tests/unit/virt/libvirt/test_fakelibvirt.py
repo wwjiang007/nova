@@ -82,7 +82,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
     def test_openAuth_accepts_None_uri_by_default(self):
         conn_method = self.get_openAuth_curry_func()
         conn = conn_method(None)
-        self.assertNotEqual(conn, None, "Connecting to fake libvirt failed")
+        self.assertIsNotNone(conn, "Connecting to fake libvirt failed")
 
     def test_openAuth_can_refuse_None_uri(self):
         conn_method = self.get_openAuth_curry_func()
@@ -210,30 +210,9 @@ class FakeLibvirtTests(test.NoDBTestCase):
         dom.managedSaveRemove(0)
         self.assertEqual(dom.hasManagedSaveImage(0), 0)
 
-    def test_listDomainsId_and_lookupById(self):
-        conn = self.get_openAuth_curry_func()('qemu:///system')
-        self.assertEqual(conn.listDomainsID(), [])
-        conn.defineXML(get_vm_xml())
-        dom = conn.lookupByName('testname')
-        dom.createWithFlags(0)
-        self.assertEqual(len(conn.listDomainsID()), 1)
-
-        dom_id = conn.listDomainsID()[0]
-        self.assertEqual(conn.lookupByID(dom_id), dom)
-
-        dom_id = conn.listDomainsID()[0]
-        try:
-            conn.lookupByID(dom_id + 1)
-        except libvirt.libvirtError as e:
-            self.assertEqual(e.get_error_code(), libvirt.VIR_ERR_NO_DOMAIN)
-            self.assertEqual(e.get_error_domain(), libvirt.VIR_FROM_QEMU)
-            return
-        raise self.failureException("Looking up an invalid domain ID didn't "
-                                    "raise libvirtError")
-
     def test_define_and_retrieve(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')
-        self.assertEqual(conn.listDomainsID(), [])
+        self.assertEqual(conn.listAllDomains(), [])
         conn.defineXML(get_vm_xml())
         dom = conn.lookupByName('testname')
         xml = dom.XMLDesc(0)
@@ -241,7 +220,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
 
     def _test_accepts_source_type(self, source_type):
         conn = self.get_openAuth_curry_func()('qemu:///system')
-        self.assertEqual(conn.listDomainsID(), [])
+        self.assertEqual(conn.listAllDomains(), [])
         conn.defineXML(get_vm_xml(source_type=source_type))
         dom = conn.lookupByName('testname')
         xml = dom.XMLDesc(0)
@@ -263,7 +242,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
 
     def _test_network_type_sticks(self, network_type):
         conn = self.get_openAuth_curry_func()('qemu:///system')
-        self.assertEqual(conn.listDomainsID(), [])
+        self.assertEqual(conn.listAllDomains(), [])
         conn.defineXML(get_vm_xml(interface_type=network_type))
         dom = conn.lookupByName('testname')
         xml = dom.XMLDesc(0)
@@ -388,7 +367,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
                          libvirt.VIR_CPU_COMPARE_IDENTICAL)
 
     def test_numa_topology_generation(self):
-        topology = b"""<topology>
+        topology = """<topology>
   <cells num="2">
     <cell id="0">
       <memory unit="KiB">7870000</memory>
@@ -413,10 +392,9 @@ class FakeLibvirtTests(test.NoDBTestCase):
   </cells>
 </topology>
 """
-        host_topology = libvirt.HostInfo._gen_numa_topology(
-                                               cpu_nodes=2, cpu_sockets=1,
-                                               cpu_cores=2, cpu_threads=2,
-                                               kb_mem=15740000)
+        host_topology = libvirt.NUMATopology(
+            cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2,
+            kb_mem=15740000)
         self.assertEqual(host_topology.to_xml(),
                          topology)
 
@@ -488,8 +466,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
 </device>"""
 
         # create fake pci devices
-        pci_info = libvirt.HostPciSRIOVDevicesInfo()
-        pci_info.create_pci_devices(num_pfs=1, num_vfs=1)
+        pci_info = libvirt.HostPciSRIOVDevicesInfo(num_pfs=1, num_vfs=1)
 
         # generate xml for the created pci devices
         gen_pf = pci_info.get_device_by_name('pci_0000_81_00_0')

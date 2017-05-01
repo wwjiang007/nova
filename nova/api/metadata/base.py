@@ -31,13 +31,12 @@ from nova.api.metadata import password
 from nova.api.metadata import vendordata
 from nova.api.metadata import vendordata_dynamic
 from nova.api.metadata import vendordata_json
-from nova import availability_zones as az
 from nova import block_device
 from nova.cells import opts as cells_opts
 from nova.cells import rpcapi as cells_rpcapi
 import nova.conf
 from nova import context
-from nova.i18n import _LI, _LW
+from nova import exception
 from nova import network
 from nova.network.security_group import openstack_driver
 from nova import objects
@@ -72,6 +71,7 @@ HAVANA = '2013-10-17'
 LIBERTY = '2015-10-15'
 NEWTON_ONE = '2016-06-30'
 NEWTON_TWO = '2016-10-06'
+OCATA = '2017-02-22'
 
 OPENSTACK_VERSIONS = [
     FOLSOM,
@@ -80,6 +80,7 @@ OPENSTACK_VERSIONS = [
     LIBERTY,
     NEWTON_ONE,
     NEWTON_TWO,
+    OCATA,
 ]
 
 VERSION = "version"
@@ -128,8 +129,7 @@ class InstanceMetadata(object):
         self.instance = instance
         self.extra_md = extra_md
 
-        self.availability_zone = az.get_instance_availability_zone(ctxt,
-                                                                   instance)
+        self.availability_zone = instance.get('availability_zone')
 
         secgroup_api = openstack_driver.get_openstack_security_group_driver()
         self.security_groups = secgroup_api.get_instance_security_groups(
@@ -371,19 +371,19 @@ class InstanceMetadata(object):
             metadata['project_id'] = self.instance.project_id
 
         if self._check_os_version(NEWTON_ONE, version):
-            metadata['devices'] = self._get_device_metadata()
+            metadata['devices'] = self._get_device_metadata(version)
 
         self.set_mimetype(MIME_TYPE_APPLICATION_JSON)
         return jsonutils.dump_as_bytes(metadata)
 
-    def _get_device_metadata(self):
+    def _get_device_metadata(self, version):
         """Build a device metadata dict based on the metadata objects. This is
         done here in the metadata API as opposed to in the objects themselves
         because the metadata dict is part of the guest API and thus must be
         controlled.
         """
         device_metadata_list = []
-
+        vif_vlans_supported = self._check_os_version(OCATA, version)
         if self.instance.device_metadata is not None:
             for device in self.instance.device_metadata.devices:
                 device_metadata = {}
@@ -412,8 +412,19 @@ class InstanceMetadata(object):
                         address = device.bus.address
 
                 if isinstance(device, metadata_obj.NetworkInterfaceMetadata):
+                    vlan = None
+                    if vif_vlans_supported and 'vlan' in device:
+                        vlan = device.vlan
+
+                    # Skip devices without tags on versions that
+                    # don't support vlans
+                    if not (vlan or 'tags' in device):
+                        continue
+
                     device_metadata['type'] = 'nic'
                     device_metadata['mac'] = device.mac
+                    if vlan:
+                        device_metadata['vlan'] = vlan
                 elif isinstance(device, metadata_obj.DiskMetadata):
                     device_metadata['type'] = 'disk'
                     # serial and path are optional parameters
@@ -429,10 +440,10 @@ class InstanceMetadata(object):
 
                 device_metadata['bus'] = bus
                 device_metadata['address'] = address
-                device_metadata['tags'] = device.tags
+                if 'tags' in device:
+                    device_metadata['tags'] = device.tags
 
                 device_metadata_list.append(device_metadata)
-
         return device_metadata_list
 
     def _handle_content(self, path_tokens):
@@ -506,8 +517,8 @@ class InstanceMetadata(object):
                     values = self.vendordata_providers[provider].get()
                     for key in list(values):
                         if key in j:
-                            LOG.warning(_LW('Removing duplicate metadata key: '
-                                            '%s'), key, instance=self.instance)
+                            LOG.warning('Removing duplicate metadata key: %s',
+                                        key, instance=self.instance)
                             del values[key]
                     j.update(values)
 
@@ -615,7 +626,7 @@ class InstanceMetadata(object):
                 path = 'openstack/%s/%s' % (version, VD2_JSON_NAME)
                 yield (path, self.lookup(path))
 
-        for (cid, content) in six.iteritems(self.content):
+        for (cid, content) in self.content.items():
             yield ('%s/%s/%s' % ("openstack", CONTENT_DIR, cid), content)
 
 
@@ -652,7 +663,7 @@ class RouteConfiguration(object):
 def get_metadata_by_address(address):
     ctxt = context.get_admin_context()
     fixed_ip = network.API().get_fixed_ip_by_address(ctxt, address)
-    LOG.info(_LI('Fixed IP %(ip)s translates to instance UUID %(uuid)s'),
+    LOG.info('Fixed IP %(ip)s translates to instance UUID %(uuid)s',
              {'ip': address, 'uuid': fixed_ip['instance_uuid']})
 
     return get_metadata_by_instance_id(fixed_ip['instance_uuid'],
@@ -662,12 +673,23 @@ def get_metadata_by_address(address):
 
 def get_metadata_by_instance_id(instance_id, address, ctxt=None):
     ctxt = ctxt or context.get_admin_context()
-    instance = objects.Instance.get_by_uuid(
-        ctxt, instance_id, expected_attrs=['ec2_ids', 'flavor', 'info_cache',
-                                           'metadata', 'system_metadata',
-                                           'security_groups', 'keypairs',
-                                           'device_metadata'])
-    return InstanceMetadata(instance, address)
+    attrs = ['ec2_ids', 'flavor', 'info_cache',
+             'metadata', 'system_metadata',
+             'security_groups', 'keypairs',
+             'device_metadata']
+    try:
+        im = objects.InstanceMapping.get_by_instance_uuid(ctxt, instance_id)
+    except exception.InstanceMappingNotFound:
+        LOG.warning('Instance mapping for %(uuid)s not found; '
+                    'cell setup is incomplete', {'uuid': instance_id})
+        instance = objects.Instance.get_by_uuid(ctxt, instance_id,
+                                                expected_attrs=attrs)
+        return InstanceMetadata(instance, address)
+
+    with context.target_cell(ctxt, im.cell_mapping):
+        instance = objects.Instance.get_by_uuid(ctxt, instance_id,
+                                                expected_attrs=attrs)
+        return InstanceMetadata(instance, address)
 
 
 def _format_instance_mapping(ctxt, instance):

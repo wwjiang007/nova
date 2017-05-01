@@ -27,15 +27,16 @@ from nova.tests.functional.api import client
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 from nova.tests.unit import policy_fixture
+from nova.virt import fake
 
 import nova.scheduler.utils
 import nova.servicegroup
 import nova.tests.unit.image.fake
 
-CONF = cfg.CONF
-
 # An alternate project id
 PROJECT_ID_ALT = "616c6c796f7572626173656172656f73"
+
+CONF = cfg.CONF
 
 
 class ServerGroupTestBase(test.TestCase,
@@ -44,14 +45,12 @@ class ServerGroupTestBase(test.TestCase,
     api_major_version = 'v2.1'
     microversion = None
 
-    # Note(gibi): RamFilter is needed to ensure that
-    # test_boot_servers_with_affinity_no_valid_host behaves as expected
-    _enabled_filters = ['ServerGroupAntiAffinityFilter',
-                        'ServerGroupAffinityFilter',
-                        'RamFilter']
+    _enabled_filters = (CONF.filter_scheduler.enabled_filters
+                        + ['ServerGroupAntiAffinityFilter',
+                           'ServerGroupAffinityFilter'])
 
     # Override servicegroup parameters to make the tests run faster
-    _service_down_time = 2
+    _service_down_time = 10
     _report_interval = 1
 
     anti_affinity = {'name': 'fake-name-1', 'policies': ['anti-affinity']}
@@ -64,13 +63,18 @@ class ServerGroupTestBase(test.TestCase,
         super(ServerGroupTestBase, self).setUp()
         self.flags(enabled_filters=self._enabled_filters,
                    group='filter_scheduler')
+        # NOTE(sbauza): Don't verify VCPUS and disks given the current nodes.
+        self.flags(cpu_allocation_ratio=9999.0)
+        self.flags(disk_allocation_ratio=9999.0)
         self.flags(weight_classes=self._get_weight_classes(),
                    group='filter_scheduler')
         self.flags(service_down_time=self._service_down_time)
         self.flags(report_interval=self._report_interval)
 
         self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
 
+        self.useFixture(nova_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
@@ -106,15 +110,42 @@ class ServerGroupTestBase(test.TestCase,
         return found_server
 
 
+class ServerGroupFakeDriver(fake.SmallFakeDriver):
+    """A specific fake driver for our tests.
+
+    Here, we only want to be RAM-bound.
+    """
+
+    vcpus = 1000
+    memory_mb = 8192
+    local_gb = 100000
+
+
+# A fake way to change the FakeDriver given we don't have a possibility yet to
+# modify the resources for the FakeDriver
+def _fake_load_compute_driver(virtapi, compute_driver=None):
+    return ServerGroupFakeDriver(virtapi)
+
+
 class ServerGroupTestV21(ServerGroupTestBase):
 
     def setUp(self):
         super(ServerGroupTestV21, self).setUp()
 
-        self.start_service('network', manager=CONF.network_manager)
+        # TODO(sbauza): Remove that once there is a way to have a custom
+        # FakeDriver supporting different resources. Note that we can't also
+        # simply change the config option for choosing our custom fake driver
+        # as the mocked method only accepts to load drivers in the nova.virt
+        # tree.
+        self.stub_out('nova.virt.driver.load_compute_driver',
+                      _fake_load_compute_driver)
         self.compute = self.start_service('compute')
 
         # NOTE(gibi): start a second compute host to be able to test affinity
+        # NOTE(sbauza): Make sure the FakeDriver returns a different nodename
+        # for the second compute node.
+        fake.set_nodes(['host2'])
+        self.addCleanup(fake.restore_nodes)
         self.compute2 = self.start_service('compute', host='host2')
         fake_network.set_stub_network_methods(self)
 
@@ -231,7 +262,7 @@ class ServerGroupTestV21(ServerGroupTestBase):
     def test_boot_servers_with_affinity_overquota(self):
         # Tests that we check server group member quotas and cleanup created
         # resources when we fail with OverQuota.
-        self.flags(quota_server_group_members=1)
+        self.flags(server_group_members=1, group='quota')
         # make sure we start with 0 servers
         servers = self.api.get_servers(detail=False)
         self.assertEqual(0, len(servers))
@@ -335,6 +366,7 @@ class ServerGroupTestV21(ServerGroupTestBase):
 
     def test_migrate_with_anti_affinity(self):
         # Start additional host to test migration with anti-affinity
+        fake.set_nodes(['host3'])
         self.start_service('compute', host='host3')
 
         created_group = self.api.post_server_groups(self.anti_affinity)
@@ -462,7 +494,7 @@ class ServerGroupTestV21(ServerGroupTestBase):
 class ServerGroupAffinityConfTest(ServerGroupTestBase):
     api_major_version = 'v2.1'
     # Load only anti-affinity filter so affinity will be missing
-    _enabled_filters = 'ServerGroupAntiAffinityFilter'
+    _enabled_filters = ['ServerGroupAntiAffinityFilter']
 
     @mock.patch('nova.scheduler.utils._SUPPORTS_AFFINITY', None)
     def test_affinity_no_filter(self):
@@ -479,7 +511,7 @@ class ServerGroupAffinityConfTest(ServerGroupTestBase):
 class ServerGroupAntiAffinityConfTest(ServerGroupTestBase):
     api_major_version = 'v2.1'
     # Load only affinity filter so anti-affinity will be missing
-    _enabled_filters = 'ServerGroupAffinityFilter'
+    _enabled_filters = ['ServerGroupAffinityFilter']
 
     @mock.patch('nova.scheduler.utils._SUPPORTS_ANTI_AFFINITY', None)
     def test_anti_affinity_no_filter(self):

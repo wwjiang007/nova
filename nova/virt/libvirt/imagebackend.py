@@ -65,9 +65,9 @@ class Image(object):
         """
         if (CONF.ephemeral_storage_encryption.enabled and
                 not self._supports_encryption()):
-            raise exception.NovaException(_('Incompatible settings: '
-                                  'ephemeral storage encryption is supported '
-                                  'only for LVM images.'))
+            msg = _('Incompatible settings: ephemeral storage encryption is '
+                    'supported only for LVM images.')
+            raise exception.InternalError(msg)
 
         self.path = path
 
@@ -152,7 +152,7 @@ class Image(object):
         tune_items = ['disk_read_bytes_sec', 'disk_read_iops_sec',
             'disk_write_bytes_sec', 'disk_write_iops_sec',
             'disk_total_bytes_sec', 'disk_total_iops_sec']
-        for key, value in six.iteritems(extra_specs):
+        for key, value in extra_specs.items():
             scope = key.split(':')
             if len(scope) > 1 and scope[0] == 'quota':
                 if scope[1] in tune_items:
@@ -337,7 +337,7 @@ class Image(object):
                 with open(self.disk_info_path) as disk_info_file:
                     line = disk_info_file.read().rstrip()
                     dct = _dict_from_line(line)
-                    for path, driver_format in six.iteritems(dct):
+                    for path, driver_format in dct.items():
                         if path == self.path:
                             return driver_format
             driver_format = self._get_driver_format()
@@ -685,7 +685,7 @@ class Lvm(Image):
         def create_lvm_image(base, size):
             base_size = disk.get_disk_size(base)
             self.verify_base_size(base, size, base_size=base_size)
-            resize = size > base_size
+            resize = size > base_size if size else False
             size = size if resize else base_size
             lvm.create_volume(self.vg, self.lv,
                                          size, sparse=self.sparse)
@@ -718,7 +718,7 @@ class Lvm(Image):
                         LOG.error(_LE("Failed to retrieve ephemeral encryption"
                                       " key"))
             else:
-                raise exception.NovaException(
+                raise exception.InternalError(
                     _("Instance disk to be encrypted but no context provided"))
         # Generate images with specified size right on volume
         if generated and size:
@@ -1026,11 +1026,18 @@ class Ploop(Image):
 
         self.resolve_driver_format()
 
+    # Create new ploop disk (in case of epehemeral) or
+    # copy ploop disk from glance image
     def create_image(self, prepare_template, base, size, *args, **kwargs):
-        filename = os.path.split(base)[-1]
+        filename = os.path.basename(base)
 
+        # Copy main file of ploop disk, restore DiskDescriptor.xml for it
+        # and resize if necessary
         @utils.synchronized(filename, external=True, lock_path=self.lock_path)
-        def create_ploop_image(base, target, size):
+        def _copy_ploop_image(base, target, size):
+            # Ploop disk is a directory with data file(root.hds) and
+            # DiskDescriptor.xml, so create this dir
+            fileutils.ensure_tree(target)
             image_path = os.path.join(target, "root.hds")
             libvirt_utils.copy_image(base, image_path)
             utils.execute('ploop', 'restore-descriptor', '-f', self.pcs_format,
@@ -1038,7 +1045,28 @@ class Ploop(Image):
             if size:
                 self.resize_image(size)
 
-        if not os.path.exists(self.path):
+        # Generating means that we create empty ploop disk
+        generating = 'image_id' not in kwargs
+        remove_func = functools.partial(fileutils.delete_if_exists,
+                                        remove=shutil.rmtree)
+        if generating:
+            if os.path.exists(self.path):
+                return
+            with fileutils.remove_path_on_error(self.path, remove=remove_func):
+                prepare_template(target=self.path, *args, **kwargs)
+        else:
+            # Create ploop disk from glance image
+            if not os.path.exists(base):
+                prepare_template(target=base, *args, **kwargs)
+            else:
+                # Disk already exists in cache, just update time
+                libvirt_utils.update_mtime(base)
+            self.verify_base_size(base, size)
+
+            if os.path.exists(self.path):
+                return
+
+            # Get format for ploop disk
             if CONF.force_raw_images:
                 self.pcs_format = "raw"
             else:
@@ -1050,27 +1078,16 @@ class Ploop(Image):
                 elif format == "raw":
                     self.pcs_format = "raw"
                 else:
-                    reason = _("PCS doesn't support images in %s format."
-                                " You should either set force_raw_images=True"
-                                " in config or upload an image in ploop"
-                                " or raw format.") % format
+                    reason = _("Ploop image backend doesn't support images in"
+                               " %s format. You should either set"
+                               " force_raw_images=True in config or upload an"
+                               " image in ploop or raw format.") % format
                     raise exception.ImageUnacceptable(
                                         image_id=kwargs["image_id"],
                                         reason=reason)
 
-        if not os.path.exists(base):
-            prepare_template(target=base, *args, **kwargs)
-        self.verify_base_size(base, size)
-
-        if os.path.exists(self.path):
-            return
-
-        fileutils.ensure_tree(self.path)
-
-        remove_func = functools.partial(fileutils.delete_if_exists,
-                                        remove=shutil.rmtree)
-        with fileutils.remove_path_on_error(self.path, remove=remove_func):
-            create_ploop_image(base, self.path, size)
+            with fileutils.remove_path_on_error(self.path, remove=remove_func):
+                _copy_ploop_image(base, self.path, size)
 
     def resize_image(self, size):
         image = imgmodel.LocalFileImage(self.path, imgmodel.FORMAT_PLOOP)
@@ -1082,6 +1099,9 @@ class Ploop(Image):
                                        'parallels',
                                        target,
                                        out_format)
+
+    def get_model(self, connection):
+        return imgmodel.LocalFileImage(self.path, imgmodel.FORMAT_PLOOP)
 
 
 class Backend(object):

@@ -31,6 +31,7 @@ from oslo_db.sqlalchemy import update_match
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import importutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import six
@@ -68,6 +69,7 @@ from nova.i18n import _, _LI, _LE, _LW
 from nova import quota
 from nova import safe_utils
 
+profiler_sqlalchemy = importutils.try_import('osprofiler.sqlalchemy')
 
 CONF = nova.conf.CONF
 
@@ -109,6 +111,14 @@ def _context_manager_from_context(context):
 def configure(conf):
     main_context_manager.configure(**_get_db_conf(conf.database))
     api_context_manager.configure(**_get_db_conf(conf.api_database))
+
+    if profiler_sqlalchemy and CONF.profiler.enabled \
+            and CONF.profiler.trace_sqlalchemy:
+
+        main_context_manager.append_on_engine_create(
+            lambda eng: profiler_sqlalchemy.add_tracing(sa, eng, "db"))
+        api_context_manager.append_on_engine_create(
+            lambda eng: profiler_sqlalchemy.add_tracing(sa, eng, "db"))
 
 
 def create_context_manager(connection=None):
@@ -471,6 +481,7 @@ def service_get_minimum_version(context, binaries):
         models.Service.binary,
         func.min(models.Service.version)).\
                          filter(models.Service.binary.in_(binaries)).\
+                         filter(models.Service.deleted == 0).\
                          filter(models.Service.forced_down == false()).\
                          group_by(models.Service.binary)
     return dict(min_versions)
@@ -614,6 +625,8 @@ def _compute_node_select(context, filters=None, limit=None, marker=None):
     if "hypervisor_hostname" in filters:
         hyp_hostname = filters["hypervisor_hostname"]
         select = select.where(cn_tbl.c.hypervisor_hostname == hyp_hostname)
+    if "mapped" in filters:
+        select = select.where(cn_tbl.c.mapped < filters['mapped'])
     if marker is not None:
         try:
             compute_node_get(context, marker)
@@ -622,7 +635,7 @@ def _compute_node_select(context, filters=None, limit=None, marker=None):
         select = select.where(cn_tbl.c.id > marker)
     if limit is not None:
         select = select.limit(limit)
-    # Explictly order by id, so we're not dependent on the native sort
+    # Explicitly order by id, so we're not dependent on the native sort
     # order of the underlying DB.
     select = select.order_by(asc("id"))
     return select
@@ -689,6 +702,12 @@ def compute_node_get_all_by_host(context, host):
 @pick_context_manager_reader
 def compute_node_get_all(context):
     return _compute_node_fetchall(context)
+
+
+@pick_context_manager_reader
+def compute_node_get_all_mapped_less_than(context, mapped_less_than):
+    return _compute_node_fetchall(context,
+                                  {'mapped': mapped_less_than})
 
 
 @pick_context_manager_reader
@@ -1874,6 +1893,11 @@ def instance_destroy(context, instance_uuid, constraint=None):
         resource_id=instance_uuid).delete()
     context.session.query(models.ConsoleAuthToken).filter_by(
         instance_uuid=instance_uuid).delete()
+    # NOTE(cfriesen): We intentionally do not soft-delete entries in the
+    # instance_actions or instance_actions_events tables because they
+    # can be used by operators to find out what actions were performed on a
+    # deleted instance.  Both of these tables are special-cased in
+    # _archive_deleted_rows_for_table().
 
     return instance_ref
 
@@ -2131,7 +2155,7 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
 
     # Make a copy of the filters dictionary to use going forward, as we'll
     # be modifying it and we shouldn't affect the caller's use of it.
-    filters = filters.copy()
+    filters = copy.deepcopy(filters)
 
     if 'changes-since' in filters:
         changes_since = timeutils.normalize_time(filters['changes-since'])
@@ -2229,7 +2253,6 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
     if query_prefix is None:
         return []
     query_prefix = _regex_instance_filter(query_prefix, filters)
-    query_prefix = _tag_instance_filter(context, query_prefix, filters)
 
     # paginate query
     if marker is not None:
@@ -2248,65 +2271,6 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
         raise exception.InvalidSortKey()
 
     return _instances_fill_metadata(context, query_prefix.all(), manual_joins)
-
-
-def _tag_instance_filter(context, query, filters):
-    """Applies tag filtering to an Instance query.
-
-    Returns the updated query.  This method alters filters to remove
-    keys that are tags.  This filters on resources by tags - this
-    method assumes that the caller will take care of access control
-
-    :param context: request context object
-    :param query: query to apply filters to
-    :param filters: dictionary of filters
-    """
-    if filters.get('filter') is None:
-        return query
-
-    model = models.Instance
-    model_metadata = models.InstanceMetadata
-    model_uuid = model_metadata.instance_uuid
-
-    or_query = None
-
-    def _to_list(val):
-        if isinstance(val, dict):
-            val = val.values()
-        if not isinstance(val, (tuple, list, set)):
-            val = (val,)
-        return val
-
-    for filter_block in filters['filter']:
-        if not isinstance(filter_block, dict):
-            continue
-
-        filter_name = filter_block.get('name')
-        if filter_name is None:
-            continue
-
-        tag_name = filter_name[4:]
-        tag_val = _to_list(filter_block.get('value'))
-
-        if filter_name.startswith('tag-'):
-            if tag_name not in ['key', 'value']:
-                msg = _("Invalid field name: %s") % tag_name
-                raise exception.InvalidParameterValue(err=msg)
-            subq = getattr(model_metadata, tag_name).in_(tag_val)
-            or_query = subq if or_query is None else or_(or_query, subq)
-
-        elif filter_name.startswith('tag:'):
-            subq = model_query(context, model_metadata, (model_uuid,)).\
-                filter_by(key=tag_name).\
-                filter(model_metadata.value.in_(tag_val))
-            query = query.filter(model.uuid.in_(subq))
-
-    if or_query is not None:
-        subq = model_query(context, model_metadata, (model_uuid,)).\
-                filter(or_query)
-        query = query.filter(model.uuid.in_(subq))
-
-    return query
 
 
 def _db_connection_type(db_connection):
@@ -2570,9 +2534,10 @@ def _instance_get_all_query(context, project_only=False, joins=None):
 
 @pick_context_manager_reader_allow_async
 def instance_get_all_by_host(context, host, columns_to_join=None):
+    query = _instance_get_all_query(context, joins=columns_to_join)
     return _instances_fill_metadata(context,
-      _instance_get_all_query(context).filter_by(host=host).all(),
-                              manual_joins=columns_to_join)
+                                    query.filter_by(host=host).all(),
+                                    manual_joins=columns_to_join)
 
 
 def _instance_get_all_uuids_by_host(context, host):
@@ -2742,7 +2707,7 @@ def _instance_update(context, instance_uuid, values, expected, original=None):
     else:
         # Coerce all single values to singleton lists
         expected = {k: [None] if v is None else sqlalchemyutils.to_list(v)
-                       for (k, v) in six.iteritems(expected)}
+                       for (k, v) in expected.items()}
 
     # Extract 'expected_' values from values dict, as these aren't actually
     # updates
@@ -2798,7 +2763,7 @@ def _instance_update(context, instance_uuid, values, expected, original=None):
 
         conflicts_expected = {}
         conflicts_actual = {}
-        for (field, expected_values) in six.iteritems(expected):
+        for (field, expected_values) in expected.items():
             actual = original[field]
             if actual not in expected_values:
                 conflicts_expected[field] = expected_values
@@ -4051,7 +4016,7 @@ def reservation_expire(context):
             reservation.usage.reserved -= reservation.delta
             context.session.add(reservation.usage)
 
-    reservation_query.soft_delete(synchronize_session=False)
+    return reservation_query.soft_delete(synchronize_session=False)
 
 
 ###################
@@ -4510,7 +4475,7 @@ def _security_group_ensure_default(context):
                                 context.user_id,
                                 'security_groups',
                                 1, 0,
-                                CONF.until_refresh,
+                                CONF.quota.until_refresh,
                                 context.session)
         else:
             usage.update({'in_use': int(usage.first().in_use) + 1})
@@ -6047,24 +6012,63 @@ def instance_fault_create(context, values):
 
 
 @pick_context_manager_reader
-def instance_fault_get_by_instance_uuids(context, instance_uuids):
-    """Get all instance faults for the provided instance_uuids."""
+def instance_fault_get_by_instance_uuids(context, instance_uuids,
+                                         latest=False):
+    """Get all instance faults for the provided instance_uuids.
+
+    :param instance_uuids: List of UUIDs of instances to grab faults for
+    :param latest: Optional boolean indicating we should only return the latest
+                   fault for the instance
+    """
     if not instance_uuids:
         return {}
 
-    rows = model_query(context, models.InstanceFault, read_deleted='no').\
-                       filter(models.InstanceFault.instance_uuid.in_(
-                           instance_uuids)).\
-                       order_by(desc("created_at"), desc("id")).\
-                       all()
+    faults_tbl = models.InstanceFault.__table__
+    # NOTE(rpodolyaka): filtering by instance_uuids is performed in both
+    # code branches below for the sake of a better query plan. On change,
+    # make sure to update the other one as well.
+    query = model_query(context, models.InstanceFault,
+                        [faults_tbl],
+                        read_deleted='no')
+
+    if latest:
+        # NOTE(jaypipes): We join instance_faults to a derived table of the
+        # latest faults per instance UUID. The SQL produced below looks like
+        # this:
+        #
+        #  SELECT instance_faults.*
+        #  FROM instance_faults
+        #  JOIN (
+        #    SELECT instance_uuid, MAX(id) AS max_id
+        #    FROM instance_faults
+        #    WHERE instance_uuid IN ( ... )
+        #    AND deleted = 0
+        #    GROUP BY instance_uuid
+        #  ) AS latest_faults
+        #    ON instance_faults.id = latest_faults.max_id;
+        latest_faults = model_query(
+            context, models.InstanceFault,
+            [faults_tbl.c.instance_uuid,
+             sql.func.max(faults_tbl.c.id).label('max_id')],
+            read_deleted='no'
+        ).filter(
+            faults_tbl.c.instance_uuid.in_(instance_uuids)
+        ).group_by(
+            faults_tbl.c.instance_uuid
+        ).subquery(name="latest_faults")
+
+        query = query.join(latest_faults,
+                           faults_tbl.c.id == latest_faults.c.max_id)
+    else:
+        query = query.filter(models.InstanceFault.instance_uuid.in_(
+                                        instance_uuids)).order_by(desc("id"))
 
     output = {}
     for instance_uuid in instance_uuids:
         output[instance_uuid] = []
 
-    for row in rows:
-        data = dict(row)
-        output[row['instance_uuid']].append(data)
+    for row in query:
+        output[row.instance_uuid].append(row._asdict())
 
     return output
 
@@ -6518,25 +6522,6 @@ def archive_deleted_rows(max_rows=None):
         if total_rows_archived >= max_rows:
             break
     return table_to_rows_archived
-
-
-@pick_context_manager_writer
-def aggregate_uuids_online_data_migration(context, max_count):
-    from nova.objects import aggregate
-
-    count_all = 0
-    count_hit = 0
-
-    results = model_query(context, models.Aggregate).filter_by(
-        uuid=None).limit(max_count)
-    for db_agg in results:
-        count_all += 1
-        agg = aggregate.Aggregate._from_db_object(context,
-                                                  aggregate.Aggregate(),
-                                                  db_agg)
-        if 'uuid' in agg:
-            count_hit += 1
-    return count_all, count_hit
 
 
 ####################

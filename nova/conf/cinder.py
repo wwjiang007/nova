@@ -23,7 +23,7 @@ cinder_group = cfg.OptGroup(
 
 cinder_opts = [
     cfg.StrOpt('catalog_info',
-            default='volumev2:cinderv2:publicURL',
+            default='volumev3:cinderv3:publicURL',
             regex='(\w+):(\w+):(.*?)',
             help="""
 Info to match when looking for cinder in the service catalog.
@@ -32,6 +32,9 @@ Possible values:
 
 * Format is separated values of the form:
   <service_type>:<service_name>:<endpoint_type>
+
+Note: Nova does not support the Cinder v1 API since the Nova 15.0.0 Ocata
+release.
 
 Related options:
 
@@ -45,7 +48,10 @@ this template for cinder endpoint
 Possible values:
 
 * URL for cinder endpoint API
-  e.g. http://localhost:8776/v1/%(project_id)s
+  e.g. http://localhost:8776/v2/%(project_id)s
+
+Note: Nova does not support the Cinder v1 API since the Nova 15.0.0 Ocata
+release.
 
 Related options:
 

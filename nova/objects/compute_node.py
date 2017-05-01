@@ -13,13 +13,13 @@
 #    under the License.
 
 
-from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
 import nova.conf
 from nova import db
+from nova.db.sqlalchemy import models
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -27,7 +27,6 @@ from nova.objects import fields
 from nova.objects import pci_device_pool
 
 CONF = nova.conf.CONF
-LOG = logging.getLogger(__name__)
 
 
 @base.NovaObjectRegistry.register
@@ -49,7 +48,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
     # Version 1.14: Added cpu_allocation_ratio and ram_allocation_ratio
     # Version 1.15: Added uuid
     # Version 1.16: Added disk_allocation_ratio
-    VERSION = '1.16'
+    # Version 1.17: Added mapped
+    VERSION = '1.17'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
@@ -90,11 +90,15 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
         'cpu_allocation_ratio': fields.FloatField(),
         'ram_allocation_ratio': fields.FloatField(),
         'disk_allocation_ratio': fields.FloatField(),
+        'mapped': fields.IntegerField(),
         }
 
     def obj_make_compatible(self, primitive, target_version):
         super(ComputeNode, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 17):
+            if 'mapped' in primitive:
+                del primitive['mapped']
         if target_version < (1, 16):
             if 'disk_allocation_ratio' in primitive:
                 del primitive['disk_allocation_ratio']
@@ -200,6 +204,9 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
                     if value == 0.0 and key == 'disk_allocation_ratio':
                         # It's not specified either on the controller
                         value = 1.0
+            elif key == 'mapped':
+                value = 0 if value is None else value
+
             setattr(compute, key, value)
 
         stats = db_compute['stats']
@@ -361,7 +368,9 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     # Version 1.13 ComputeNode version 1.13
     # Version 1.14 ComputeNode version 1.14
     # Version 1.15 Added get_by_pagination()
-    VERSION = '1.15'
+    # Version 1.16: Added get_all_by_uuids()
+    # Version 1.17: Added get_all_by_not_mapped()
+    VERSION = '1.17'
     fields = {
         'objects': fields.ListOfObjectsField('ComputeNode'),
         }
@@ -369,6 +378,14 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     @base.remotable_classmethod
     def get_all(cls, context):
         db_computes = db.compute_node_get_all(context)
+        return base.obj_make_list(context, cls(context), objects.ComputeNode,
+                                  db_computes)
+
+    @base.remotable_classmethod
+    def get_all_by_not_mapped(cls, context, mapped_less_than):
+        """Return ComputeNode records that are not mapped at a certain level"""
+        db_computes = db.compute_node_get_all_mapped_less_than(
+            context, mapped_less_than)
         return base.obj_make_list(context, cls(context), objects.ComputeNode,
                                   db_computes)
 
@@ -409,5 +426,19 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     def get_all_by_host(cls, context, host, use_slave=False):
         db_computes = cls._db_compute_node_get_all_by_host(context, host,
                                                       use_slave=use_slave)
+        return base.obj_make_list(context, cls(context), objects.ComputeNode,
+                                  db_computes)
+
+    @staticmethod
+    @db.select_db_reader_mode
+    def _db_compute_node_get_all_by_uuids(context, compute_uuids):
+        db_computes = context.session.query(models.ComputeNode).filter(
+            models.ComputeNode.uuid.in_(compute_uuids)).all()
+        return db_computes
+
+    @base.remotable_classmethod
+    def get_all_by_uuids(cls, context, compute_uuids):
+        db_computes = cls._db_compute_node_get_all_by_uuids(context,
+                                                            compute_uuids)
         return base.obj_make_list(context, cls(context), objects.ComputeNode,
                                   db_computes)

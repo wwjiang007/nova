@@ -19,9 +19,10 @@ This module provides helper APIs for populating the config.py
 classes based on common operational needs / policies
 """
 
-import six
 
 from nova.pci import utils as pci_utils
+
+MIN_LIBVIRT_ETHERNET_SCRIPT_PATH_NONE = (1, 3, 3)
 
 
 def set_vif_guest_frontend_config(conf, mac, model, driver, queues=None):
@@ -47,7 +48,7 @@ def set_vif_host_backend_bridge_config(conf, brname, tapname=None):
         conf.target_dev = tapname
 
 
-def set_vif_host_backend_ethernet_config(conf, tapname):
+def set_vif_host_backend_ethernet_config(conf, tapname, host):
     """Populate a LibvirtConfigGuestInterface instance
     with host backend details for an externally configured
     host device.
@@ -58,7 +59,16 @@ def set_vif_host_backend_ethernet_config(conf, tapname):
 
     conf.net_type = "ethernet"
     conf.target_dev = tapname
-    conf.script = ""
+    # NOTE(mriedem): Before libvirt 1.3.3, passing script=None results
+    # in errors because /etc/qemu-ifup gets run which is blocked by
+    # AppArmor. Passing script='' between libvirt 1.3.3 and 3.1 will also
+    # result in errors. So we have to check the libvirt version and set
+    # the script value accordingly. Libvirt 3.1 allows and properly handles
+    # both None and '' as no-ops.
+    if host.has_min_version(MIN_LIBVIRT_ETHERNET_SCRIPT_PATH_NONE):
+        conf.script = None
+    else:
+        conf.script = ''
 
 
 def set_vif_host_backend_802qbg_config(conf, devname, managerid,
@@ -108,14 +118,14 @@ def set_vif_host_backend_hw_veb(conf, net_type, devname, vlan,
     """
 
     conf.net_type = net_type
+    conf.vlan = vlan
     if net_type == 'direct':
         conf.source_mode = 'passthrough'
         conf.source_dev = pci_utils.get_ifname_by_pci_address(devname)
         conf.driver_name = 'vhost'
-    else:
+    else:  # net_type == network_model.VNIC_TYPE_DIRECT
         conf.source_dev = devname
         conf.model = None
-        conf.vlan = vlan
     if tapname:
         conf.target_dev = tapname
 
@@ -157,7 +167,7 @@ def set_vif_bandwidth_config(conf, inst_type):
     bandwidth_items = ['vif_inbound_average', 'vif_inbound_peak',
         'vif_inbound_burst', 'vif_outbound_average', 'vif_outbound_peak',
         'vif_outbound_burst']
-    for key, value in six.iteritems(inst_type.get('extra_specs', {})):
+    for key, value in inst_type.get('extra_specs', {}).items():
         scope = key.split(':')
         if len(scope) > 1 and scope[0] == 'quota':
             if scope[1] in bandwidth_items:

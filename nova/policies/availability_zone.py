@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
@@ -22,15 +20,26 @@ POLICY_ROOT = 'os_compute_api:os-availability-zone:%s'
 
 
 availability_zone_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'list',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'detail',
-        check_str=base.RULE_ADMIN_API),
+    base.create_rule_default(
+        POLICY_ROOT % 'list',
+        base.RULE_ADMIN_OR_OWNER,
+        "Lists availability zone information without host information",
+        [
+            {
+                'method': 'GET',
+                'path': 'os-availability-zone'
+            }
+        ]),
+    base.create_rule_default(
+        POLICY_ROOT % 'detail',
+        base.RULE_ADMIN_API,
+        "Lists detailed availability zone information with host information",
+        [
+            {
+                'method': 'GET',
+                'path': '/os-availability-zone/detail'
+            }
+        ])
 ]
 
 

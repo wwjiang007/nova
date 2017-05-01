@@ -11,6 +11,7 @@
 #    under the License.
 
 import mock
+from oslo_serialization import jsonutils
 import six
 import testscenarios
 import webob
@@ -20,18 +21,16 @@ from nova.api.openstack import extensions
 from nova.api.openstack import versioned_method
 from nova.api.openstack import wsgi
 from nova import exception
-from nova import i18n
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import matchers
 from nova.tests.unit import utils
-from oslo_serialization import jsonutils
 
 
 class MicroversionedTest(testscenarios.WithScenarios, test.NoDBTestCase):
 
     scenarios = [
-        ('legacy-microverison', {
+        ('legacy-microversion', {
             'header_name': 'X-OpenStack-Nova-API-Version',
         }),
         ('modern-microversion', {
@@ -47,6 +46,12 @@ class MicroversionedTest(testscenarios.WithScenarios, test.NoDBTestCase):
 
 
 class RequestTest(MicroversionedTest):
+
+    def setUp(self):
+        super(RequestTest, self).setUp()
+        self.stub_out('nova.i18n.get_available_languages',
+                      lambda *args, **kwargs:
+                      ['en_GB', 'en_AU', 'de', 'zh_CN', 'en_US'])
 
     def test_content_type_missing(self):
         request = wsgi.Request.blank('/tests/123', method='POST')
@@ -115,9 +120,6 @@ class RequestTest(MicroversionedTest):
                  'id2': compute_nodes[2]})
 
     def test_from_request(self):
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = 'bogus;q=1.1, en-gb;q=0.7,en-us,en;q=.5,*;q=.7'
         request.headers = {'Accept-Language': accepted}
@@ -126,45 +128,30 @@ class RequestTest(MicroversionedTest):
     def test_asterisk(self):
         # asterisk should match first available if there
         # are not any other available matches
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = '*,es;q=.5'
         request.headers = {'Accept-Language': accepted}
         self.assertEqual(request.best_match_language(), 'en_GB')
 
     def test_prefix(self):
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = 'zh'
         request.headers = {'Accept-Language': accepted}
         self.assertEqual(request.best_match_language(), 'zh_CN')
 
     def test_secondary(self):
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = 'nn,en-gb;q=.5'
         request.headers = {'Accept-Language': accepted}
         self.assertEqual(request.best_match_language(), 'en_GB')
 
     def test_none_found(self):
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = 'nb-no'
         request.headers = {'Accept-Language': accepted}
         self.assertIsNone(request.best_match_language())
 
     def test_no_lang_header(self):
-        self.stubs.Set(i18n, 'get_available_languages',
-                       fakes.fake_get_available_languages)
-
         request = wsgi.Request.blank('/')
         accepted = ''
         request.headers = {'Accept-Language': accepted}
@@ -604,6 +591,16 @@ class ResourceTest(MicroversionedTest):
         content_type, body = resource.get_body(request)
         self.assertEqual('application/json', content_type)
         self.assertEqual(b'', body)
+
+    def test_get_body_content_body_none(self):
+        resource = wsgi.Resource(None)
+        request = wsgi.Request.blank('/', method='PUT')
+        body = None
+
+        contents = resource._get_request_content(body, request)
+
+        self.assertIn('body', contents)
+        self.assertIsNone(contents['body'])
 
     def test_get_body(self):
         class Controller(object):

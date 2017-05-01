@@ -57,30 +57,27 @@ def generate_new_element(items, prefix, numeric=False):
             candidate = prefix + generate_random_alphanumeric(8)
         if candidate not in items:
             return candidate
-        LOG.debug("Random collision on %s" % candidate)
+        LOG.debug("Random collision on %s", candidate)
 
 
 class _IntegratedTestBase(test.TestCase):
     REQUIRES_LOCKING = True
     ADMIN_API = False
+    # Override this in subclasses which use the NeutronFixture. New tests
+    # should rely on Neutron since nova-network is deprecated. The default
+    # value of False here is only temporary while we update the existing
+    # functional tests to use Neutron.
+    USE_NEUTRON = False
 
     def setUp(self):
         super(_IntegratedTestBase, self).setUp()
 
-        self.flags(verbose=True)
+        # TODO(mriedem): Fix the functional tests to work with Neutron.
+        self.flags(use_neutron=self.USE_NEUTRON)
+        self.flags(keep_alive=False, group="wsgi")
 
         nova.tests.unit.image.fake.stub_out_image_service(self)
         self._setup_services()
-
-        self.api_fixture = self.useFixture(
-            nova_fixtures.OSAPIFixture(self.api_major_version))
-
-        # if the class needs to run as admin, make the api endpoint
-        # the admin, otherwise it's safer to run as non admin user.
-        if self.ADMIN_API:
-            self.api = self.api_fixture.admin_api
-        else:
-            self.api = self.api_fixture.api
 
         self.useFixture(cast_as_call.CastAsCall(self.stubs))
 
@@ -94,13 +91,31 @@ class _IntegratedTestBase(test.TestCase):
         return self.start_service('scheduler')
 
     def _setup_services(self):
+        # NOTE(danms): Set the global MQ connection to that of our first cell
+        # for any cells-ignorant code. Normally this is defaulted in the tests
+        # which will result in us not doing the right thing.
+        if 'cell1' in self.cell_mappings:
+            self.flags(transport_url=self.cell_mappings['cell1'].transport_url)
         self.conductor = self.start_service('conductor')
-        self.compute = self._setup_compute_service()
         self.consoleauth = self.start_service('consoleauth')
 
         self.network = self.start_service('network',
                                           manager=CONF.network_manager)
         self.scheduler = self._setup_scheduler_service()
+
+        self.compute = self._setup_compute_service()
+        self.api_fixture = self.useFixture(
+            nova_fixtures.OSAPIFixture(self.api_major_version))
+
+        # if the class needs to run as admin, make the api endpoint
+        # the admin, otherwise it's safer to run as non admin user.
+        if self.ADMIN_API:
+            self.api = self.api_fixture.admin_api
+        else:
+            self.api = self.api_fixture.api
+
+        if hasattr(self, 'microversion'):
+            self.api.microversion = self.microversion
 
     def get_unused_server_name(self):
         servers = self.api.get_servers()
@@ -128,7 +143,7 @@ class _IntegratedTestBase(test.TestCase):
 
         # Set a valid flavorId
         flavor = self.api.get_flavors()[0]
-        LOG.debug("Using flavor: %s" % flavor)
+        LOG.debug("Using flavor: %s", flavor)
         server[self._flavor_ref_parameter] = ('http://fake.server/%s'
                                               % flavor['id'])
 
@@ -169,14 +184,14 @@ class _IntegratedTestBase(test.TestCase):
     def _build_server(self, flavor_id):
         server = {}
         image = self.api.get_images()[0]
-        LOG.debug("Image: %s" % image)
+        LOG.debug("Image: %s", image)
 
         # We now have a valid imageId
         server[self._image_ref_parameter] = image['id']
 
         # Set a valid flavorId
         flavor = self.api.get_flavor(flavor_id)
-        LOG.debug("Using flavor: %s" % flavor)
+        LOG.debug("Using flavor: %s", flavor)
         server[self._flavor_ref_parameter] = ('http://fake.server/%s'
                                               % flavor['id'])
 
@@ -219,7 +234,7 @@ class InstanceHelperMixin(object):
         return server
 
     def _build_minimal_create_server_request(self, api, name, image_uuid=None,
-                                             flavor_id=None):
+                                             flavor_id=None, networks=None):
         server = {}
 
         # We now have a valid imageId
@@ -230,4 +245,6 @@ class InstanceHelperMixin(object):
             flavor_id = api.get_flavors()[1]['id']
         server['flavorRef'] = ('http://fake.server/%s' % flavor_id)
         server['name'] = name
+        if networks is not None:
+            server['networks'] = networks
         return server

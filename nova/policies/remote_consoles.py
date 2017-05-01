@@ -13,22 +13,39 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-remote-consoles'
-POLICY_ROOT = 'os_compute_api:os-remote-consoles:%s'
 
 
 remote_consoles_policies = [
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
+    base.create_rule_default(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        "Generates a URL to access remove server console",
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (os-getRDPConsole)'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (os-getSerialConsole)'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (os-getSPICEConsole)'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (os-getVNCConsole)'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/remote-consoles'
+            },
+        ]),
 ]
 
 

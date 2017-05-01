@@ -14,10 +14,12 @@
 import copy
 
 from oslo_serialization import jsonutils
+from oslo_utils import encodeutils
 import webob
 
 from nova.api.openstack.placement import microversion
 from nova.api.openstack.placement import util
+from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -29,6 +31,7 @@ POST_RC_SCHEMA_V1_2 = {
         "name": {
             "type": "string",
             "pattern": "^CUSTOM\_[A-Z0-9_]+$",
+            "maxLength": 255,
         },
     },
     "required": [
@@ -61,8 +64,8 @@ def _serialize_resource_classes(environ, rcs):
     return {"resource_classes": output}
 
 
-@webob.dec.wsgify
-@microversion.version_handler(1.2)
+@wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.2')
 @util.require_content('application/json')
 def create_resource_class(req):
     """POST to create a resource class.
@@ -79,8 +82,13 @@ def create_resource_class(req):
     except exception.ResourceClassExists:
         raise webob.exc.HTTPConflict(
             _('Conflicting resource class already exists: %(name)s') %
-            {'name': data['name']},
-            json_formatter=util.json_error_formatter)
+            {'name': data['name']})
+    except exception.MaxDBRetriesExceeded:
+        raise webob.exc.HTTPConflict(
+            _('Max retries of DB transaction exceeded attempting '
+              'to create resource class: %(name)s, please'
+              'try again.') %
+            {'name': data['name']})
 
     req.response.location = util.resource_class_url(req.environ, rc)
     req.response.status = 201
@@ -88,8 +96,8 @@ def create_resource_class(req):
     return req.response
 
 
-@webob.dec.wsgify
-@microversion.version_handler(1.2)
+@wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.2')
 def delete_resource_class(req):
     """DELETE to destroy a single resource class.
 
@@ -104,20 +112,18 @@ def delete_resource_class(req):
     except exception.ResourceClassCannotDeleteStandard as exc:
         raise webob.exc.HTTPBadRequest(
             _('Cannot delete standard resource class %(rp_name)s: %(error)s') %
-            {'rp_name': name, 'error': exc},
-            json_formatter=util.json_error_formatter)
+            {'rp_name': name, 'error': exc})
     except exception.ResourceClassInUse as exc:
         raise webob.exc.HTTPConflict(
             _('Unable to delete resource class %(rp_name)s: %(error)s') %
-            {'rp_name': name, 'error': exc},
-            json_formatter=util.json_error_formatter)
+            {'rp_name': name, 'error': exc})
     req.response.status = 204
     req.response.content_type = None
     return req.response
 
 
-@webob.dec.wsgify
-@microversion.version_handler(1.2)
+@wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.2')
 @util.check_accept('application/json')
 def get_resource_class(req):
     """Get a single resource class.
@@ -130,15 +136,15 @@ def get_resource_class(req):
     # The containing application will catch a not found here.
     rc = objects.ResourceClass.get_by_name(context, name)
 
-    req.response.body = jsonutils.dumps(
-        _serialize_resource_class(req.environ, rc)
+    req.response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_resource_class(req.environ, rc))
     )
     req.response.content_type = 'application/json'
     return req.response
 
 
-@webob.dec.wsgify
-@microversion.version_handler(1.2)
+@wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.2')
 @util.check_accept('application/json')
 def list_resource_classes(req):
     """GET a list of resource classes.
@@ -150,15 +156,15 @@ def list_resource_classes(req):
     rcs = objects.ResourceClassList.get_all(context)
 
     response = req.response
-    response.body = jsonutils.dumps(
-        _serialize_resource_classes(req.environ, rcs)
+    response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_resource_classes(req.environ, rcs))
     )
     response.content_type = 'application/json'
     return response
 
 
-@webob.dec.wsgify
-@microversion.version_handler(1.2)
+@wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.2', '1.6')
 @util.require_content('application/json')
 def update_resource_class(req):
     """PUT to update a single resource class.
@@ -181,17 +187,50 @@ def update_resource_class(req):
     except exception.ResourceClassExists:
         raise webob.exc.HTTPConflict(
             _('Resource class already exists: %(name)s') %
-            {'name': name},
-            json_formatter=util.json_error_formatter)
+            {'name': rc.name})
     except exception.ResourceClassCannotUpdateStandard:
         raise webob.exc.HTTPBadRequest(
             _('Cannot update standard resource class %(rp_name)s') %
-            {'rp_name': name},
-            json_formatter=util.json_error_formatter)
+            {'rp_name': name})
 
-    req.response.body = jsonutils.dumps(
-        _serialize_resource_class(req.environ, rc)
+    req.response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_resource_class(req.environ, rc))
     )
     req.response.status = 200
     req.response.content_type = 'application/json'
+    return req.response
+
+
+@wsgi_wrapper.PlacementWsgify  # noqa
+@microversion.version_handler('1.7')
+def update_resource_class(req):
+    """PUT to create or validate the existence of single resource class.
+
+    On a successful create return 201. Return 204 if the class already
+    exists. If the resource class is not a custom resource class, return
+    a 400. 409 might be a better choice, but 400 aligns with previous code.
+    """
+    name = util.wsgi_path_item(req.environ, 'name')
+    context = req.environ['placement.context']
+
+    # Use JSON validation to validation resource class name.
+    util.extract_json('{"name": "%s"}' % name, PUT_RC_SCHEMA_V1_2)
+
+    status = 204
+    try:
+        rc = objects.ResourceClass.get_by_name(context, name)
+    except exception.NotFound:
+        try:
+            rc = objects.ResourceClass(context, name=name)
+            rc.create()
+            status = 201
+        # We will not see ResourceClassCannotUpdateStandard because
+        # that was already caught when validating the {name}.
+        except exception.ResourceClassExists:
+            # Someone just now created the class, so stick with 204
+            pass
+
+    req.response.status = status
+    req.response.content_type = None
+    req.response.location = util.resource_class_url(req.environ, rc)
     return req.response

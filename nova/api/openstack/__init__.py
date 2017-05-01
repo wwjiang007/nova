@@ -26,9 +26,6 @@ import webob.exc
 
 from nova.api.openstack import wsgi
 import nova.conf
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova.i18n import translate
 from nova import notifications
 from nova import utils
@@ -53,7 +50,7 @@ class FaultWrapper(base_wsgi.Middleware):
                                   status, webob.exc.HTTPInternalServerError)()
 
     def _error(self, inner, req):
-        LOG.exception(_LE("Caught error: %s"), inner)
+        LOG.exception("Caught error: %s", inner)
 
         safe = getattr(inner, 'safe', False)
         headers = getattr(inner, 'headers', None)
@@ -62,7 +59,7 @@ class FaultWrapper(base_wsgi.Middleware):
             status = 500
 
         msg_dict = dict(url=req.url, status=status)
-        LOG.info(_LI("%(url)s returned with HTTP %(status)d"), msg_dict)
+        LOG.info("%(url)s returned with HTTP %(status)d", msg_dict)
         outer = self.status_to_type(status)
         if headers:
             outer.headers = headers
@@ -155,7 +152,7 @@ class APIMapper(routes.Mapper):
 
 
 class ProjectMapper(APIMapper):
-    def resource(self, member_name, collection_name, **kwargs):
+    def _get_project_id_token(self):
         # NOTE(sdague): project_id parameter is only valid if its hex
         # or hex + dashes (note, integers are a subset of this). This
         # is required to hand our overlaping routes issues.
@@ -163,7 +160,10 @@ class ProjectMapper(APIMapper):
         if CONF.osapi_v21.project_id_regex:
             project_id_regex = CONF.osapi_v21.project_id_regex
 
-        project_id_token = '{project_id:%s}' % project_id_regex
+        return '{project_id:%s}' % project_id_regex
+
+    def resource(self, member_name, collection_name, **kwargs):
+        project_id_token = self._get_project_id_token()
         if 'parent_resource' not in kwargs:
             kwargs['path_prefix'] = '%s/' % project_id_token
         else:
@@ -194,6 +194,20 @@ class ProjectMapper(APIMapper):
                                      collection_name,
                                      **kwargs)
 
+    def create_route(self, path, method, controller, action):
+        project_id_token = self._get_project_id_token()
+
+        # while we transition away from project IDs in the API URIs, create
+        # additional routes that include the project_id
+        self.connect('/%s%s' % (project_id_token, path),
+                     conditions=dict(method=[method]),
+                     controller=controller,
+                     action=action)
+        self.connect(path,
+                     conditions=dict(method=[method]),
+                     controller=controller,
+                     action=action)
+
 
 class PlainMapper(APIMapper):
     def resource(self, member_name, collection_name, **kwargs):
@@ -221,7 +235,7 @@ class APIRouterV21(base_wsgi.Router):
     def api_extension_namespace():
         return 'nova.api.v21.extensions'
 
-    def __init__(self, init_only=None):
+    def __init__(self):
         def _check_load_extension(ext):
             return self._register_extension(ext)
 
@@ -243,7 +257,7 @@ class APIRouterV21(base_wsgi.Router):
             self._register_resources_check_inherits(mapper)
             self.api_extension_manager.map(self._register_controllers)
 
-        LOG.info(_LI("Loaded extensions: %s"),
+        LOG.info("Loaded extensions: %s",
                  sorted(self.loaded_extension_info.get_extensions().keys()))
         super(APIRouterV21, self).__init__(mapper)
 
@@ -331,8 +345,8 @@ class APIRouterV21(base_wsgi.Router):
             controller = extension.controller
 
             if collection not in self.resources:
-                LOG.warning(_LW('Extension %(ext_name)s: Cannot extend '
-                                'resource %(collection)s: No such resource'),
+                LOG.warning('Extension %(ext_name)s: Cannot extend '
+                            'resource %(collection)s: No such resource',
                             {'ext_name': ext_name, 'collection': collection})
                 continue
 

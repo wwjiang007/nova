@@ -19,11 +19,13 @@ Client side of the console RPC API.
 import oslo_messaging as messaging
 
 import nova.conf
+from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
 
 
+@profiler.trace_cls("rpc")
 class ConsoleAPI(object):
     '''Client side of the console rpc API.
 
@@ -38,10 +40,10 @@ class ConsoleAPI(object):
 
         2.0 - Major API rev for Icehouse
 
-        ... Icehouse, Juno, Kilo, Liberty, Mitaka, and Newton support message
-        version 2.0. So, any changes to existing methods in 2.x after that
-        point should be done such that they can handle the version_cap being
-        set to 2.0.
+        ... Icehouse, Juno, Kilo, Liberty, Mitaka, Newton, and Ocata support
+        message version 2.0. So, any changes to existing methods in 2.x after
+        that point should be done such that they can handle the version_cap
+        being set to 2.0.
 
     '''
 
@@ -54,6 +56,7 @@ class ConsoleAPI(object):
         'liberty': '2.0',
         'mitaka': '2.0',
         'newton': '2.0',
+        'ocata': '2.0',
     }
 
     def __init__(self, topic=None, server=None):

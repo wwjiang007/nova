@@ -35,7 +35,6 @@ import nova.conf
 from nova import context
 from nova.db import base
 from nova import exception
-from nova.i18n import _LE
 from nova import objects
 from nova import rpc
 from nova import servicegroup
@@ -63,7 +62,7 @@ class CellState(object):
 
     def update_db_info(self, cell_db_info):
         """Update cell credentials from db."""
-        self.db_info = {k: v for k, v in six.iteritems(cell_db_info)
+        self.db_info = {k: v for k, v in cell_db_info.items()
                         if k != 'name'}
 
     def update_capabilities(self, cell_metadata):
@@ -165,7 +164,7 @@ class CellStateManager(base.Base):
                 attempts += 1
                 if attempts > 120:
                     raise
-                LOG.exception(_LE('DB error'))
+                LOG.exception('DB error')
                 time.sleep(30)
 
         my_cell_capabs = {}
@@ -298,12 +297,12 @@ class CellStateManager(base.Base):
             else:
                 return 0
 
-        instance_types = self.db.flavor_get_all(ctxt)
+        flavors = objects.FlavorList.get_all(ctxt)
         memory_mb_slots = frozenset(
-                [inst_type['memory_mb'] for inst_type in instance_types])
+                [flavor.memory_mb for flavor in flavors])
         disk_mb_slots = frozenset(
-                [(inst_type['root_gb'] + inst_type['ephemeral_gb']) * units.Ki
-                    for inst_type in instance_types])
+                [(flavor.root_gb + flavor.ephemeral_gb) * units.Ki
+                    for flavor in flavors])
 
         for compute_values in compute_hosts.values():
             total_ram_mb_free += compute_values['free_ram_mb']
@@ -363,8 +362,8 @@ class CellStateManager(base.Base):
         cell = (self.child_cells.get(cell_name) or
                 self.parent_cells.get(cell_name))
         if not cell:
-            LOG.error(_LE("Unknown cell '%(cell_name)s' when trying to "
-                          "update capabilities"),
+            LOG.error("Unknown cell '%(cell_name)s' when trying to "
+                      "update capabilities",
                       {'cell_name': cell_name})
             return
         # Make sure capabilities are sets.
@@ -378,8 +377,8 @@ class CellStateManager(base.Base):
         cell = (self.child_cells.get(cell_name) or
                 self.parent_cells.get(cell_name))
         if not cell:
-            LOG.error(_LE("Unknown cell '%(cell_name)s' when trying to "
-                          "update capacities"),
+            LOG.error("Unknown cell '%(cell_name)s' when trying to "
+                      "update capacities",
                       {'cell_name': cell_name})
             return
         cell.update_capacities(capacities)

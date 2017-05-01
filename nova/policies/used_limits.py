@@ -13,22 +13,29 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-used-limits'
-POLICY_ROOT = 'os_compute_api:os-used-limits:%s'
 
 
 used_limits_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_API),
+    # TODO(aunnam): Remove this rule after we seperate the scope check from
+    # policies, as this is only checking the scope.
+    base.create_rule_default(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_API,
+        """Shows rate and absolute limits for the project.
+
+This policy only checks if the user has access to the requested
+project limits. And this check is performed only after the check
+os_compute_api:limits passes""",
+        [
+            {
+                'method': 'GET',
+                'path': '/limits'
+            }
+        ]),
 ]
 
 

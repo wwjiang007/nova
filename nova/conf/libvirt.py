@@ -25,12 +25,6 @@ from oslo_config import cfg
 
 from nova.conf import paths
 
-# Downtime period in milliseconds
-LIVE_MIGRATION_DOWNTIME_MIN = 100
-# Step count
-LIVE_MIGRATION_DOWNTIME_STEPS_MIN = 3
-# Delay in seconds
-LIVE_MIGRATION_DOWNTIME_DELAY_MIN = 10
 
 libvirt_group = cfg.OptGroup("libvirt",
                              title="Libvirt Options",
@@ -256,9 +250,14 @@ Possible values:
 
 * A valid IP address or hostname, else None.
 """),
-    # TODO(hieulq): change to URIOpt for validating schemas with next release
-    # of oslo_config.
     cfg.StrOpt('live_migration_uri',
+               deprecated_for_removal=True,
+               deprecated_since="15.0.0",
+               deprecated_reason="""
+live_migration_uri is deprecated for removal in favor of two other options that
+allow to change live migration scheme and target URI: ``live_migration_scheme``
+and ``live_migration_inbound_addr`` respectively.
+""",
                help="""
 Live migration target URI to use.
 
@@ -277,6 +276,23 @@ Related options:
 * ``live_migration_inbound_addr``: If ``live_migration_inbound_addr`` value
   is not None, the ip/hostname address of target compute node is used instead
   of ``live_migration_uri`` as the uri for live migration.
+* ``live_migration_scheme``: If ``live_migration_uri`` is not set, the scheme
+  used for live migration is taken from ``live_migration_scheme`` instead.
+"""),
+    cfg.StrOpt('live_migration_scheme',
+               help="""
+Schema used for live migration.
+
+Override the default libvirt live migration scheme (which is dependent on
+virt_type). If this option is set to None, nova will automatically choose a
+sensible default based on the hypervisor. It is not recommended that you change
+this unless you are very sure that hypervisor supports a particular scheme.
+
+Related options:
+* ``virt_type``: This option is meaningful only when ``virt_type`` is set to
+  `kvm` or `qemu`.
+* ``live_migration_uri``: If ``live_migration_uri`` value is not None, the
+  scheme used for live migration is taken from ``live_migration_uri`` instead.
 """),
     cfg.BoolOpt('live_migration_tunnelled',
                 default=False,
@@ -308,37 +324,40 @@ If set to 0, the hypervisor will choose a suitable default. Some hypervisors
 do not support this feature and will return an error if bandwidth is not 0.
 Please refer to the libvirt documentation for further details.
 """),
-    # TODO(hieulq): Need to add min argument by moving from
-    # LIVE_MIGRATION_DOWNTIME_MIN constant.
     cfg.IntOpt('live_migration_downtime',
                default=500,
+               min=100,
                help="""
 Maximum permitted downtime, in milliseconds, for live migration
 switchover.
 
-Will be rounded up to a minimum of %dms. Use a large value if guest liveness
-is unimportant.
-""" % LIVE_MIGRATION_DOWNTIME_MIN),
-    # TODO(hieulq): Need to add min argument by moving from
-    # LIVE_MIGRATION_DOWNTIME_STEPS_MIN constant.
+Will be rounded up to a minimum of 100ms. You can increase this value
+if you want to allow live-migrations to complete faster, or avoid
+live-migration timeout errors by allowing the guest to be paused for
+longer during the live-migration switch over.
+
+Related options:
+
+* live_migration_completion_timeout
+"""),
     cfg.IntOpt('live_migration_downtime_steps',
                default=10,
+               min=3,
                help="""
 Number of incremental steps to reach max downtime value.
 
-Will be rounded up to a minimum of %d steps.
-""" % LIVE_MIGRATION_DOWNTIME_STEPS_MIN),
-    # TODO(hieulq): Need to add min argument by moving from
-    # LIVE_MIGRATION_DOWNTIME_DELAY_MIN constant.
+Will be rounded up to a minimum of 3 steps.
+"""),
     cfg.IntOpt('live_migration_downtime_delay',
                default=75,
+               min=3,
                help="""
 Time to wait, in seconds, between each step increase of the migration
 downtime.
 
-Minimum delay is %d seconds. Value is per GiB of guest RAM + disk to be
+Minimum delay is 3 seconds. Value is per GiB of guest RAM + disk to be
 transferred, with lower bound of a minimum of 2 GiB per device.
-""" % LIVE_MIGRATION_DOWNTIME_DELAY_MIN),
+"""),
     cfg.IntOpt('live_migration_completion_timeout',
                default=800,
                mutable=True,
@@ -349,16 +368,27 @@ data before aborting the operation.
 Value is per GiB of guest RAM + disk to be transferred, with lower bound of
 a minimum of 2 GiB. Should usually be larger than downtime delay * downtime
 steps. Set to 0 to disable timeouts.
-Default is 800.
+
+Related options:
+
+* live_migration_downtime
+* live_migration_downtime_steps
+* live_migration_downtime_delay
 """),
     cfg.IntOpt('live_migration_progress_timeout',
-               default=150,
+               default=0,
+               deprecated_for_removal=True,
+               deprecated_reason="Serious bugs found in this feature.",
                mutable=True,
                help="""
 Time to wait, in seconds, for migration to make forward progress in
 transferring data before aborting the operation.
 
 Set to 0 to disable timeouts.
+
+This is deprecated, and now disabled by default because we have found serious
+bugs in this feature that caused false live-migration timeout failures. This
+feature will be removed or replaced in a future release.
 """),
     cfg.BoolOpt('live_migration_permit_post_copy',
                 default=False,
@@ -392,8 +422,7 @@ This option allows nova to start live migration with auto converge on.
 Auto converge throttles down CPU if a progress of on-going live migration
 is slow. Auto converge will only be used if this flag is set to True and
 post copy is not permitted or post copy is unavailable due to the version
-of libvirt and QEMU in use. Auto converge requires libvirt>=1.2.3 and
-QEMU>=1.6.0.
+of libvirt and QEMU in use.
 
 Related options:
 
@@ -483,8 +512,55 @@ Related options:
                help='Location where the Xen hvmloader is kept'),
     cfg.ListOpt('disk_cachemodes',
                 default=[],
-                help='Specific cachemodes to use for different disk types '
-                     'e.g: file=directsync,block=none'),
+                help="""
+Specific cache modes to use for different disk types.
+
+For example: file=directsync,block=none,network=writeback
+
+For local or direct-attached storage, it is recommended that you use
+writethrough (default) mode, as it ensures data integrity and has acceptable
+I/O performance for applications running in the guest, especially for read
+operations. However, caching mode none is recommended for remote NFS storage,
+because direct I/O operations (O_DIRECT) perform better than synchronous I/O
+operations (with O_SYNC). Caching mode none effectively turns all guest I/O
+operations into direct I/O operations on the host, which is the NFS client in
+this environment.
+
+Possible cache modes:
+
+* default: Same as writethrough.
+* none: With caching mode set to none, the host page cache is disabled, but
+  the disk write cache is enabled for the guest. In this mode, the write
+  performance in the guest is optimal because write operations bypass the host
+  page cache and go directly to the disk write cache. If the disk write cache
+  is battery-backed, or if the applications or storage stack in the guest
+  transfer data properly (either through fsync operations or file system
+  barriers), then data integrity can be ensured. However, because the host
+  page cache is disabled, the read performance in the guest would not be as
+  good as in the modes where the host page cache is enabled, such as
+  writethrough mode.
+* writethrough: writethrough mode is the default caching mode. With
+  caching set to writethrough mode, the host page cache is enabled, but the
+  disk write cache is disabled for the guest. Consequently, this caching mode
+  ensures data integrity even if the applications and storage stack in the
+  guest do not transfer data to permanent storage properly (either through
+  fsync operations or file system barriers). Because the host page cache is
+  enabled in this mode, the read performance for applications running in the
+  guest is generally better. However, the write performance might be reduced
+  because the disk write cache is disabled.
+* writeback: With caching set to writeback mode, both the host page cache
+  and the disk write cache are enabled for the guest. Because of this, the
+  I/O performance for applications running in the guest is good, but the data
+  is not protected in a power failure. As a result, this caching mode is
+  recommended only for temporary data where potential data loss is not a
+  concern.
+* directsync: Like "writethrough", but it bypasses the host page cache.
+* unsafe: Caching mode of unsafe ignores cache transfer operations
+  completely. As its name implies, this caching mode should be used only for
+  temporary data where data loss is not a concern. This mode can be useful for
+  speeding up guest installations, but you should switch to another caching
+  mode in production environments.
+"""),
     cfg.StrOpt('rng_dev_path',
                help='A path to a device that will be used as source of '
                     'entropy on the host. Permitted options are: '
@@ -685,53 +761,90 @@ libvirt_vif_opts = [
 libvirt_volume_opts = [
     cfg.ListOpt('qemu_allowed_storage_drivers',
                 default=[],
-                help='Protocols listed here will be accessed directly '
-                     'from QEMU. Currently supported protocols: [gluster]'),
+                help="""
+Protocols listed here will be accessed directly from QEMU.
+
+If gluster is present in qemu_allowed_storage_drivers, glusterfs's backend will
+pass a disk configuration to QEMU. This allows QEMU to access the volume using
+libgfapi rather than mounting GlusterFS via fuse.
+
+Possible values:
+
+* [gluster]
+"""),
     cfg.BoolOpt('volume_use_multipath',
                 default=False,
                 deprecated_name='iscsi_use_multipath',
-                help='Use multipath connection of the iSCSI or FC volume')
+                help="""
+Use multipath connection of the iSCSI or FC volume
+
+Volumes can be connected in the LibVirt as multipath devices. This will
+provide high availability and fault tolerance.
+"""),
+    cfg.IntOpt('num_volume_scan_tries',
+               deprecated_name='num_iscsi_scan_tries',
+               default=5,
+               help="""
+Number of times to scan given storage protocol to find volume.
+"""),
 ]
 
 libvirt_volume_aoe_opts = [
     cfg.IntOpt('num_aoe_discover_tries',
                default=3,
-               help='Number of times to rediscover AoE target to find volume'),
+               help="""
+Number of times to rediscover AoE target to find volume.
+
+Nova provides support for block storage attaching to hosts via AOE (ATA over
+Ethernet). This option allows the user to specify the maximum number of retry
+attempts that can be made to discover the AoE device.
+""")
 ]
 
 libvirt_volume_glusterfs_opts = [
     cfg.StrOpt('glusterfs_mount_point_base',
                default=paths.state_path_def('mnt'),
-               help='Directory where the glusterfs volume is mounted on the '
-                    'compute node'),
+               help="""
+Absolute path to the directory where the glusterfs volume is mounted on the
+compute node.
+""")
 ]
 
 libvirt_volume_iscsi_opts = [
-    cfg.IntOpt('num_iscsi_scan_tries',
-               default=5,
-               help='Number of times to rescan iSCSI target to find volume'),
     cfg.StrOpt('iscsi_iface',
                deprecated_name='iscsi_transport',
-               help='The iSCSI transport iface to use to connect to target in '
-                    'case offload support is desired. Default format is of '
-                    'the form <transport_name>.<hwaddress> where '
-                    '<transport_name> is one of (be2iscsi, bnx2i, cxgb3i, '
-                    'cxgb4i, qla4xxx, ocs) and <hwaddress> is the MAC address '
-                    'of the interface and can be generated via the '
-                    'iscsiadm -m iface command. Do not confuse the '
-                    'iscsi_iface parameter to be provided here with the '
-                    'actual transport name.'),
-    # iser is also supported, but use LibvirtISERVolumeDriver
-    # instead
+               help="""
+The iSCSI transport iface to use to connect to target in case offload support
+is desired.
+
+Default format is of the form <transport_name>.<hwaddress> where
+<transport_name> is one of (be2iscsi, bnx2i, cxgb3i, cxgb4i, qla4xxx, ocs) and
+<hwaddress> is the MAC address of the interface and can be generated via the
+iscsiadm -m iface command. Do not confuse the iscsi_iface parameter to be
+provided here with the actual transport name.
+""")
+# iser is also supported, but use LibvirtISERVolumeDriver
+# instead
 ]
 
 libvirt_volume_iser_opts = [
     cfg.IntOpt('num_iser_scan_tries',
                default=5,
-               help='Number of times to rescan iSER target to find volume'),
+               help="""
+Number of times to scan iSER target to find volume.
+
+iSER is a server network protocol that extends iSCSI protocol to use Remote
+Direct Memory Access (RDMA). This option allows the user to specify the maximum
+number of scan attempts that can be made to find iSER volume.
+"""),
     cfg.BoolOpt('iser_use_multipath',
                 default=False,
-                help='Use multipath connection of the iSER volume'),
+                help="""
+Use multipath connection of the iSER volume.
+
+iSER volumes can be connected as multipath devices. This will provide high
+availability and fault tolerance.
+""")
 ]
 
 libvirt_volume_net_opts = [

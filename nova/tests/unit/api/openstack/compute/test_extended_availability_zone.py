@@ -78,6 +78,7 @@ class ExtendedAvailabilityZoneTestV21(test.TestCase):
         super(ExtendedAvailabilityZoneTestV21, self).setUp()
         availability_zones.reset_cache()
         fakes.stub_out_nw_api(self)
+        fakes.stub_out_secgroup_api(self)
         self.stub_out('nova.compute.api.API.get', fake_compute_get)
         self.stub_out('nova.compute.api.API.get_all', fake_compute_get_all)
         self.stub_out('nova.availability_zones.get_host_availability_zone',
@@ -88,8 +89,7 @@ class ExtendedAvailabilityZoneTestV21(test.TestCase):
     def _make_request(self, url):
         req = fakes.HTTPRequest.blank(url)
         req.headers['Accept'] = self.content_type
-        res = req.get_response(fakes.wsgi_app_v21(init_only=(
-            'servers', 'os-extended-availability-zone')))
+        res = req.get_response(fakes.wsgi_app_v21())
         return res
 
     def _get_server(self, body):

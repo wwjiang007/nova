@@ -22,6 +22,8 @@ except ImportError:
 
 from eventlet import greenthread
 import mock
+from os_xenapi.client import session as xenapi_session
+import six
 
 from nova.compute import power_state
 from nova.compute import task_states
@@ -38,7 +40,6 @@ from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import fake
 from nova.virt.xenapi import agent as xenapi_agent
-from nova.virt.xenapi.client import session as xenapi_session
 from nova.virt.xenapi import fake as xenapi_fake
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import vmops
@@ -236,25 +237,21 @@ class GetConsoleOutputTestCase(VMOpsTestBase):
     def test_get_console_output_works(self):
         ctxt = context.RequestContext('user', 'project')
         instance = fake_instance.fake_instance_obj(ctxt)
-        self.mox.StubOutWithMock(self.vmops, '_get_last_dom_id')
-
-        self.vmops._get_last_dom_id(instance, check_rescue=True).AndReturn(42)
-        self.mox.ReplayAll()
-
-        self.assertEqual(b"dom_id: 42",
-                         self.vmops.get_console_output(instance))
+        with mock.patch.object(self.vmops, '_get_last_dom_id',
+                               return_value=42) as mock_last_dom:
+            self.assertEqual(b"dom_id: 42",
+                             self.vmops.get_console_output(instance))
+            mock_last_dom.assert_called_once_with(instance, check_rescue=True)
 
     def test_get_console_output_not_available(self):
-        self.mox.StubOutWithMock(self.vmops, '_get_last_dom_id')
-
         ctxt = context.RequestContext('user', 'project')
         instance = fake_instance.fake_instance_obj(ctxt)
         # dom_id=0 used to trigger exception in fake XenAPI
-        self.vmops._get_last_dom_id(instance, check_rescue=True).AndReturn(0)
-        self.mox.ReplayAll()
-
-        self.assertRaises(exception.ConsoleNotAvailable,
-                self.vmops.get_console_output, instance)
+        with mock.patch.object(self.vmops, '_get_last_dom_id',
+                               return_value=0) as mock_last_dom:
+            self.assertRaises(exception.ConsoleNotAvailable,
+                              self.vmops.get_console_output, instance)
+            mock_last_dom.assert_called_once_with(instance, check_rescue=True)
 
     def test_get_dom_id_works(self):
         instance = {"name": "dummy"}
@@ -427,7 +424,7 @@ class SpawnTestCase(VMOpsTestBase):
         if neutron_exception:
             events = [('network-vif-plugged', 1)]
             self.vmops._get_neutron_events(network_info,
-                                           True, True).AndReturn(events)
+                                           True, True, False).AndReturn(events)
             self.mox.StubOutWithMock(self.vmops, '_neutron_failed_callback')
             self.mox.StubOutWithMock(self.vmops._virtapi,
                                      'wait_for_instance_event')
@@ -505,7 +502,7 @@ class SpawnTestCase(VMOpsTestBase):
         events = [('network-vif-plugged', 1)]
         network_info = [{'id': 1, 'active': True}]
         self.vmops._get_neutron_events(network_info,
-                                    True, True).AndReturn(events)
+                                       True, True, False).AndReturn(events)
         self.mox.StubOutWithMock(self.vmops,
                                  '_neutron_failed_callback')
         self._test_spawn(network_info=network_info)
@@ -758,8 +755,9 @@ class SpawnTestCase(VMOpsTestBase):
                         {"id": 4}]
         power_on = True
         first_boot = True
+        rescue = False
         events = self.vmops._get_neutron_events(network_info,
-                                                power_on, first_boot)
+                                                power_on, first_boot, rescue)
         self.assertEqual("network-vif-plugged", events[0][0])
         self.assertEqual(1, events[0][1])
         self.assertEqual("network-vif-plugged", events[1][0])
@@ -773,8 +771,9 @@ class SpawnTestCase(VMOpsTestBase):
                         {"id": 4}]
         power_on = True
         first_boot = True
+        rescue = False
         events = self.vmops._get_neutron_events(network_info,
-                                                power_on, first_boot)
+                                                power_on, first_boot, rescue)
         self.assertEqual([], events)
 
     @mock.patch.object(utils, 'is_neutron', return_value=True)
@@ -785,8 +784,9 @@ class SpawnTestCase(VMOpsTestBase):
                         {"id": 4}]
         power_on = False
         first_boot = True
+        rescue = False
         events = self.vmops._get_neutron_events(network_info,
-                                                power_on, first_boot)
+                                                power_on, first_boot, rescue)
         self.assertEqual([], events)
 
     @mock.patch.object(utils, 'is_neutron', return_value=True)
@@ -797,8 +797,22 @@ class SpawnTestCase(VMOpsTestBase):
                         {"id": 4}]
         power_on = True
         first_boot = False
+        rescue = False
         events = self.vmops._get_neutron_events(network_info,
-                                                power_on, first_boot)
+                                                power_on, first_boot, rescue)
+        self.assertEqual([], events)
+
+    @mock.patch.object(utils, 'is_neutron', return_value=True)
+    def test_get_neutron_event_rescue(self, mock_is_neutron):
+        network_info = [{"active": False, "id": 1},
+                        {"active": True, "id": 2},
+                        {"active": False, "id": 3},
+                        {"id": 4}]
+        power_on = True
+        first_boot = True
+        rescue = True
+        events = self.vmops._get_neutron_events(network_info,
+                                                power_on, first_boot, rescue)
         self.assertEqual([], events)
 
 
@@ -1393,19 +1407,31 @@ class LiveMigrateTestCase(VMOpsTestBase):
                           self.vmops._get_host_uuid_from_aggregate,
                           context, hostname)
 
+    @mock.patch.object(vmops.VMOps, 'create_interim_networks')
     @mock.patch.object(vmops.VMOps, 'connect_block_device_volumes')
-    def test_pre_live_migration(self, mock_connect):
+    def test_pre_live_migration(self, mock_connect, mock_create):
         migrate_data = objects.XenapiLiveMigrateData()
         migrate_data.block_migration = True
         sr_uuid_map = {"sr_uuid": "sr_ref"}
+        vif_uuid_map = {"neutron_vif_uuid": "dest_network_ref"}
         mock_connect.return_value = {"sr_uuid": "sr_ref"}
-
+        mock_create.return_value = {"neutron_vif_uuid": "dest_network_ref"}
         result = self.vmops.pre_live_migration(
-                None, None, "bdi", None, None, migrate_data)
+                None, None, "bdi", "fake_network_info", None, migrate_data)
 
         self.assertTrue(result.block_migration)
         self.assertEqual(result.sr_uuid_map, sr_uuid_map)
+        self.assertEqual(result.vif_uuid_map, vif_uuid_map)
         mock_connect.assert_called_once_with("bdi")
+        mock_create.assert_called_once_with("fake_network_info")
+
+    @mock.patch.object(vmops.VMOps, '_delete_networks_and_bridges')
+    def test_post_live_migration_at_source(self, mock_delete):
+        self.vmops.post_live_migration_at_source('fake_context',
+                                                 'fake_instance',
+                                                 'fake_network_info')
+        mock_delete.assert_called_once_with('fake_instance',
+                                            'fake_network_info')
 
 
 class LiveMigrateFakeVersionTestCase(VMOpsTestBase):
@@ -1534,8 +1560,7 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
             mock_forget.assert_called_once_with(self.vmops._session,
                                                 'sr_ref_1')
 
-    def _call_live_migrate_command_with_migrate_send_data(self,
-                                                          migrate_data):
+    def _call_live_migrate_command_with_migrate_send_data(self, migrate_data):
         command_name = 'test_command'
         vm_ref = "vm_ref"
 
@@ -1547,21 +1572,27 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
         with mock.patch.object(self.vmops,
                                "_generate_vdi_map") as mock_gen_vdi_map, \
                 mock.patch.object(self.vmops._session,
-                                  'call_xenapi') as mock_call_xenapi:
+                                  'call_xenapi') as mock_call_xenapi, \
+                mock.patch.object(self.vmops,
+                                  "_generate_vif_network_map") as mock_vif_map:
             mock_call_xenapi.side_effect = side_effect
             mock_gen_vdi_map.side_effect = [
                     {"vdi": "sr_ref"}, {"vdi": "sr_ref_2"}]
+            mock_vif_map.return_value = {"vif_ref1": "dest_net_ref"}
 
             self.vmops._call_live_migrate_command(command_name,
                                                   vm_ref, migrate_data)
 
+            expect_vif_map = {}
+            if 'vif_uuid_map' in migrate_data:
+                expect_vif_map.update({"vif_ref1": "dest_net_ref"})
             expected_vdi_map = {'vdi': 'sr_ref'}
             if 'sr_uuid_map' in migrate_data:
                 expected_vdi_map = {'vdi': 'sr_ref_2'}
             self.assertEqual(mock_call_xenapi.call_args_list[-1],
-                mock.call('test_command', vm_ref,
+                mock.call(command_name, vm_ref,
                     migrate_data.migrate_send_data, True,
-                    expected_vdi_map, {}, {}))
+                    expected_vdi_map, expect_vif_map, {}))
 
             self.assertEqual(mock_gen_vdi_map.call_args_list[0],
                 mock.call(migrate_data.destination_sr_ref, vm_ref))
@@ -1575,6 +1606,7 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
         migrate_data.migrate_send_data = {"foo": "bar"}
         migrate_data.destination_sr_ref = "sr_ref"
         migrate_data.sr_uuid_map = {"sr_uuid2": "sr_ref_3"}
+        migrate_data.vif_uuid_map = {"vif_id": "dest_net_ref"}
         self._call_live_migrate_command_with_migrate_send_data(migrate_data)
 
     def test_call_live_migrate_command_with_no_sr_uuid_map(self):
@@ -1589,30 +1621,105 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
                 self._call_live_migrate_command_with_migrate_send_data,
                 migrate_data)
 
+    def test_generate_vif_network_map(self):
+        with mock.patch.object(self._session.VIF,
+                               'get_other_config') as mock_other_config, \
+             mock.patch.object(self._session.VM,
+                              'get_VIFs') as mock_get_vif:
+            mock_other_config.side_effect = [{'nicira-iface-id': 'vif_id_a'},
+                                             {'nicira-iface-id': 'vif_id_b'}]
+            mock_get_vif.return_value = ['vif_ref1', 'vif_ref2']
+            vif_uuid_map = {'vif_id_b': 'dest_net_ref2',
+                            'vif_id_a': 'dest_net_ref1'}
+            vif_map = self.vmops._generate_vif_network_map('vm_ref',
+                                                           vif_uuid_map)
+            expected = {'vif_ref1': 'dest_net_ref1',
+                        'vif_ref2': 'dest_net_ref2'}
+            self.assertEqual(vif_map, expected)
+
+    def test_generate_vif_network_map_exception(self):
+        with mock.patch.object(self._session.VIF,
+                               'get_other_config') as mock_other_config, \
+             mock.patch.object(self._session.VM,
+                              'get_VIFs') as mock_get_vif:
+            mock_other_config.side_effect = [{'nicira-iface-id': 'vif_id_a'},
+                                             {'nicira-iface-id': 'vif_id_b'}]
+            mock_get_vif.return_value = ['vif_ref1', 'vif_ref2']
+            vif_uuid_map = {'vif_id_c': 'dest_net_ref2',
+                            'vif_id_d': 'dest_net_ref1'}
+            self.assertRaises(exception.MigrationError,
+                              self.vmops._generate_vif_network_map,
+                              'vm_ref', vif_uuid_map)
+
+    def test_generate_vif_network_map_exception_no_iface(self):
+        with mock.patch.object(self._session.VIF,
+                               'get_other_config') as mock_other_config, \
+             mock.patch.object(self._session.VM,
+                              'get_VIFs') as mock_get_vif:
+            mock_other_config.return_value = {}
+            mock_get_vif.return_value = ['vif_ref1']
+            vif_uuid_map = {}
+            self.assertRaises(exception.MigrationError,
+                              self.vmops._generate_vif_network_map,
+                              'vm_ref', vif_uuid_map)
+
+    def test_delete_networks_and_bridges(self):
+        self.vmops.vif_driver = mock.Mock()
+        network_info = ['fake_vif']
+        self.vmops._delete_networks_and_bridges('fake_instance', network_info)
+        self.vmops.vif_driver.delete_network_and_bridge.\
+            assert_called_once_with('fake_instance', 'fake_vif')
+
+    def test_create_interim_networks(self):
+        class FakeVifDriver(object):
+            def create_vif_interim_network(self, vif):
+                if vif['id'] == "vif_1":
+                    return "network_ref_1"
+                if vif['id'] == "vif_2":
+                    return "network_ref_2"
+
+        network_info = [{'id': "vif_1"}, {'id': 'vif_2'}]
+        self.vmops.vif_driver = FakeVifDriver()
+        vif_map = self.vmops.create_interim_networks(network_info)
+        self.assertEqual(vif_map, {'vif_1': 'network_ref_1',
+                                   'vif_2': 'network_ref_2'})
+
 
 class RollbackLiveMigrateDestinationTestCase(VMOpsTestBase):
+    @mock.patch.object(vmops.VMOps, '_delete_networks_and_bridges')
     @mock.patch.object(volume_utils, 'find_sr_by_uuid', return_value='sr_ref')
     @mock.patch.object(volume_utils, 'forget_sr')
-    def test_rollback_dest_calls_sr_forget(self, forget_sr, sr_ref):
+    def test_rollback_dest_calls_sr_forget(self, forget_sr, sr_ref,
+                                           delete_networks_bridges):
         block_device_info = {'block_device_mapping': [{'connection_info':
                                 {'data': {'volume_id': 'fake-uuid',
                                           'target_iqn': 'fake-iqn',
                                           'target_portal': 'fake-portal'}}}]}
+        network_info = [{'id': 'vif1'}]
         self.vmops.rollback_live_migration_at_destination('instance',
+                                                          network_info,
                                                           block_device_info)
         forget_sr.assert_called_once_with(self.vmops._session, 'sr_ref')
+        delete_networks_bridges.assert_called_once_with(
+            'instance', [{'id': 'vif1'}])
 
+    @mock.patch.object(vmops.VMOps, '_delete_networks_and_bridges')
     @mock.patch.object(volume_utils, 'forget_sr')
     @mock.patch.object(volume_utils, 'find_sr_by_uuid',
                        side_effect=test.TestingException)
-    def test_rollback_dest_handles_exception(self, find_sr_ref, forget_sr):
+    def test_rollback_dest_handles_exception(self, find_sr_ref, forget_sr,
+                                             delete_networks_bridges):
         block_device_info = {'block_device_mapping': [{'connection_info':
                                 {'data': {'volume_id': 'fake-uuid',
                                           'target_iqn': 'fake-iqn',
                                           'target_portal': 'fake-portal'}}}]}
+        network_info = [{'id': 'vif1'}]
         self.vmops.rollback_live_migration_at_destination('instance',
+                                                          network_info,
                                                           block_device_info)
         self.assertFalse(forget_sr.called)
+        delete_networks_bridges.assert_called_once_with(
+            'instance', [{'id': 'vif1'}])
 
 
 @mock.patch.object(vmops.VMOps, '_resize_ensure_vm_is_shutdown')
@@ -1726,3 +1833,92 @@ class GetVdisForInstanceTestCase(VMOpsTestBase):
             # our stub method is called which asserts the password is scrubbed
             self.assertTrue(debug_mock.called)
             self.assertTrue(fake_debug.matched)
+
+
+class AttachInterfaceTestCase(VMOpsTestBase):
+    """Test VIF hot plug/unplug"""
+    def setUp(self):
+        super(AttachInterfaceTestCase, self).setUp()
+        self.vmops.vif_driver = mock.Mock()
+        self.fake_vif = {'id': '12345'}
+        self.fake_instance = mock.Mock()
+        self.fake_instance.uuid = '6478'
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_attach_interface(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        with mock.patch.object(self._session.VM, 'get_allowed_VIF_devices')\
+            as fake_devices:
+            fake_devices.return_value = [2, 3, 4]
+            self.vmops.attach_interface(self.fake_instance, self.fake_vif)
+            fake_devices.assert_called_once_with('fake_vm_ref')
+            mock_get_vm_opaque_ref.assert_called_once_with(self.fake_instance)
+            self.vmops.vif_driver.plug.assert_called_once_with(
+                self.fake_instance, self.fake_vif, vm_ref='fake_vm_ref',
+                device=2)
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_attach_interface_no_devices(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        with mock.patch.object(self._session.VM, 'get_allowed_VIF_devices')\
+            as fake_devices:
+            fake_devices.return_value = []
+            self.assertRaises(exception.InterfaceAttachFailed,
+                              self.vmops.attach_interface,
+                              self.fake_instance, self.fake_vif)
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_attach_interface_plug_failed(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        with mock.patch.object(self._session.VM, 'get_allowed_VIF_devices')\
+            as fake_devices:
+            fake_devices.return_value = [2, 3, 4]
+            self.vmops.vif_driver.plug.side_effect =\
+                exception.VirtualInterfacePlugException('Failed to plug VIF')
+            self.assertRaises(exception.VirtualInterfacePlugException,
+                              self.vmops.attach_interface,
+                              self.fake_instance, self.fake_vif)
+            self.vmops.vif_driver.plug.assert_called_once_with(
+                self.fake_instance, self.fake_vif, vm_ref='fake_vm_ref',
+                device=2)
+            self.vmops.vif_driver.unplug.assert_called_once_with(
+                self.fake_instance, self.fake_vif, 'fake_vm_ref')
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_attach_interface_reraise_exception(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        with mock.patch.object(self._session.VM, 'get_allowed_VIF_devices')\
+            as fake_devices:
+            fake_devices.return_value = [2, 3, 4]
+            self.vmops.vif_driver.plug.side_effect =\
+                exception.VirtualInterfacePlugException('Failed to plug VIF')
+            self.vmops.vif_driver.unplug.side_effect =\
+                exception.VirtualInterfaceUnplugException(
+                    'Failed to unplug VIF')
+            ex = self.assertRaises(exception.VirtualInterfacePlugException,
+                                   self.vmops.attach_interface,
+                                   self.fake_instance, self.fake_vif)
+            self.assertEqual('Failed to plug VIF', six.text_type(ex))
+            self.vmops.vif_driver.plug.assert_called_once_with(
+                self.fake_instance, self.fake_vif, vm_ref='fake_vm_ref',
+                device=2)
+            self.vmops.vif_driver.unplug.assert_called_once_with(
+                self.fake_instance, self.fake_vif, 'fake_vm_ref')
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_detach_interface(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        self.vmops.detach_interface(self.fake_instance, self.fake_vif)
+        mock_get_vm_opaque_ref.assert_called_once_with(self.fake_instance)
+        self.vmops.vif_driver.unplug.assert_called_once_with(
+            self.fake_instance, self.fake_vif, 'fake_vm_ref')
+
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
+    def test_detach_interface_exception(self, mock_get_vm_opaque_ref):
+        mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
+        self.vmops.vif_driver.unplug.side_effect =\
+            exception.VirtualInterfaceUnplugException('Failed to unplug VIF')
+
+        self.assertRaises(exception.VirtualInterfaceUnplugException,
+                          self.vmops.detach_interface,
+                          self.fake_instance, self.fake_vif)

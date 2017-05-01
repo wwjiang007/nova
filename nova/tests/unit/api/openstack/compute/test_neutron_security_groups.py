@@ -55,6 +55,8 @@ class TestNeutronSecurityGroupsTestCase(test.TestCase):
 class TestNeutronSecurityGroupsV21(
         test_security_groups.TestSecurityGroupsV21,
         TestNeutronSecurityGroupsTestCase):
+    # Used to override set config in the base test in test_security_groups.
+    use_neutron = True
 
     def _create_sg_template(self, **kwargs):
         sg = test_security_groups.security_group_request_template(**kwargs)
@@ -138,6 +140,13 @@ class TestNeutronSecurityGroupsV21(
         list_dict = self.controller.index(req)
         self.assertEqual(len(list_dict['security_groups']), 2)
 
+    def test_get_security_group_list_offset_and_limit(self):
+        path = '/v2/fake/os-security-groups?offset=1&limit=1'
+        self._create_sg_template().get('security_group')
+        req = fakes.HTTPRequest.blank(path)
+        list_dict = self.controller.index(req)
+        self.assertEqual(len(list_dict['security_groups']), 1)
+
     def test_get_security_group_list_all_tenants(self):
         pass
 
@@ -189,7 +198,7 @@ class TestNeutronSecurityGroupsV21(
         neutron = neutron_api.API()
         with mock.patch.object(nova.db, 'instance_get_by_uuid',
                                return_value=db_inst):
-            neutron.allocate_for_instance(_context, instance,
+            neutron.allocate_for_instance(_context, instance, False, None,
                                           security_groups=[sg['id']])
 
         req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups/%s'
@@ -479,7 +488,8 @@ class TestNeutronSecurityGroupRulesV21(
         _TestNeutronSecurityGroupRulesBase,
         test_security_groups.TestSecurityGroupRulesV21,
         TestNeutronSecurityGroupRulesTestCase):
-    pass
+    # Used to override set config in the base test in test_security_groups.
+    use_neutron = True
 
 
 class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
@@ -510,8 +520,7 @@ class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
 
         # NOTE: This 'os-security-groups' is for enabling security_groups
         #       attribute on response body.
-        res = req.get_response(fakes.wsgi_app_v21(
-            init_only=('servers', 'os-security-groups')))
+        res = req.get_response(fakes.wsgi_app_v21())
         return res
 
     def _encode_body(self, body):

@@ -14,18 +14,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import base64
 import datetime
 import uuid
 
 import mock
 from oslo_config import cfg
+from oslo_serialization import base64
 from oslo_serialization import jsonutils
 
 from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import servers
 from nova.api.openstack.compute import user_data
-from nova.compute import api as compute_api
 from nova.compute import flavors
 from nova import exception
 from nova.network import manager
@@ -53,18 +52,16 @@ class ServersControllerCreateTest(test.TestCase):
         """Shared implementation for tests below that create instance."""
         super(ServersControllerCreateTest, self).setUp()
 
-        self.flags(verbose=True)
         self.flags(enable_instance_password=True, group='api')
         self.instance_cache_num = 0
         self.instance_cache_by_id = {}
         self.instance_cache_by_uuid = {}
 
+        # Network API needs to be stubbed out before creating the controllers.
+        fakes.stub_out_nw_api(self)
+
         ext_info = extension_info.LoadedExtensionInfo()
         self.controller = servers.ServersController(extension_info=ext_info)
-        CONF.set_override('extensions_blacklist', 'os-user-data',
-                          'osapi_v21')
-        self.no_user_data_controller = servers.ServersController(
-            extension_info=ext_info)
 
         def instance_create(context, inst):
             inst_type = flavors.get_flavor_by_flavor_id(3)
@@ -120,7 +117,7 @@ class ServersControllerCreateTest(test.TestCase):
 
         fakes.stub_out_key_pair_funcs(self)
         fake.stub_out_image_service(self)
-        fakes.stub_out_nw_api(self)
+
         self.stubs.Set(uuid, 'uuid4', fake_gen_uuid)
         self.stub_out('nova.db.instance_add_security_group',
                       return_security_group)
@@ -135,7 +132,7 @@ class ServersControllerCreateTest(test.TestCase):
                        fake_method)
 
     def _test_create_extra(self, params, no_image=False,
-                           override_controller=None, legacy_v2=False):
+                           legacy_v2=False):
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
         server = dict(name='server_test', imageRef=image_uuid, flavorRef=2)
         if no_image:
@@ -148,38 +145,11 @@ class ServersControllerCreateTest(test.TestCase):
         req.headers["content-type"] = "application/json"
         if legacy_v2:
             req.set_legacy_v2()
-        if override_controller:
-            server = override_controller.create(req, body=body).obj['server']
-        else:
-            server = self.controller.create(req, body=body).obj['server']
+        server = self.controller.create(req, body=body).obj['server']
         return server
 
-    def test_create_instance_with_user_data_disabled(self):
-        params = {user_data.ATTRIBUTE_NAME: base64.b64encode('fake')}
-        old_create = compute_api.API.create
-
-        def create(*args, **kwargs):
-            self.assertNotIn('user_data', kwargs)
-            return old_create(*args, **kwargs)
-
-        self.stubs.Set(compute_api.API, 'create', create)
-        self._test_create_extra(
-            params,
-            override_controller=self.no_user_data_controller)
-
-    def test_create_instance_with_user_data_enabled(self):
-        params = {user_data.ATTRIBUTE_NAME: base64.b64encode('fake')}
-        old_create = compute_api.API.create
-
-        def create(*args, **kwargs):
-            self.assertIn('user_data', kwargs)
-            return old_create(*args, **kwargs)
-
-        self.stubs.Set(compute_api.API, 'create', create)
-        self._test_create_extra(params)
-
     def test_create_instance_with_user_data(self):
-        value = base64.b64encode("A random string")
+        value = base64.encode_as_text("A random string")
         params = {user_data.ATTRIBUTE_NAME: value}
         server = self._test_create_extra(params)
         self.assertEqual(FAKE_UUID, server['id'])

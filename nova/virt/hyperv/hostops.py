@@ -28,6 +28,7 @@ from oslo_utils import units
 
 import nova.conf
 from nova.i18n import _
+from nova import objects
 from nova.objects import fields as obj_fields
 from nova.virt.hyperv import constants
 from nova.virt.hyperv import pathutils
@@ -120,6 +121,18 @@ class HostOps(object):
                 'used_video_ram': total_video_ram - available_video_ram,
                 'gpu_info': jsonutils.dumps(gpus)}
 
+    def _get_host_numa_topology(self):
+        numa_nodes = self._hostutils.get_numa_nodes()
+        cells = []
+        for numa_node in numa_nodes:
+            # Hyper-V does not support CPU pinning / mempages.
+            # initializing the rest of the fields.
+            numa_node.update(pinned_cpus=set(), mempages=[], siblings=[])
+            cell = objects.NUMACell(**numa_node)
+            cells.append(cell)
+
+        return objects.NUMATopology(cells=cells)
+
     def get_available_resource(self):
         """Retrieve resource info.
 
@@ -162,12 +175,38 @@ class HostOps(object):
                    (obj_fields.Architecture.X86_64,
                     obj_fields.HVType.HYPERV,
                     obj_fields.VMMode.HVM)],
-               'numa_topology': None,
+               'numa_topology': self._get_host_numa_topology()._to_json(),
+               'pci_passthrough_devices': self._get_pci_passthrough_devices(),
                }
 
         gpu_info = self._get_remotefx_gpu_info()
         dic.update(gpu_info)
         return dic
+
+    def _get_pci_passthrough_devices(self):
+        """Get host PCI devices information.
+
+        Obtains PCI devices information and returns it as a JSON string.
+
+        :returns: a JSON string containing a list of the assignable PCI
+                  devices information.
+        """
+
+        pci_devices = self._hostutils.get_pci_passthrough_devices()
+
+        for pci_dev in pci_devices:
+            # NOTE(claudiub): These fields are required by the PCI tracker.
+            dev_label = 'label_%(vendor_id)s_%(product_id)s' % {
+                'vendor_id': pci_dev['vendor_id'],
+                'product_id': pci_dev['product_id']}
+
+            # TODO(claudiub): Find a way to associate the PCI devices with
+            # the NUMA nodes they are in.
+            pci_dev.update(dev_type=obj_fields.PciDeviceType.STANDARD,
+                           label=dev_label,
+                           numa_node=None)
+
+        return jsonutils.dumps(pci_devices)
 
     def host_power_action(self, action):
         """Reboots, shuts down or powers up the host."""

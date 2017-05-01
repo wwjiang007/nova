@@ -18,14 +18,18 @@
 """
 
 from collections import deque
+
 from lxml import etree
 from oslo_log import log as logging
 
 from nova.compute import power_state
+import nova.conf
 from nova.i18n import _LI
 from nova.i18n import _LW
 
 LOG = logging.getLogger(__name__)
+
+CONF = nova.conf.CONF
 
 # TODO(berrange): hack to avoid a "import libvirt" in this file.
 # Remove this and similar hacks in guest.py, driver.py, host.py
@@ -490,3 +494,43 @@ def run_recover_tasks(host, guest, instance, on_migration_failure):
         else:
             LOG.warning(_LW("Unknown migration task '%(task)s'"),
                         {"task": task}, instance=instance)
+
+
+def downtime_steps(data_gb):
+    '''Calculate downtime value steps and time between increases.
+
+    :param data_gb: total GB of RAM and disk to transfer
+
+    This looks at the total downtime steps and upper bound
+    downtime value and uses a linear function.
+
+    For example, with 10 steps, 30 second step delay, 3 GB
+    of RAM and 400ms target maximum downtime, the downtime will
+    be increased every 90 seconds in the following progression:
+
+    -   0 seconds -> set downtime to  40ms
+    -  90 seconds -> set downtime to  76ms
+    - 180 seconds -> set downtime to 112ms
+    - 270 seconds -> set downtime to 148ms
+    - 360 seconds -> set downtime to 184ms
+    - 450 seconds -> set downtime to 220ms
+    - 540 seconds -> set downtime to 256ms
+    - 630 seconds -> set downtime to 292ms
+    - 720 seconds -> set downtime to 328ms
+    - 810 seconds -> set downtime to 364ms
+    - 900 seconds -> set downtime to 400ms
+
+    This allows the guest a good chance to complete migration
+    with a small downtime value.
+    '''
+    downtime = CONF.libvirt.live_migration_downtime
+    steps = CONF.libvirt.live_migration_downtime_steps
+    delay = CONF.libvirt.live_migration_downtime_delay
+
+    delay = int(delay * data_gb)
+
+    base = downtime / steps
+    offset = (downtime - base) / steps
+
+    for i in range(steps + 1):
+        yield (int(delay * i), int(base + offset * i))

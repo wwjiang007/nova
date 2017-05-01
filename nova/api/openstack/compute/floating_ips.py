@@ -31,7 +31,6 @@ from nova import compute
 from nova.compute import utils as compute_utils
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
 from nova import network
 from nova.policies import floating_ips as fi_policies
 
@@ -204,11 +203,14 @@ class FloatingIPController(wsgi.Controller):
 
 
 class FloatingIPActionController(wsgi.Controller):
+    """This API is deprecated from the Microversion '2.44'."""
+
     def __init__(self, *args, **kwargs):
         super(FloatingIPActionController, self).__init__(*args, **kwargs)
         self.compute_api = compute.API()
         self.network_api = network.API()
 
+    @wsgi.Controller.api_version("2.1", "2.43")
     @extensions.expected_errors((400, 403, 404))
     @wsgi.action('addFloatingIp')
     @validation.schema(floating_ips.add_floating_ip)
@@ -224,8 +226,8 @@ class FloatingIPActionController(wsgi.Controller):
         cached_nwinfo = compute_utils.get_nw_info_for_instance(instance)
         if not cached_nwinfo:
             LOG.warning(
-                _LW('Info cache is %r during associate with no nw_info cache'),
-                    instance.info_cache, instance=instance)
+                'Info cache is %r during associate with no nw_info cache',
+                instance.info_cache, instance=instance)
             msg = _('Instance network is not ready yet')
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
@@ -256,8 +258,8 @@ class FloatingIPActionController(wsgi.Controller):
                         {'address': address, 'id': id})
                 raise webob.exc.HTTPBadRequest(explanation=msg)
             if len(fixed_ips) > 1:
-                LOG.warning(_LW('multiple fixed_ips exist, using the first '
-                                'IPv4 fixed_ip: %s'), fixed_address)
+                LOG.warning('multiple fixed_ips exist, using the first '
+                            'IPv4 fixed_ip: %s', fixed_address)
 
         try:
             self.network_api.associate_floating_ip(context, instance,
@@ -287,6 +289,7 @@ class FloatingIPActionController(wsgi.Controller):
 
         return webob.Response(status_int=202)
 
+    @wsgi.Controller.api_version("2.1", "2.43")
     @extensions.expected_errors((400, 403, 404, 409))
     @wsgi.action('removeFloatingIp')
     @validation.schema(floating_ips.remove_floating_ip)
@@ -339,6 +342,4 @@ class FloatingIps(extensions.V21APIExtensionBase):
         return resource
 
     def get_controller_extensions(self):
-        controller = FloatingIPActionController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
+        return []

@@ -17,24 +17,23 @@
 """Volume drivers for libvirt."""
 
 from oslo_log import log as logging
-import six
+
 
 import nova.conf
 from nova import exception
 from nova.i18n import _LE
 from nova.i18n import _LW
+from nova import profiler
 from nova.virt.libvirt import config as vconfig
 import nova.virt.libvirt.driver
-from nova.virt.libvirt import host
 from nova.virt.libvirt import utils as libvirt_utils
 
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
 
-SHOULD_LOG_DISCARD_WARNING = True
 
-
+@profiler.trace_cls("volume_api")
 class LibvirtBaseVolumeDriver(object):
     """Base class for volume drivers."""
     def __init__(self, host, is_block_dev):
@@ -72,7 +71,7 @@ class LibvirtBaseVolumeDriver(object):
                          'read_iops_sec', 'write_iops_sec']
             specs = data['qos_specs']
             if isinstance(specs, dict):
-                for k, v in six.iteritems(specs):
+                for k, v in specs.items():
                     if k in tune_opts:
                         new_key = 'disk_' + k
                         setattr(conf, new_key, v)
@@ -94,23 +93,7 @@ class LibvirtBaseVolumeDriver(object):
 
         # Configure usage of discard
         if data.get('discard', False) is True:
-            min_qemu = nova.virt.libvirt.driver.MIN_QEMU_DISCARD_VERSION
-            if self.host.has_min_version(
-                    hv_ver=min_qemu,
-                    hv_type=host.HV_DRIVER_QEMU):
-                conf.driver_discard = 'unmap'
-            else:
-                global SHOULD_LOG_DISCARD_WARNING
-                if SHOULD_LOG_DISCARD_WARNING:
-                    SHOULD_LOG_DISCARD_WARNING = False
-                    LOG.warning(_LW('Unable to attach %(type)s volume '
-                                    '%(serial)s with discard enabled: qemu '
-                                    '%(qemu)s or later is required.'),
-                                {
-                        'qemu': min_qemu,
-                        'serial': conf.serial,
-                        'type': connection_info['driver_volume_type']
-                    })
+            conf.driver_discard = 'unmap'
 
         return conf
 

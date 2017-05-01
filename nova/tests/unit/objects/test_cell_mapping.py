@@ -17,6 +17,7 @@ from nova import exception
 from nova import objects
 from nova.objects import cell_mapping
 from nova.tests.unit.objects import test_objects
+from nova.tests import uuidsentinel as uuids
 
 
 def get_db_mapping(**updates):
@@ -103,6 +104,18 @@ class _TestCellMappingObject(object):
         self.assertTrue(objects.CellMapping(
             uuid=objects.CellMapping.CELL0_UUID).is_cell0())
 
+    def test_identity_no_name_set(self):
+        cm = objects.CellMapping(uuid=uuids.cell1)
+        self.assertEqual(uuids.cell1, cm.identity)
+
+    def test_identity_name_is_none(self):
+        cm = objects.CellMapping(uuid=uuids.cell1)
+        self.assertEqual(uuids.cell1, cm.identity)
+
+    def test_identity_with_name(self):
+        cm = objects.CellMapping(uuid=uuids.cell1, name='foo')
+        self.assertEqual('%s(foo)' % uuids.cell1, cm.identity)
+
 
 class TestCellMappingObject(test_objects._LocalTest,
                             _TestCellMappingObject):
@@ -124,6 +137,20 @@ class _TestCellMappingListObject(object):
 
         get_all_from_db.assert_called_once_with(self.context)
         self.compare_obj(mapping_obj.objects[0], db_mapping)
+
+    def test_get_all_sorted(self):
+        for ident in (10, 3):
+            cm = objects.CellMapping(context=self.context,
+                                     id=ident,
+                                     uuid=getattr(uuids, 'cell%i' % ident),
+                                     transport_url='fake://%i' % ident,
+                                     database_connection='fake://%i' % ident)
+            cm.create()
+        obj = objects.CellMappingList.get_all(self.context)
+        ids = [c.id for c in obj]
+        # Find the two normal cells, plus the two we created, but in the right
+        # order
+        self.assertEqual([1, 2, 3, 10], ids)
 
 
 class TestCellMappingListObject(test_objects._LocalTest,

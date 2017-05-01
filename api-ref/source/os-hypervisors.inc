@@ -1,13 +1,16 @@
 .. -*- rst -*-
-.. needs:body_verification
+
+.. _os-hypervisors:
 
 ==============================
  Hypervisors (os-hypervisors)
 ==============================
 
 Lists all hypervisors, shows summary statistics for all hypervisors over
-all compute nodes, shows details for a hypervisor, and shows the uptime
-for a hypervisor.
+all compute nodes, shows details for a hypervisor, shows the uptime
+for a hypervisor, lists all servers on hypervisors that match the given
+``hypervisor_hostname_pattern`` or searches for hypervisors by the given
+``hypervisor_hostname_pattern``.
 
 List Hypervisors
 ================
@@ -44,9 +47,9 @@ Response
   - status: hypervisor_status
   - hypervisor_links: hypervisor_links
 
-**Example List Hypervisors: JSON response**
+**Example List Hypervisors (v2.33): JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-hypervisors/hypervisors-list-resp.json
+.. literalinclude:: ../../doc/api_samples/os-hypervisors/v2.33/hypervisors-list-resp.json
    :language: javascript
 
 List Hypervisors Details
@@ -103,13 +106,9 @@ Response
   - vcpus_used: hypervisor_vcpus_used
   - hypervisor_links: hypervisor_links
 
-**Example List Hypervisors Details: JSON response**
+**Example List Hypervisors Details (v2.33): JSON response**
 
-.. note::
-
-   This API sample is actual since microversion v2.28
-
-.. literalinclude:: ../../doc/api_samples/os-hypervisors/v2.28/hypervisors-detail-resp.json
+.. literalinclude:: ../../doc/api_samples/os-hypervisors/v2.33/hypervisors-detail-resp.json
    :language: javascript
 
 Show Hypervisor Statistics
@@ -156,7 +155,7 @@ Show Hypervisor Details
 
 .. rest_method:: GET /os-hypervisors/{hypervisor_id}
 
-Shows details for a hypervisor.
+Shows details for a given hypervisor.
 
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
@@ -203,11 +202,7 @@ Response
   - vcpus: hypervisor_vcpus
   - vcpus_used: hypervisor_vcpus_used
 
-**Example Show Hypervisor Details: JSON response**
-
-.. note::
-
-   This API sample is actual since microversion v2.28
+**Example Show Hypervisor Details (v2.28): JSON response**
 
 .. literalinclude:: ../../doc/api_samples/os-hypervisors/v2.28/hypervisors-show-resp.json
    :language: javascript
@@ -217,7 +212,7 @@ Show Hypervisor Uptime
 
 .. rest_method:: GET /os-hypervisors/{hypervisor_id}/uptime
 
-Shows the uptime for a hypervisor.
+Shows the uptime for a given hypervisor.
 
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
@@ -254,9 +249,9 @@ Response
 Search Hypervisor
 =================
 
-.. rest_method:: GET /os-hypervisors/{hypervisor_id}/search
+.. rest_method:: GET /os-hypervisors/{hypervisor_hostname_pattern}/search
 
-Search hypervisor by given hypervisor id.
+Search hypervisor by a given hypervisor host name or portion of it.
 
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
@@ -271,7 +266,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-  - hypervisor_id: hypervisor_id
+  - hypervisor_hostname_pattern: hypervisor_hostname_pattern
 
 Response
 --------
@@ -292,9 +287,10 @@ Response
 List Hypervisor Servers
 =======================
 
-.. rest_method:: GET /os-hypervisors/{hypervisor_id}/servers
+.. rest_method:: GET /os-hypervisors/{hypervisor_hostname_pattern}/servers
 
-List all servers belong to given hypervisor.
+List all servers belong to each hypervisor whose host name is matching
+a given hypervisor host name or portion of it.
 
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
@@ -309,7 +305,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-  - hypervisor_id: hypervisor_id
+  - hypervisor_hostname_pattern: hypervisor_hostname_pattern
 
 Response
 --------

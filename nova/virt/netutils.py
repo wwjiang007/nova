@@ -56,21 +56,16 @@ def _get_first_network(network, version):
         pass
 
 
-def get_injected_network_template(network_info, use_ipv6=None, template=None,
+def get_injected_network_template(network_info, template=None,
                                   libvirt_virt_type=None):
     """Returns a rendered network template for the given network_info.
 
     :param network_info:
         :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
-    :param use_ipv6: If False, do not return IPv6 template information
-        even if an IPv6 subnet is present in network_info.
     :param template: Path to the interfaces template file.
     :param libvirt_virt_type: The Libvirt `virt_type`, will be `None` for
         other hypervisors..
     """
-    if use_ipv6 is None:
-        use_ipv6 = CONF.use_ipv6
-
     if not template:
         template = CONF.injected_network_template
 
@@ -128,8 +123,7 @@ def get_injected_network_template(network_info, use_ipv6=None, template=None,
         gateway_v6 = ''
         netmask_v6 = None
         dns_v6 = None
-        have_ipv6 = (use_ipv6 and subnet_v6)
-        if have_ipv6:
+        if subnet_v6:
             if subnet_v6.get_meta('dhcp_server') is not None:
                 continue
 
@@ -169,7 +163,7 @@ def get_injected_network_template(network_info, use_ipv6=None, template=None,
                             'libvirt_virt_type': libvirt_virt_type})
 
 
-def get_network_metadata(network_info, use_ipv6=None):
+def get_network_metadata(network_info):
     """Gets a more complete representation of the instance network information.
 
     This data is exposed as network_data.json in the metadata service and
@@ -177,15 +171,9 @@ def get_network_metadata(network_info, use_ipv6=None):
 
     :param network_info: `nova.network.models.NetworkInfo` object describing
         the network metadata.
-    :param use_ipv6: If False, do not return IPv6 template information
-        even if an IPv6 subnet is present in network_info. Defaults to
-        nova.netconf.use_ipv6.
     """
     if not network_info:
         return
-
-    if use_ipv6 is None:
-        use_ipv6 = CONF.use_ipv6
 
     # IPv4 or IPv6 networks
     nets = []
@@ -221,7 +209,7 @@ def get_network_metadata(network_info, use_ipv6=None):
             nets.append(_get_nets(vif, subnet_v4, 4, net_num, link['id']))
             services += [dns for dns in _get_dns_services(subnet_v4)
                          if dns not in services]
-        if (use_ipv6 and subnet_v6) and subnet_v6.get('ips'):
+        if subnet_v6 and subnet_v6.get('ips'):
             net_num += 1
             nets.append(_get_nets(vif, subnet_v6, 6, net_num, link['id']))
             services += [dns for dns in _get_dns_services(subnet_v6)
@@ -248,10 +236,10 @@ def _get_eth_link(vif, ifc_num):
         link_id = 'interface%d' % ifc_num
 
     # Use 'phy' for physical links. Ethernet can be confusing
-    if vif.get('type') == 'ethernet':
-        nic_type = 'phy'
-    else:
+    if vif.get('type') in model.LEGACY_EXPOSED_VIF_TYPES:
         nic_type = vif.get('type')
+    else:
+        nic_type = 'phy'
 
     link = {
         'id': link_id,
@@ -273,7 +261,10 @@ def _get_nets(vif, subnet, version, net_num, link_id):
     :param link_id: Arbitrary identifier for the link the networks are
         attached to
     """
-    if subnet.get_meta('dhcp_server') is not None:
+    net_type = ''
+    if subnet.get_meta('ipv6_address_mode') is not None:
+        net_type = '_%s' % subnet.get_meta('ipv6_address_mode')
+    elif subnet.get_meta('dhcp_server') is not None:
         net_info = {
             'id': 'network%d' % net_num,
             'type': 'ipv%d_dhcp' % version,
@@ -291,7 +282,7 @@ def _get_nets(vif, subnet, version, net_num, link_id):
 
     net_info = {
         'id': 'network%d' % net_num,
-        'type': 'ipv%d' % version,
+        'type': 'ipv%d%s' % (version, net_type),
         'link': link_id,
         'ip_address': address,
         'netmask': netmask,
@@ -344,3 +335,13 @@ def _get_dns_services(subnet):
         return services
     return [{'type': 'dns', 'address': ip.get('address')}
             for ip in subnet['dns']]
+
+
+def get_cached_vifs_with_vlan(network_info):
+    """Generates a dict from a list of VIFs that has a vlan tag, with
+    MAC, VLAN as a key, value.
+    """
+    if network_info is None:
+        return {}
+    return {vif['address']: vif['details']['vlan'] for vif in network_info
+                            if vif.get('details', {}).get('vlan')}

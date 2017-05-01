@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import datetime
-
 import webob
 
 from nova.api.openstack.compute import block_device_mapping \
@@ -23,12 +21,10 @@ from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import multiple_create as multiple_create_v21
 from nova.api.openstack.compute import servers as servers_v21
 from nova.compute import api as compute_api
-from nova.compute import flavors
 import nova.conf
 from nova import exception
 from nova import test
 from nova.tests.unit.api.openstack import fakes
-from nova.tests.unit import fake_instance
 from nova.tests.unit.image import fake
 
 CONF = nova.conf.CONF
@@ -45,48 +41,17 @@ class MultiCreateExtensionTestV21(test.TestCase):
         """Shared implementation for tests below that create instance."""
         super(MultiCreateExtensionTestV21, self).setUp()
 
-        self.flags(verbose=True)
         self.flags(enable_instance_password=True, group='api')
         self.instance_cache_num = 0
         self.instance_cache_by_id = {}
         self.instance_cache_by_uuid = {}
 
+        # Network API needs to be stubbed out before creating the controllers.
+        fakes.stub_out_nw_api(self)
+
         ext_info = extension_info.LoadedExtensionInfo()
         self.controller = servers_v21.ServersController(
             extension_info=ext_info)
-        CONF.set_override('extensions_blacklist', 'os-multiple-create',
-                          'osapi_v21')
-        self.no_mult_create_controller = servers_v21.ServersController(
-            extension_info=ext_info)
-
-        def instance_create(context, inst):
-            inst_type = flavors.get_flavor_by_flavor_id(3)
-            image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
-            def_image_ref = 'http://localhost/images/%s' % image_uuid
-            self.instance_cache_num += 1
-            instance = fake_instance.fake_db_instance(**{
-                'id': self.instance_cache_num,
-                'display_name': inst['display_name'] or 'test',
-                'uuid': inst['uuid'],
-                'instance_type': inst_type,
-                'access_ip_v4': '1.2.3.4',
-                'access_ip_v6': 'fead::1234',
-                'image_ref': inst.get('image_ref', def_image_ref),
-                'user_id': 'fake',
-                'project_id': 'fake',
-                'reservation_id': inst['reservation_id'],
-                "created_at": datetime.datetime(2010, 10, 10, 12, 0, 0),
-                "updated_at": datetime.datetime(2010, 11, 11, 11, 0, 0),
-                "progress": 0,
-                "fixed_ips": [],
-                "task_state": "",
-                "vm_state": "",
-                "security_groups": inst['security_groups'],
-            })
-
-            self.instance_cache_by_id[instance['id']] = instance
-            self.instance_cache_by_uuid[instance['uuid']] = instance
-            return instance
 
         def instance_get(context, instance_id):
             """Stub for compute/api create() pulling in instance after
@@ -111,13 +76,18 @@ class MultiCreateExtensionTestV21(test.TestCase):
         def project_get_networks(context, user_id):
             return dict(id='1', host='localhost')
 
+        def create_db_entry_for_new_instance(*args, **kwargs):
+            instance = args[4]
+            self.instance_cache_by_uuid[instance.uuid] = instance
+            return instance
+
         fakes.stub_out_key_pair_funcs(self)
         fake.stub_out_image_service(self)
-        fakes.stub_out_nw_api(self)
         self.stub_out('nova.db.instance_add_security_group',
                       return_security_group)
         self.stub_out('nova.db.project_get_networks', project_get_networks)
-        self.stub_out('nova.db.instance_create', instance_create)
+        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
+                      create_db_entry_for_new_instance)
         self.stub_out('nova.db.instance_system_metadata_update', fake_method)
         self.stub_out('nova.db.instance_get', instance_get)
         self.stub_out('nova.db.instance_update', instance_update)
@@ -127,46 +97,15 @@ class MultiCreateExtensionTestV21(test.TestCase):
                       fake_method)
         self.req = fakes.HTTPRequest.blank('')
 
-    def _test_create_extra(self, params, no_image=False,
-                           override_controller=None):
+    def _test_create_extra(self, params, no_image=False):
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
         server = dict(name='server_test', imageRef=image_uuid, flavorRef=2)
         if no_image:
             server.pop('imageRef', None)
         server.update(params)
         body = dict(server=server)
-        if override_controller:
-            server = override_controller.create(self.req,
-                                                body=body).obj['server']
-        else:
-            server = self.controller.create(self.req,
-                                            body=body).obj['server']
-
-    def _check_multiple_create_extension_disabled(self, **kwargs):
-        # NOTE: on v2.1 API, "create a server" API doesn't add the following
-        # attributes into kwargs when non-loading multiple_create extension.
-        # However, v2.0 API adds them as values "1" instead. So we need to
-        # define checking methods for each API here.
-        self.assertNotIn('min_count', kwargs)
-        self.assertNotIn('max_count', kwargs)
-
-    def test_create_instance_with_multiple_create_disabled(self):
-        min_count = 2
-        max_count = 3
-        params = {
-            multiple_create_v21.MIN_ATTRIBUTE_NAME: min_count,
-            multiple_create_v21.MAX_ATTRIBUTE_NAME: max_count,
-        }
-        old_create = compute_api.API.create
-
-        def create(*args, **kwargs):
-            self._check_multiple_create_extension_disabled(**kwargs)
-            return old_create(*args, **kwargs)
-
-        self.stub_out('nova.compute.api.API.create', create)
-        self._test_create_extra(
-            params,
-            override_controller=self.no_mult_create_controller)
+        server = self.controller.create(self.req,
+                                        body=body).obj['server']
 
     def test_multiple_create_with_string_type_min_and_max(self):
         min_count = '2'

@@ -20,11 +20,13 @@ import oslo_messaging as messaging
 
 import nova.conf
 from nova.objects import base as objects_base
+from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
 
 
+@profiler.trace_cls("rpc")
 class SchedulerAPI(object):
     '''Client side of the scheduler rpc API.
 
@@ -88,8 +90,8 @@ class SchedulerAPI(object):
         * 4.3 - Modify select_destinations() signature by providing a
                 RequestSpec obj
 
-        ... Mitaka and Newton support message version 4.3. So, any changes to
-        existing methods in 4.x after that point should be done such
+        ... Mitaka, Newton, and Ocata support message version 4.3. So, any
+        changes to existing methods in 4.x after that point should be done such
         that they can handle the version_cap being set to 4.3.
 
     '''
@@ -103,6 +105,7 @@ class SchedulerAPI(object):
         'liberty': '4.2',
         'mitaka': '4.3',
         'newton': '4.3',
+        'ocata': '4.3',
     }
 
     def __init__(self):

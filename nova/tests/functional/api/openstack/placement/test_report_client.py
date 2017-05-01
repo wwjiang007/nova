@@ -18,6 +18,7 @@ from wsgi_intercept import interceptor
 
 from nova.api.openstack.placement import deploy
 from nova import conf
+from nova import exception
 from nova import objects
 from nova.objects import fields
 from nova.scheduler.client import report
@@ -31,16 +32,20 @@ class NoAuthReportClient(report.SchedulerReportClient):
     """A SchedulerReportClient that avoids keystone."""
 
     def __init__(self):
-        self._resource_providers = {}
-        self._disabled = False
+        super(NoAuthReportClient, self).__init__()
         # Supply our own session so the wsgi-intercept can intercept
         # the right thing. Another option would be to use the direct
         # urllib3 interceptor.
         request_session = requests.Session()
+        headers = {
+            'x-auth-token': 'admin',
+            'OpenStack-API-Version': 'placement latest',
+        }
         self._client = session.Session(
             auth=None,
             session=request_session,
-            additional_headers={'x-auth-token': 'admin'})
+            additional_headers=headers,
+        )
 
 
 class SchedulerReportClientTests(test.TestCase):
@@ -98,11 +103,17 @@ class SchedulerReportClientTests(test.TestCase):
             self.assertIsNone(rp)
 
             # Now let's update status for our compute node.
-            self.client.update_resource_stats(self.compute_node)
+            self.client.update_compute_node(self.compute_node)
 
             # So now we have a resource provider
             rp = self.client._get_resource_provider(self.compute_uuid)
             self.assertIsNotNone(rp)
+
+            # We should also have an empty list set of aggregate UUID
+            # associations
+            pam = self.client._provider_aggregate_map
+            self.assertIn(self.compute_uuid, pam)
+            self.assertEqual(set(), pam[self.compute_uuid])
 
             # TODO(cdent): change this to use the methods built in
             # to the report client to retrieve inventory?
@@ -140,3 +151,31 @@ class SchedulerReportClientTests(test.TestCase):
             usage_data = resp.json()['usages']
             vcpu_data = usage_data[res_class]
             self.assertEqual(0, vcpu_data)
+
+            # Trigger the reporting client deleting all inventory by setting
+            # the compute node's CPU, RAM and disk amounts to 0.
+            self.compute_node.vcpus = 0
+            self.compute_node.memory_mb = 0
+            self.compute_node.local_gb = 0
+            self.client.update_compute_node(self.compute_node)
+
+            # Check there's no more inventory records
+            resp = self.client.get(inventory_url)
+            inventory_data = resp.json()['inventories']
+            self.assertEqual({}, inventory_data)
+
+            # Try setting some invalid inventory and make sure the report
+            # client raises the expected error.
+            inv_data = {
+                'BAD_FOO': {
+                    'total': 100,
+                    'reserved': 0,
+                    'min_unit': 1,
+                    'max_unit': 100,
+                    'step_size': 1,
+                    'allocation_ratio': 1.0,
+                },
+            }
+            self.assertRaises(exception.InvalidResourceClass,
+                              self.client.set_inventory_for_provider,
+                              self.compute_uuid, self.compute_name, inv_data)

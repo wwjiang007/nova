@@ -23,12 +23,13 @@ import sqlalchemy as sa
 from sqlalchemy import func
 from sqlalchemy.orm import contains_eager
 from sqlalchemy import sql
+from sqlalchemy.sql import null
 
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models as models
 from nova.db.sqlalchemy import resource_class_cache as rc_cache
 from nova import exception
-from nova.i18n import _LW
+from nova.i18n import _, _LW
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -155,7 +156,9 @@ def _update_inventory_for_provider(conn, rp, inv_list, to_update):
                 _ALLOC_TBL.c.resource_provider_id == rp.id,
                 _ALLOC_TBL.c.resource_class_id == rc_id))
         allocations = conn.execute(allocation_query).first()
-        if allocations and allocations['usage'] > inv_record.capacity:
+        if (allocations
+            and allocations['usage'] is not None
+            and allocations['usage'] > inv_record.capacity):
             exceeded.append((rp.uuid, rc_str))
         upd_stmt = _INV_TBL.update().where(sa.and_(
                 _INV_TBL.c.resource_provider_id == rp.id,
@@ -269,6 +272,8 @@ def _set_inventory(context, rp, inv_list):
     :raises `exception.ResourceClassNotFound` if any resource class in any
             inventory in inv_list cannot be found in either the standard
             classes or the DB.
+    :raises `exception.InventoryInUse` if we attempt to delete inventory
+            from a provider that has allocations for that resource class.
     """
     _ensure_rc_cache(context)
     conn = context.session.connection()
@@ -314,7 +319,8 @@ class ResourceProvider(base.NovaObject):
     # Version 1.1: Add destroy()
     # Version 1.2: Add get_aggregates(), set_aggregates()
     # Version 1.3: Turn off remotable
-    VERSION = '1.3'
+    # Version 1.4: Add set/get_traits methods
+    VERSION = '1.4'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
@@ -342,7 +348,7 @@ class ResourceProvider(base.NovaObject):
 
     def save(self):
         updates = self.obj_get_changes()
-        if updates and updates.keys() != ['name']:
+        if updates and list(updates.keys()) != ['name']:
             raise exception.ObjectActionError(
                 action='save',
                 reason='Immutable fields changed')
@@ -528,6 +534,55 @@ class ResourceProvider(base.NovaObject):
             conn = context.session.connection()
             conn.execute(insert_aggregates)
 
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_traits_from_db(context, _id):
+        db_traits = context.session.query(models.Trait).join(
+            models.ResourceProviderTrait,
+            sa.and_(
+                models.Trait.id == models.ResourceProviderTrait.trait_id,
+                models.ResourceProviderTrait.resource_provider_id == _id
+            )).all()
+        return db_traits
+
+    @base.remotable
+    def get_traits(self):
+        db_traits = self._get_traits_from_db(self._context, self.id)
+        return base.obj_make_list(self._context, TraitList(self._context),
+            Trait, db_traits)
+
+    @staticmethod
+    @db_api.api_context_manager.writer
+    def _set_traits_to_db(context, rp, _id, traits):
+        existing_traits = ResourceProvider._get_traits_from_db(context, _id)
+        traits_dict = {trait.name: trait for trait in traits}
+        existing_traits_dict = {trait.name: trait for trait in existing_traits}
+
+        to_add_names = (set(traits_dict.keys()) -
+            set(existing_traits_dict.keys()))
+        to_delete_names = (set(existing_traits_dict.keys()) -
+            set(traits_dict.keys()))
+        to_delete_ids = [existing_traits_dict[name].id
+                            for name in to_delete_names]
+
+        conn = context.session.connection()
+        with conn.begin():
+            if to_delete_names:
+                context.session.query(models.ResourceProviderTrait).filter(
+                    models.ResourceProviderTrait.trait_id.in_(to_delete_ids)
+                ).delete(synchronize_session='fetch')
+            if to_add_names:
+                for name in to_add_names:
+                    rp_trait = models.ResourceProviderTrait()
+                    rp_trait.trait_id = traits_dict[name].id
+                    rp_trait.resource_provider_id = _id
+                    context.session.add(rp_trait)
+            rp.generation = _increment_provider_generation(conn, rp)
+
+    @base.remotable
+    def set_traits(self, traits):
+        self._set_traits_to_db(self._context, self, self.id, traits)
+
 
 @base.NovaObjectRegistry.register
 class ResourceProviderList(base.ObjectListBase, base.NovaObject):
@@ -539,10 +594,6 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
         'objects': fields.ListOfObjectsField('ResourceProvider'),
     }
 
-    allowed_filters = (
-        'name', 'uuid'
-    )
-
     @staticmethod
     @db_api.api_context_manager.reader
     def _get_all_by_filters_from_db(context, filters):
@@ -550,6 +601,7 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
         #  filters = {
         #      'name': <name>,
         #      'uuid': <uuid>,
+        #      'member_of': [<aggregate_uuid>, <aggregate_uuid>]
         #      'resources': {
         #          'VCPU': 1,
         #          'MEMORY_MB': 1024
@@ -564,18 +616,32 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
         name = filters.pop('name', None)
         uuid = filters.pop('uuid', None)
         can_host = filters.pop('can_host', 0)
+        member_of = filters.pop('member_of', [])
 
         resources = filters.pop('resources', {})
         # NOTE(sbauza): We want to key the dict by the resource class IDs
         # and we want to make sure those class names aren't incorrect.
         resources = {_RC_CACHE.id_from_string(r_name): amount
-                     for r_name, amount in six.iteritems(resources)}
+                     for r_name, amount in resources.items()}
         query = context.session.query(models.ResourceProvider)
         if name:
             query = query.filter(models.ResourceProvider.name == name)
         if uuid:
             query = query.filter(models.ResourceProvider.uuid == uuid)
         query = query.filter(models.ResourceProvider.can_host == can_host)
+
+        # If 'member_of' has values join with the PlacementAggregates to
+        # get those resource providers that are associated with any of the
+        # list of aggregate uuids provided with 'member_of'.
+        if member_of:
+            join_statement = sa.join(_AGG_TBL, _RP_AGG_TBL, sa.and_(
+                _AGG_TBL.c.id == _RP_AGG_TBL.c.aggregate_id,
+                _AGG_TBL.c.uuid.in_(member_of)))
+            resource_provider_id = _RP_AGG_TBL.c.resource_provider_id
+            rps_in_aggregates = sa.select(
+                [resource_provider_id]).select_from(join_statement)
+            query = query.filter(models.ResourceProvider.id.in_(
+                rps_in_aggregates))
 
         if not resources:
             # Returns quickly the list in case we don't need to check the
@@ -609,7 +675,7 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
         #        total + reserved) * inv.allocation_ratio) AND
         #        inv.min_unit <= $AMOUNT_Z AND inv.max_unit >= $AMOUNT_Z AND
         #        $AMOUNT_Z % inv.step_size == 0))
-        # GROUP BY rp.uuid
+        # GROUP BY rp.id
         # HAVING
         #  COUNT(DISTINCT(inv.resource_class_id)) == len($RESOURCE_CLASSES)
         #
@@ -622,7 +688,6 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
 
         # Now, below is the LEFT JOIN for getting the allocations usage
         usage = sa.select([_ALLOC_TBL.c.resource_provider_id,
-                           _ALLOC_TBL.c.consumer_id,
                            _ALLOC_TBL.c.resource_class_id,
                            sql.func.sum(_ALLOC_TBL.c.used).label('used')])
         usage = usage.where(_ALLOC_TBL.c.resource_class_id.in_(
@@ -650,9 +715,9 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
                 _INV_TBL.c.max_unit >= amount,
                 amount % _INV_TBL.c.step_size == 0
             )
-            for (r_idx, amount) in six.iteritems(resources)]
+            for (r_idx, amount) in resources.items()]
         query = query.filter(sa.or_(*where_clauses))
-        query = query.group_by(_RP_TBL.c.uuid)
+        query = query.group_by(_RP_TBL.c.id)
         # NOTE(sbauza): Only RPs having all the asked resources can be provided
         query = query.having(sql.func.count(
             sa.distinct(_INV_TBL.c.resource_class_id)) == len(resources))
@@ -670,8 +735,10 @@ class ResourceProviderList(base.ObjectListBase, base.NovaObject):
 
         :param context: `nova.context.RequestContext` that may be used to grab
                         a DB connection.
-        :param filters: Can be `name`, `uuid` or `resources` where `resources`
-                        is a dict of amounts keyed by resource classes
+        :param filters: Can be `name`, `uuid`, `member_of` or `resources` where
+                        `member_of` is a list of aggregate uuids and
+                        `resources` is a dict of amounts keyed by resource
+                        classes.
         :type filters: dict
         """
         _ensure_rc_cache(context)
@@ -715,7 +782,7 @@ class _HasAResourceProvider(base.NovaObject):
             rc_str = _RC_CACHE.string_from_id(source['resource_class_id'])
             target.resource_class = rc_str
         if ('resource_provider' not in target and
-            'resource_provider' in source):
+                'resource_provider' in source):
             target.resource_provider = ResourceProvider()
             ResourceProvider._from_db_object(
                 context,
@@ -884,15 +951,6 @@ class Allocation(_HasAResourceProvider):
         if not result:
             raise exception.NotFound()
 
-    def create(self):
-        if 'id' in self:
-            raise exception.ObjectActionError(action='create',
-                                              reason='already created')
-        _ensure_rc_cache(self._context)
-        updates = self._make_db(self.obj_get_changes())
-        db_allocation = self._create_in_db(self._context, updates)
-        self._from_db_object(self._context, self, db_allocation)
-
     def destroy(self):
         self._destroy(self._context, self.id)
 
@@ -959,7 +1017,6 @@ def _check_capacity_exceeded(conn, allocs):
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
 
     usage = sa.select([_ALLOC_TBL.c.resource_provider_id,
-                       _ALLOC_TBL.c.consumer_id,
                        _ALLOC_TBL.c.resource_class_id,
                        sql.func.sum(_ALLOC_TBL.c.used).label('used')])
     usage = usage.where(_ALLOC_TBL.c.resource_class_id.in_(rc_ids))
@@ -1058,10 +1115,7 @@ def _check_capacity_exceeded(conn, allocs):
                 resource_class=alloc.resource_class,
                 resource_provider=rp_uuid)
         if rp_uuid not in res_providers:
-            rp = ResourceProvider(id=usage['resource_provider_id'],
-                                  uuid=rp_uuid,
-                                  generation=usage['generation'])
-            res_providers[rp_uuid] = rp
+            res_providers[rp_uuid] = alloc.resource_provider
     return list(res_providers.values())
 
 
@@ -1117,6 +1171,9 @@ class AllocationList(base.ObjectListBase, base.NovaObject):
         # resource class names that don't exist this will raise a
         # ResourceClassNotFound exception.
         for alloc in allocs:
+            if 'id' in alloc:
+                raise exception.ObjectActionError(action='create',
+                                                  reason='already created')
             _RC_CACHE.id_from_string(alloc.resource_class)
 
         # Before writing any allocation records, we check that the submitted
@@ -1141,7 +1198,8 @@ class AllocationList(base.ObjectListBase, base.NovaObject):
                         resource_class_id=rc_id,
                         consumer_id=alloc.consumer_id,
                         used=alloc.used)
-                conn.execute(ins_stmt)
+                result = conn.execute(ins_stmt)
+                alloc.id = result.lastrowid
 
             # Generation checking happens here. If the inventory for
             # this resource provider changed out from under us,
@@ -1149,7 +1207,7 @@ class AllocationList(base.ObjectListBase, base.NovaObject):
             # by the caller to choose to try again. It will also rollback the
             # transaction so that these changes always happen atomically.
             for rp in before_gens:
-                _increment_provider_generation(conn, rp)
+                rp.generation = _increment_provider_generation(conn, rp)
 
     @classmethod
     def get_all_by_resource_provider_uuid(cls, context, rp_uuid):
@@ -1353,7 +1411,8 @@ class ResourceClass(base.NovaObject):
             LOG.warning(_LW("Exceeded retry limit on ID generation while "
                             "creating ResourceClass %(name)s"),
                         {'name': self.name})
-            raise exception.ResourceClassExists(resource_class=self.name)
+            msg = _("creating resource class %s") % self.name
+            raise exception.MaxDBRetriesExceeded(action=msg)
 
     @staticmethod
     @db_api.api_context_manager.writer
@@ -1446,3 +1505,130 @@ class ResourceClassList(base.ObjectListBase, base.NovaObject):
     def __repr__(self):
         strings = [repr(x) for x in self.objects]
         return "ResourceClassList[" + ", ".join(strings) + "]"
+
+
+@base.NovaObjectRegistry.register
+class Trait(base.NovaObject):
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    # All the user-defined traits must begin with this prefix.
+    CUSTOM_NAMESPACE = 'CUSTOM_'
+
+    fields = {
+        'id': fields.IntegerField(read_only=True),
+        'name': fields.StringField(nullable=False)
+    }
+
+    @staticmethod
+    def _from_db_object(context, trait, db_trait):
+        for key in trait.fields:
+            setattr(trait, key, db_trait[key])
+        trait.obj_reset_changes()
+        trait._context = context
+        return trait
+
+    @staticmethod
+    @db_api.api_context_manager.writer
+    def _create_in_db(context, updates):
+        trait = models.Trait()
+        trait.update(updates)
+        context.session.add(trait)
+        return trait
+
+    def create(self):
+        if 'id' in self:
+            raise exception.ObjectActionError(action='create',
+                                              reason='already created')
+        if 'name' not in self:
+            raise exception.ObjectActionError(action='create',
+                                              reason='name is required')
+
+        updates = self.obj_get_changes()
+
+        try:
+            db_trait = self._create_in_db(self._context, updates)
+        except db_exc.DBDuplicateEntry:
+            raise exception.TraitExists(name=self.name)
+
+        self._from_db_object(self._context, self, db_trait)
+
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_by_name_from_db(context, name):
+        result = context.session.query(models.Trait).filter_by(
+            name=name).first()
+        if not result:
+            raise exception.TraitNotFound(name=name)
+        return result
+
+    @classmethod
+    def get_by_name(cls, context, name):
+        db_trait = cls._get_by_name_from_db(context, name)
+        return cls._from_db_object(context, cls(), db_trait)
+
+    @staticmethod
+    @db_api.api_context_manager.writer
+    def _destroy_in_db(context, _id, name):
+        num = context.session.query(models.ResourceProviderTrait).filter(
+            models.ResourceProviderTrait.trait_id == _id).count()
+        if num:
+            raise exception.TraitInUse(name=name)
+
+        res = context.session.query(models.Trait).filter_by(
+            name=name).delete()
+        if not res:
+            raise exception.TraitNotFound(name=name)
+
+    def destroy(self):
+        if 'name' not in self:
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='name is required')
+
+        if not self.name.startswith(self.CUSTOM_NAMESPACE):
+            raise exception.TraitCannotDeleteStandard(name=self.name)
+
+        if 'id' not in self:
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='ID attribute not found')
+
+        self._destroy_in_db(self._context, self.id, self.name)
+
+
+@base.NovaObjectRegistry.register
+class TraitList(base.ObjectListBase, base.NovaObject):
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    fields = {
+        'objects': fields.ListOfObjectsField('Trait')
+    }
+
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_all_from_db(context, filters):
+        if not filters:
+            filters = {}
+
+        query = context.session.query(models.Trait)
+        if 'name_in' in filters:
+            query = query.filter(models.Trait.name.in_(filters['name_in']))
+        if 'prefix' in filters:
+            query = query.filter(
+                models.Trait.name.like(filters['prefix'] + '%'))
+        if 'associated' in filters:
+            if filters['associated']:
+                query = query.join(models.ResourceProviderTrait,
+                    models.Trait.id == models.ResourceProviderTrait.trait_id
+                ).distinct()
+            else:
+                query = query.outerjoin(models.ResourceProviderTrait,
+                    models.Trait.id == models.ResourceProviderTrait.trait_id
+                ).filter(models.ResourceProviderTrait.trait_id == null())
+
+        return query.all()
+
+    @base.remotable_classmethod
+    def get_all(cls, context, filters=None):
+        db_traits = cls._get_all_from_db(context, filters)
+        return base.obj_make_list(context, cls(context), Trait, db_traits)

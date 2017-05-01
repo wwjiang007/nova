@@ -9,8 +9,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-import mock
+
 import time
+
+import mock
 
 from nova import context
 from nova import exception
@@ -64,20 +66,30 @@ class TestInstanceNotificationSample(
         actions = [
             self._test_power_off_on_server,
             self._test_restore_server,
-            self._test_suspend_server,
-            self._test_resume_server,
-            self._test_pause_server,
-            self._test_unpause_server,
+            self._test_suspend_resume_server,
+            self._test_pause_unpause_server,
             self._test_shelve_server,
             self._test_shelve_offload_server,
             self._test_unshelve_server,
             self._test_resize_server,
+            self._test_revert_server,
+            self._test_resize_confirm_server,
             self._test_snapshot_server,
+            self._test_rebuild_server,
+            self._test_reboot_server,
+            self._test_reboot_server_error,
+            self._test_trigger_crash_dump,
+            self._test_volume_attach_detach_server,
+            self._test_rescue_server,
+            self._test_unrescue_server,
+            self._test_soft_delete_server,
         ]
 
         for action in actions:
             fake_notifier.reset()
             action(server)
+            # Ensure that instance is in active state after an action
+            self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
 
     def test_create_delete_server(self):
         server = self._boot_a_server(
@@ -147,22 +159,22 @@ class TestInstanceNotificationSample(
         # for notification samples that expect instance.info_cache.network_info
         # to be set.
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
-        self.flags(notify_on_state_change='vm_and_task_state')
+        self.flags(notify_on_state_change='vm_and_task_state',
+                   group='notifications')
 
         server = self._boot_a_server(
             extra_params={'networks': [{'port': self.neutron.port_1['id']}]})
 
-        instance_updates = self._get_notifications('instance.update')
+        instance_updates = self._wait_for_notifications('instance.update', 7)
 
-        # The first notification comes from the nova-api the rest is from the
-        # nova-compute. To keep the test simpler assert this fact and then
-        # modify the publisher_id of the first notification to match the
-        # template
-        self.assertEqual('nova-api:fake-mini',
+        # The first notification comes from the nova-conductor the
+        # rest is from the nova-compute. To keep the test simpler
+        # assert this fact and then modify the publisher_id of the
+        # first notification to match the template
+        self.assertEqual('conductor:fake-mini',
                          instance_updates[0]['publisher_id'])
         instance_updates[0]['publisher_id'] = 'nova-compute:fake-mini'
 
-        self.assertEqual(7, len(instance_updates))
         create_steps = [
             # nothing -> scheduling
             {'reservation_id': server['reservation_id'],
@@ -255,7 +267,8 @@ class TestInstanceNotificationSample(
                       {'network_name': 'private-network',
                        'out_bytes': 0,
                        'in_bytes': 0},
-                  'nova_object.version': '1.0'}]
+                  'nova_object.version': '1.0'}],
+             'tags': ["tag1"]
             },
 
             # deleting -> deleted
@@ -268,7 +281,9 @@ class TestInstanceNotificationSample(
              'terminated_at': '2012-10-29T13:42:11Z',
              'ip_addresses': [],
              'power_state': 'pending',
-             'bandwidth': []},
+             'bandwidth': [],
+             'tags': ["tag1"]
+            },
         ]
 
         self._verify_instance_update_steps(delete_steps, instance_updates,
@@ -333,7 +348,6 @@ class TestInstanceNotificationSample(
 
         post = {'unshelve': None}
         self.api.post_server_action(server['id'], post)
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
 
     def _test_shelve_offload_server(self, server):
         self.flags(shelved_offload_time=-1)
@@ -372,7 +386,6 @@ class TestInstanceNotificationSample(
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])
 
         self.api.post_server_action(server['id'], {'unshelve': None})
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
 
     def _test_unshelve_server(self, server):
         # setting the shelved_offload_time to 0 should set the
@@ -399,12 +412,21 @@ class TestInstanceNotificationSample(
                 'uuid': server['id']},
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[5])
 
-    def _test_suspend_server(self, server):
+    def _test_suspend_resume_server(self, server):
         post = {'suspend': {}}
         self.api.post_server_action(server['id'], post)
         self._wait_for_state_change(self.admin_api, server, 'SUSPENDED')
 
-        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        post = {'resume': None}
+        self.api.post_server_action(server['id'], post)
+        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+
+        # Four versioned notification are generated.
+        # 0. instance-suspend-start
+        # 1. instance-suspend-end
+        # 2. instance-resume-start
+        # 3. instance-resume-end
+        self.assertEqual(4, len(fake_notifier.VERSIONED_NOTIFICATIONS))
         self._verify_notification(
             'instance-suspend-start',
             replacements={
@@ -418,32 +440,34 @@ class TestInstanceNotificationSample(
                 'uuid': server['id']},
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
 
-    def _test_resume_server(self, server):
-        post = {'resume': None}
-        self.api.post_server_action(server['id'], post)
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
-
-        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
         self._verify_notification(
             'instance-resume-start',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[2])
         self._verify_notification(
             'instance-resume-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])
 
         self.flags(reclaim_instance_interval=0)
 
-    def _test_pause_server(self, server):
+    def _test_pause_unpause_server(self, server):
         self.api.post_server_action(server['id'], {'pause': {}})
         self._wait_for_state_change(self.api, server, 'PAUSED')
 
-        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self.api.post_server_action(server['id'], {'unpause': {}})
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+
+        # Four versioned notifications are generated
+        # 0. instance-pause-start
+        # 1. instance-pause-end
+        # 2. instance-unpause-start
+        # 3. instance-unpause-end
+        self.assertEqual(4, len(fake_notifier.VERSIONED_NOTIFICATIONS))
         self._verify_notification(
             'instance-pause-start',
             replacements={
@@ -456,24 +480,18 @@ class TestInstanceNotificationSample(
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
-
-    def _test_unpause_server(self, server):
-        self.api.post_server_action(server['id'], {'unpause': {}})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
-
-        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
         self._verify_notification(
             'instance-unpause-start',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[2])
         self._verify_notification(
             'instance-unpause-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])
 
     def _test_resize_server(self, server):
         self.flags(allow_resize_to_same_host=True)
@@ -487,6 +505,13 @@ class TestInstanceNotificationSample(
             }
         }
         other_flavor_id = self.api.post_flavor(other_flavor_body)['id']
+        extra_specs = {
+            "extra_specs": {
+                "hw:watchdog_action": "reset"}}
+        self.admin_api.post_extra_spec(other_flavor_id, extra_specs)
+
+        # Ignore the create flavor notification
+        fake_notifier.reset()
 
         post = {
             'resize': {
@@ -514,7 +539,6 @@ class TestInstanceNotificationSample(
 
         post = {'revertResize': None}
         self.api.post_server_action(server['id'], post)
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
 
     def _test_snapshot_server(self, server):
         post = {'createImage': {'name': 'test-snap'}}
@@ -534,6 +558,64 @@ class TestInstanceNotificationSample(
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+
+    def _test_rebuild_server(self, server):
+        post = {
+            'rebuild': {
+                'imageRef': 'a2459075-d96c-40d5-893e-577ff92e721c',
+                'metadata': {}
+            }
+        }
+        self.api.post_server_action(server['id'], post)
+        # Before going back to ACTIVE state
+        # server state need to be changed to REBUILD state
+        self._wait_for_state_change(self.api, server,
+                                    expected_status='REBUILD')
+        self._wait_for_state_change(self.api, server,
+                                    expected_status='ACTIVE')
+
+        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'instance-rebuild-start',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+        self._verify_notification(
+            'instance-rebuild-end',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_do_rebuild_instance_with_claim')
+    def test_rebuild_server_exc(self, mock_rebuild):
+        def _compute_resources_unavailable(*args, **kwargs):
+            raise exception.ComputeResourcesUnavailable(
+                reason="fake-resource")
+
+        server = self._boot_a_server(
+            extra_params={'networks': [{'port': self.neutron.port_1['id']}]})
+
+        fake_notifier.reset()
+
+        post = {
+            'rebuild': {
+                'imageRef': 'a2459075-d96c-40d5-893e-577ff92e721c',
+                'metadata': {}
+            }
+        }
+        self.api.post_server_action(server['id'], post)
+        mock_rebuild.side_effect = _compute_resources_unavailable
+        self._wait_for_state_change(self.api, server, expected_status='ERROR')
+        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'instance-rebuild-error',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
 
     def _test_restore_server(self, server):
         self.flags(reclaim_instance_interval=30)
@@ -557,6 +639,49 @@ class TestInstanceNotificationSample(
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
 
         self.flags(reclaim_instance_interval=0)
+
+    def _test_reboot_server(self, server):
+        post = {'reboot': {'type': 'HARD'}}
+        self.api.post_server_action(server['id'], post)
+        self._wait_for_notification('instance.reboot.start')
+        self._wait_for_notification('instance.reboot.end')
+
+        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'instance-reboot-start',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+        self._verify_notification(
+            'instance-reboot-end',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+
+    @mock.patch('nova.virt.fake.SmallFakeDriver.reboot')
+    def _test_reboot_server_error(self, server, mock_reboot):
+        def _hard_reboot(*args, **kwargs):
+            raise exception.UnsupportedVirtType(virt="FakeVirt")
+        mock_reboot.side_effect = _hard_reboot
+        post = {'reboot': {'type': 'HARD'}}
+        self.api.post_server_action(server['id'], post)
+        self._wait_for_notification('instance.reboot.start')
+        self._wait_for_notification('instance.reboot.error')
+        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'instance-reboot-start',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+        self._verify_notification(
+            'instance-reboot-error',
+            replacements={
+                'reservation_id': server['reservation_id'],
+                'uuid': server['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
 
     def _attach_volume_to_server(self, server, volume_id):
         self.api.post_server_volume(
@@ -630,3 +755,24 @@ class TestInstanceNotificationSample(
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])
+
+    def _test_revert_server(self, server):
+        pass
+
+    def _test_resize_confirm_server(self, server):
+        pass
+
+    def _test_trigger_crash_dump(self, server):
+        pass
+
+    def _test_volume_attach_detach_server(self, server):
+        pass
+
+    def _test_rescue_server(self, server):
+        pass
+
+    def _test_unrescue_server(self, server):
+        pass
+
+    def _test_soft_delete_server(self, server):
+        pass

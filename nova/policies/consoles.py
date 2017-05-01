@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
@@ -22,21 +20,46 @@ POLICY_ROOT = 'os_compute_api:os-consoles:%s'
 
 
 consoles_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'create',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'show',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'delete',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'index',
-        check_str=base.RULE_ADMIN_OR_OWNER),
+    base.create_rule_default(
+        POLICY_ROOT % 'create',
+        base.RULE_ADMIN_OR_OWNER,
+        'Create a console for a server instance',
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/consoles'
+            }
+        ]),
+    base.create_rule_default(
+        POLICY_ROOT % 'show',
+        base.RULE_ADMIN_OR_OWNER,
+        'Show console details for a server instance',
+        [
+            {
+                'method': 'GET',
+                'path': '/servers/{server_id}/consoles/{console_id}'
+            }
+        ]),
+    base.create_rule_default(
+        POLICY_ROOT % 'delete',
+        base.RULE_ADMIN_OR_OWNER,
+        'Delete a console for a server instance',
+        [
+            {
+                'method': 'DELETE',
+                'path': '/servers/{server_id}/consoles/{console_id}'
+            }
+        ]),
+    base.create_rule_default(
+        POLICY_ROOT % 'index',
+        base.RULE_ADMIN_OR_OWNER,
+        'List all consoles for a server instance',
+        [
+            {
+                'method': 'GET',
+                'path': '/servers/{server_id}/consoles'
+            }
+        ])
 ]
 
 

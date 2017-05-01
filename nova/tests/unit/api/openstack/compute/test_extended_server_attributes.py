@@ -82,6 +82,7 @@ class ExtendedServerAttributesTestV21(test.TestCase):
     def setUp(self):
         super(ExtendedServerAttributesTestV21, self).setUp()
         fakes.stub_out_nw_api(self)
+        fakes.stub_out_secgroup_api(self)
         self.stub_out('nova.compute.api.API.get', fake_compute_get)
         self.stub_out('nova.compute.api.API.get_all', fake_compute_get_all)
         self.stub_out('nova.db.instance_get_by_uuid', fake_compute_get)
@@ -92,8 +93,7 @@ class ExtendedServerAttributesTestV21(test.TestCase):
         req.headers = {os_wsgi.API_VERSION_REQUEST_HEADER:
                        'compute %s' % self.wsgi_api_version}
         res = req.get_response(
-            fakes.wsgi_app_v21(init_only=('servers',
-                                          'os-extended-server-attributes')))
+            fakes.wsgi_app_v21())
         return res
 
     def _get_server(self, body):

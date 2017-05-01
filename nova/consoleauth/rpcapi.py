@@ -19,11 +19,13 @@ Client side of the consoleauth RPC API.
 import oslo_messaging as messaging
 
 import nova.conf
+from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
 
 
+@profiler.trace_cls("rpc")
 class ConsoleAuthAPI(object):
     '''Client side of the consoleauth rpc API.
 
@@ -46,10 +48,9 @@ class ConsoleAuthAPI(object):
 
         * 2.1 - Added access_url to authorize_console
 
-        ... Kilo, Liberty, Mitaka, and Newton support message version 2.1.
-        So, any changes to existing methods in 2.x after that point should be
-        done such that they can handle the version_cap being set to
-        2.1.
+        ... Kilo, Liberty, Mitaka, Newton, and Ocata support message version
+        2.1. So, any changes to existing methods in 2.x after that point should
+        be done such that they can handle the version_cap being set to 2.1.
 
     '''
 
@@ -62,6 +63,7 @@ class ConsoleAuthAPI(object):
         'liberty': '2.1',
         'mitaka': '2.1',
         'newton': '2.1',
+        'ocata': '2.1',
     }
 
     def __init__(self):

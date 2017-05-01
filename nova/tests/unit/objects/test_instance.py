@@ -176,7 +176,7 @@ class _TestInstanceObject(object):
                         'topic': 'fake-service-topic', 'report_count': 1,
                         'forced_down': False, 'disabled': False,
                         'disabled_reason': None, 'last_seen_up': None,
-                        'version': 1,
+                        'version': 1, 'uuid': uuids.service,
                     }
         fake_instance = dict(self.fake_instance,
                              services=[fake_service],
@@ -1835,7 +1835,8 @@ class _TestInstanceListObject(object):
             self.assertEqual(set(), inst.obj_what_changed())
 
         mock_fault_get.assert_called_once_with(self.context,
-                                               [x.uuid for x in insts])
+                                               [x.uuid for x in insts],
+                                               latest=True)
 
     @mock.patch('nova.objects.instance.Instance.obj_make_compatible')
     def test_get_by_security_group(self, mock_compat):

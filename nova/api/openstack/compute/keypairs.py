@@ -32,9 +32,6 @@ from nova.objects import keypair as keypair_obj
 from nova.policies import keypairs as kp_policies
 
 
-ALIAS = 'os-keypairs'
-
-
 class KeypairController(wsgi.Controller):
 
     """Keypair API controller for the OpenStack API."""
@@ -150,18 +147,21 @@ class KeypairController(wsgi.Controller):
             raise webob.exc.HTTPConflict(explanation=exc.format_message())
 
     @wsgi.Controller.api_version("2.1", "2.1")
+    @validation.query_schema(keypairs.delete_query_schema_v20)
     @wsgi.response(202)
     @extensions.expected_errors(404)
     def delete(self, req, id):
         self._delete(req, id)
 
     @wsgi.Controller.api_version("2.2", "2.9")    # noqa
+    @validation.query_schema(keypairs.delete_query_schema_v20)
     @wsgi.response(204)
     @extensions.expected_errors(404)
     def delete(self, req, id):
         self._delete(req, id)
 
     @wsgi.Controller.api_version("2.10")    # noqa
+    @validation.query_schema(keypairs.delete_query_schema_v210)
     @wsgi.response(204)
     @extensions.expected_errors(404)
     def delete(self, req, id):
@@ -188,6 +188,7 @@ class KeypairController(wsgi.Controller):
             return user_id
 
     @wsgi.Controller.api_version("2.10")
+    @validation.query_schema(keypairs.show_query_schema_v210)
     @extensions.expected_errors(404)
     def show(self, req, id):
         # handle optional user-id for admin only
@@ -195,11 +196,13 @@ class KeypairController(wsgi.Controller):
         return self._show(req, id, type=True, user_id=user_id)
 
     @wsgi.Controller.api_version("2.2", "2.9")  # noqa
+    @validation.query_schema(keypairs.show_query_schema_v20)
     @extensions.expected_errors(404)
     def show(self, req, id):
         return self._show(req, id, type=True)
 
     @wsgi.Controller.api_version("2.1", "2.1")  # noqa
+    @validation.query_schema(keypairs.show_query_schema_v20)
     @extensions.expected_errors(404)
     def show(self, req, id):
         return self._show(req, id)
@@ -228,12 +231,14 @@ class KeypairController(wsgi.Controller):
         return {'keypair': keypair}
 
     @wsgi.Controller.api_version("2.35")
+    @validation.query_schema(keypairs.index_query_schema_v235)
     @extensions.expected_errors(400)
     def index(self, req):
         user_id = self._get_user_id(req)
         return self._index(req, links=True, type=True, user_id=user_id)
 
     @wsgi.Controller.api_version("2.10", "2.34")  # noqa
+    @validation.query_schema(keypairs.index_query_schema_v210)
     @extensions.expected_errors(())
     def index(self, req):
         # handle optional user-id for admin only
@@ -241,11 +246,13 @@ class KeypairController(wsgi.Controller):
         return self._index(req, type=True, user_id=user_id)
 
     @wsgi.Controller.api_version("2.2", "2.9")  # noqa
+    @validation.query_schema(keypairs.index_query_schema_v20)
     @extensions.expected_errors(())
     def index(self, req):
         return self._index(req, type=True)
 
     @wsgi.Controller.api_version("2.1", "2.1")  # noqa
+    @validation.query_schema(keypairs.index_query_schema_v20)
     @extensions.expected_errors(())
     def index(self, req):
         return self._index(req)
@@ -313,37 +320,20 @@ class Controller(wsgi.Controller):
             self._add_key_name(req, servers)
 
 
-class Keypairs(extensions.V21APIExtensionBase):
-    """Keypair Support."""
+# use nova.api.extensions.server.extensions entry point to modify
+# server create kwargs
+# NOTE(gmann): This function is not supposed to use 'body_deprecated_param'
+# parameter as this is placed to handle scheduler_hint extension for V2.1.
+def server_create(server_dict, create_kwargs, body_deprecated_param):
+    # NOTE(alex_xu): The v2.1 API compat mode, we strip the spaces for
+    # keypair create. But we didn't strip spaces at here for
+    # backward-compatible some users already created keypair and name with
+    # leading/trailing spaces by legacy v2 API.
+    create_kwargs['key_name'] = server_dict.get('key_name')
 
-    name = "Keypairs"
-    alias = ALIAS
-    version = 1
 
-    def get_resources(self):
-        resources = [
-            extensions.ResourceExtension(ALIAS,
-                                         KeypairController())]
-        return resources
-
-    def get_controller_extensions(self):
-        controller = Controller()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    # use nova.api.extensions.server.extensions entry point to modify
-    # server create kwargs
-    # NOTE(gmann): This function is not supposed to use 'body_deprecated_param'
-    # parameter as this is placed to handle scheduler_hint extension for V2.1.
-    def server_create(self, server_dict, create_kwargs, body_deprecated_param):
-        # NOTE(alex_xu): The v2.1 API compat mode, we strip the spaces for
-        # keypair create. But we didn't strip spaces at here for
-        # backward-compatible some users already created keypair and name with
-        # leading/trailing spaces by legacy v2 API.
-        create_kwargs['key_name'] = server_dict.get('key_name')
-
-    def get_server_create_schema(self, version):
-        if version == '2.0':
-            return keypairs.server_create_v20
-        else:
-            return keypairs.server_create
+def get_server_create_schema(version):
+    if version == '2.0':
+        return keypairs.server_create_v20
+    else:
+        return keypairs.server_create

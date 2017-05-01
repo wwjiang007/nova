@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
@@ -22,15 +20,26 @@ POLICY_ROOT = 'os_compute_api:os-suspend-server:%s'
 
 
 suspend_server_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'resume',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'suspend',
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
+    base.create_rule_default(
+        POLICY_ROOT % 'resume',
+        base.RULE_ADMIN_OR_OWNER,
+        "Resume suspended server",
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (resume)'
+            }
+        ]),
+    base.create_rule_default(
+        POLICY_ROOT % 'suspend',
+        base.RULE_ADMIN_OR_OWNER,
+        "Suspend server",
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (suspend)'
+            }
+        ]),
 ]
 
 

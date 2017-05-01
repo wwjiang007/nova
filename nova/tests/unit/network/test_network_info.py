@@ -573,7 +573,7 @@ class NetworkInfoTests(test.NoDBTestCase):
 
         nwinfo = model.NetworkInfo(vifs)
         return netutils.get_injected_network_template(
-            nwinfo, use_ipv6=use_ipv6, libvirt_virt_type=libvirt_virt_type)
+            nwinfo, libvirt_virt_type=libvirt_virt_type)
 
     def test_injection_dynamic(self):
         expected = None
@@ -856,21 +856,24 @@ iface eth1 inet static
 class TestNetworkMetadata(test.NoDBTestCase):
     def setUp(self):
         super(TestNetworkMetadata, self).setUp()
-        self.netinfo = model.NetworkInfo([fake_network_cache_model.new_vif(
-            {'type': 'ethernet'})])
+        self.netinfo = self._new_netinfo()
+
+    def _new_netinfo(self, vif_type='ethernet'):
+        netinfo = model.NetworkInfo([fake_network_cache_model.new_vif(
+            {'type': vif_type})])
 
         # Give this vif ipv4 and ipv6 dhcp subnets
         ipv4_subnet = fake_network_cache_model.new_subnet(version=4)
         ipv6_subnet = fake_network_cache_model.new_subnet(version=6)
 
-        self.netinfo[0]['network']['subnets'][0] = ipv4_subnet
-        self.netinfo[0]['network']['subnets'][1] = ipv6_subnet
-        self.netinfo[0]['network']['meta']['mtu'] = 1500
+        netinfo[0]['network']['subnets'][0] = ipv4_subnet
+        netinfo[0]['network']['subnets'][1] = ipv6_subnet
+        netinfo[0]['network']['meta']['mtu'] = 1500
+        return netinfo
 
     def test_get_network_metadata_json(self):
 
-        net_metadata = netutils.get_network_metadata(self.netinfo,
-                                                     use_ipv6=True)
+        net_metadata = netutils.get_network_metadata(self.netinfo)
 
         # Physical Ethernet
         self.assertEqual(
@@ -938,8 +941,7 @@ class TestNetworkMetadata(test.NoDBTestCase):
 
         self.netinfo[0]['network']['subnets'][0] = ipv4_subnet
         self.netinfo[0]['network']['subnets'][1] = ipv6_subnet
-        net_metadata = netutils.get_network_metadata(self.netinfo,
-                                                     use_ipv6=True)
+        net_metadata = netutils.get_network_metadata(self.netinfo)
 
         # IPv4 Network
         self.assertEqual(
@@ -960,6 +962,46 @@ class TestNetworkMetadata(test.NoDBTestCase):
                 'network_id': 1
             },
             net_metadata['networks'][1])
+
+    def _test_get_network_metadata_json_ipv6_addr_mode(self, mode):
+        ipv6_subnet = fake_network_cache_model.new_subnet(
+            subnet_dict=dict(dhcp_server='1234:567::',
+                             ipv6_address_mode=mode), version=6)
+
+        self.netinfo[0]['network']['subnets'][1] = ipv6_subnet
+        net_metadata = netutils.get_network_metadata(self.netinfo)
+
+        self.assertEqual(
+            {
+                'id': 'network1',
+                'link': 'interface0',
+                'ip_address': 'fd00::2',
+                'netmask': 'ffff:ffff:ffff::',
+                'routes': [
+                    {
+                        'network': '::',
+                        'netmask': '::',
+                        'gateway': 'fd00::1'
+                    },
+                    {
+                        'network': '::',
+                        'netmask': 'ffff:ffff:ffff::',
+                        'gateway': 'fd00::1:1'
+                    }
+                ],
+                'type': 'ipv6_%s' % mode,
+                'network_id': 1
+            },
+            net_metadata['networks'][1])
+
+    def test_get_network_metadata_json_ipv6_addr_mode_slaac(self):
+        self._test_get_network_metadata_json_ipv6_addr_mode('slaac')
+
+    def test_get_network_metadata_json_ipv6_addr_mode_stateful(self):
+        self._test_get_network_metadata_json_ipv6_addr_mode('dhcpv6-stateful')
+
+    def test_get_network_metadata_json_ipv6_addr_mode_stateless(self):
+        self._test_get_network_metadata_json_ipv6_addr_mode('dhcpv6-stateless')
 
     def test__get_nets(self):
         expected_net = {
@@ -1195,3 +1237,32 @@ class TestNetworkMetadata(test.NoDBTestCase):
         self.netinfo[0]['network']['subnets'].pop(0)
         network_json = netutils.get_network_metadata(self.netinfo)
         self.assertEqual(expected_json, network_json)
+
+    def test_legacy_vif_types_type_passed_through(self):
+        legacy_types = [
+            model.VIF_TYPE_BRIDGE,
+            model.VIF_TYPE_DVS,
+            model.VIF_TYPE_HW_VEB,
+            model.VIF_TYPE_HYPERV,
+            model.VIF_TYPE_OVS,
+            model.VIF_TYPE_TAP,
+            model.VIF_TYPE_VHOSTUSER,
+            model.VIF_TYPE_VIF,
+        ]
+        link_types = []
+        for vif_type in legacy_types:
+            network_json = netutils.get_network_metadata(
+                self._new_netinfo(vif_type=vif_type))
+            link_types.append(network_json["links"][0]["type"])
+
+        self.assertEqual(legacy_types, link_types)
+
+    def test_new_vif_types_get_type_phy(self):
+        new_types = ["whizbang_nvf", "vswitch9"]
+        link_types = []
+        for vif_type in new_types:
+            network_json = netutils.get_network_metadata(
+                self._new_netinfo(vif_type=vif_type))
+            link_types.append(network_json["links"][0]["type"])
+
+        self.assertEqual(["phy"] * len(new_types), link_types)

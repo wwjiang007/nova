@@ -298,7 +298,7 @@ class IptablesManager(object):
             elif ip_version == 6:
                 tables = self.ipv6
 
-            for table, chains in six.iteritems(builtin_chains[ip_version]):
+            for table, chains in builtin_chains[ip_version].items():
                 for chain in chains:
                     tables[table].add_chain(chain)
                     tables[table].add_rule(chain, '-j $%s' % (chain,),
@@ -365,7 +365,7 @@ class IptablesManager(object):
                                                 run_as_root=True,
                                                 attempts=5)
             all_lines = all_tables.split('\n')
-            for table_name, table in six.iteritems(tables):
+            for table_name, table in tables.items():
                 start, end = self._find_table(all_lines, table_name)
                 all_lines[start:end] = self._modify_rules(
                         all_lines[start:end], table, table_name)
@@ -1903,7 +1903,11 @@ def set_vf_interface_vlan(pci_addr, mac_addr, vlan=0):
                   run_as_root=True,
                   check_exit_code=exit_code)
     # Bring up/down the VF's interface
+    # TODO(edand): The mac is assigned as a workaround for the following issue
+    #              https://bugzilla.redhat.com/show_bug.cgi?id=1372944
+    #              once resolved it will be removed
     utils.execute('ip', 'link', 'set', vf_ifname,
+                  'address', mac_addr,
                   port_state,
                   run_as_root=True,
                   check_exit_code=exit_code)

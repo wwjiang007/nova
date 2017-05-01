@@ -15,14 +15,34 @@
 import copy
 
 from oslo_log import log as logging
-import six
+
 import webob.exc
 
+from nova.api.openstack.compute import admin_actions
+from nova.api.openstack.compute import admin_password
+from nova.api.openstack.compute import config_drive
+from nova.api.openstack.compute import console_output
+from nova.api.openstack.compute import create_backup
+from nova.api.openstack.compute import deferred_delete
+from nova.api.openstack.compute import evacuate
+from nova.api.openstack.compute import extended_availability_zone
+from nova.api.openstack.compute import extended_server_attributes
+from nova.api.openstack.compute import extended_status
+from nova.api.openstack.compute import extended_volumes
+from nova.api.openstack.compute import hide_server_addresses
+from nova.api.openstack.compute import lock_server
+from nova.api.openstack.compute import migrate_server
+from nova.api.openstack.compute import multinic
+from nova.api.openstack.compute import pause_server
+from nova.api.openstack.compute import rescue
+from nova.api.openstack.compute import scheduler_hints
+from nova.api.openstack.compute import server_usage
+from nova.api.openstack.compute import servers
+from nova.api.openstack.compute import shelve
+from nova.api.openstack.compute import suspend_server
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import exception
-from nova.i18n import _LE
-from nova.policies import base as base_policies
 from nova.policies import extensions as ext_policies
 
 ALIAS = 'extensions'
@@ -149,6 +169,10 @@ v21_to_v2_alias_mapping = {
 # completely from the code we're going to have a static list here to
 # keep the surface metadata the same.
 hardcoded_extensions = [
+    {'name': 'Aggregates',
+     'alias': 'os-aggregates',
+     'description': 'Admin-only aggregate administration.'
+    },
     {'name': 'DiskConfig',
      'alias': 'os-disk-config',
      'description': 'Disk Management Extension.'},
@@ -162,6 +186,54 @@ hardcoded_extensions = [
     {'name': 'Personality',
      'description': 'Personality support.',
      'alias': 'os-personality'},
+    {'name': 'Flavors',
+     'description': 'Flavors Extension.',
+     'alias': 'flavors'},
+    {'name': 'FlavorManage',
+     'description': 'Flavor create/delete API support.',
+     'alias': 'os-flavor-manage'},
+    {'name': 'FlavorRxtx',
+     'description': 'Support to show the rxtx status of a flavor.',
+     'alias': 'os-flavor-rxtx'},
+    {'name': 'FlavorExtraSpecs',
+     'description': 'Flavors extra specs support.',
+     'alias': 'os-flavor-extra-specs'},
+    {'name': 'FlavorAccess',
+     'description': 'Flavor access support.',
+     'alias': 'os-flavor-access'},
+    {'name': 'Keypairs',
+     'description': 'Keypair Support.',
+     'alias': 'os-keypairs'}
+]
+
+
+# TODO(alex_xu): This is a list of unused extension objs. Add those
+# extension objs here for building a compatible extension API. Finally,
+# we should remove those extension objs, and add corresponding entries
+# in the 'hardcoded_extensions'.
+unused_extension_objs = [
+    admin_actions.AdminActions,
+    admin_password.AdminPassword,
+    config_drive.ConfigDrive,
+    console_output.ConsoleOutput,
+    create_backup.CreateBackup,
+    deferred_delete.DeferredDelete,
+    evacuate.Evacuate,
+    extended_availability_zone.ExtendedAvailabilityZone,
+    extended_server_attributes.ExtendedServerAttributes,
+    extended_status.ExtendedStatus,
+    extended_volumes.ExtendedVolumes,
+    hide_server_addresses.HideServerAddresses,
+    lock_server.LockServer,
+    migrate_server.MigrateServer,
+    multinic.Multinic,
+    pause_server.PauseServer,
+    rescue.Rescue,
+    scheduler_hints.SchedulerHints,
+    server_usage.ServerUsage,
+    servers.Servers,
+    shelve.Shelve,
+    suspend_server.SuspendServer
 ]
 
 # V2.1 does not support XML but we need to keep an entry in the
@@ -197,7 +269,7 @@ class ExtensionInfoController(wsgi.Controller):
     def _create_fake_ext(self, name, alias, description=""):
         return FakeExtension(name, alias, description)
 
-    def _add_vif_extension(self, discoverable_extensions):
+    def _add_vif_extension(self, all_extensions):
         vif_extension = {}
         vif_extension_info = {'name': 'ExtendedVIFNet',
                               'alias': 'OS-EXT-VIF-NET',
@@ -206,69 +278,67 @@ class ExtensionInfoController(wsgi.Controller):
         vif_extension[vif_extension_info["alias"]] = self._create_fake_ext(
             vif_extension_info["name"], vif_extension_info["alias"],
                 vif_extension_info["description"])
-        discoverable_extensions.update(vif_extension)
+        all_extensions.update(vif_extension)
 
     def _get_extensions(self, context):
         """Filter extensions list based on policy."""
 
-        discoverable_extensions = dict()
+        all_extensions = dict()
 
         for item in hardcoded_extensions:
-            discoverable_extensions[item['alias']] = self._create_fake_ext(
+            all_extensions[item['alias']] = self._create_fake_ext(
                 item['name'],
                 item['alias'],
                 item['description']
             )
 
-        for alias, ext in six.iteritems(self.extension_info.get_extensions()):
-            action = ':'.join([
-                base_policies.COMPUTE_API, alias, 'discoverable'])
-            if context.can(action, fatal=False):
-                discoverable_extensions[alias] = ext
-            else:
-                LOG.debug("Filter out extension %s from discover list",
-                          alias)
+        for ext_cls in unused_extension_objs:
+            ext = ext_cls(None)
+            all_extensions[ext.alias] = ext
+
+        for alias, ext in self.extension_info.get_extensions().items():
+            all_extensions[alias] = ext
 
         # Add fake v2 extensions to list
         extra_exts = {}
-        for alias in discoverable_extensions:
+        for alias in all_extensions:
             if alias in v21_to_v2_extension_list_mapping:
                 for extra_ext in v21_to_v2_extension_list_mapping[alias]:
                     extra_exts[extra_ext["alias"]] = self._create_fake_ext(
                         extra_ext["name"], extra_ext["alias"],
                         extra_ext["description"])
-        discoverable_extensions.update(extra_exts)
+        all_extensions.update(extra_exts)
 
         # Suppress extensions which we don't want to see in v2
         for suppress_ext in v2_extension_suppress_list:
             try:
-                del discoverable_extensions[suppress_ext]
+                del all_extensions[suppress_ext]
             except KeyError:
                 pass
 
         # v2.1 to v2 extension name mapping
         for rename_ext in v21_to_v2_alias_mapping:
-            if rename_ext in discoverable_extensions:
+            if rename_ext in all_extensions:
                 new_name = v21_to_v2_alias_mapping[rename_ext]
                 mod_ext = copy.deepcopy(
-                    discoverable_extensions.pop(rename_ext))
+                    all_extensions.pop(rename_ext))
                 mod_ext.alias = new_name
-                discoverable_extensions[new_name] = mod_ext
+                all_extensions[new_name] = mod_ext
 
-        return discoverable_extensions
+        return all_extensions
 
     @extensions.expected_errors(())
     def index(self, req):
         context = req.environ['nova.context']
         context.can(ext_policies.BASE_POLICY_NAME)
-        discoverable_extensions = self._get_extensions(context)
+        all_extensions = self._get_extensions(context)
         # NOTE(gmann): This is for v2.1 compatible mode where
         # extension list should show all extensions as shown by v2.
         # Here we add VIF extension which has been removed from v2.1 list.
         if req.is_legacy_v2():
-            self._add_vif_extension(discoverable_extensions)
+            self._add_vif_extension(all_extensions)
         sorted_ext_list = sorted(
-            six.iteritems(discoverable_extensions))
+            all_extensions.items())
 
         extensions = []
         for _alias, ext in sorted_ext_list:
@@ -330,7 +400,7 @@ class LoadedExtensionInfo(object):
         try:
             extension.is_valid()
         except AttributeError:
-            LOG.exception(_LE("Exception loading extension"))
+            LOG.exception("Exception loading extension")
             return False
 
         return True

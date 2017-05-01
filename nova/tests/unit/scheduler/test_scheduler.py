@@ -18,7 +18,6 @@ Tests For Scheduler
 """
 
 import mock
-import testtools
 
 from nova import context
 from nova import objects
@@ -63,14 +62,6 @@ class SchedulerManagerInitTestCase(test.NoDBTestCase):
         self.flags(driver='caching_scheduler', group='scheduler')
         driver = self.manager_cls().driver
         self.assertIsInstance(driver, caching_scheduler.CachingScheduler)
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_nonexist_schedulerdriver(self,
-                                           mock_init_agg,
-                                           mock_init_inst):
-        with testtools.ExpectedException(ValueError):
-            self.flags(driver='nonexist_scheduler', group='scheduler')
 
 
 class SchedulerManagerTestCase(test.NoDBTestCase):
@@ -159,6 +150,16 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
             mock_sync.assert_called_once_with(mock.sentinel.context,
                                               mock.sentinel.host_name,
                                               mock.sentinel.instance_uuids)
+
+    @mock.patch('nova.objects.host_mapping.discover_hosts')
+    def test_discover_hosts(self, mock_discover):
+        cm1 = objects.CellMapping(name='cell1')
+        cm2 = objects.CellMapping(name='cell2')
+        mock_discover.return_value = [objects.HostMapping(host='a',
+                                                          cell_mapping=cm1),
+                                      objects.HostMapping(host='b',
+                                                          cell_mapping=cm2)]
+        self.manager._discover_hosts_in_cells(mock.sentinel.context)
 
 
 class SchedulerInitTestCase(test.NoDBTestCase):

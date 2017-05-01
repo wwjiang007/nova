@@ -17,11 +17,11 @@ Fakes For Scheduler tests.
 """
 
 import datetime
-import six
 
 from nova import objects
 from nova.scheduler import driver
 from nova.scheduler import host_manager
+from nova.tests import uuidsentinel
 
 NUMA_TOPOLOGY = objects.NUMATopology(
                            cells=[
@@ -122,6 +122,25 @@ COMPUTE_NODES = [
             host='fake', hypervisor_hostname='fake-hyp'),
 ]
 
+RESOURCE_PROVIDERS = [
+    dict(
+        uuid=uuidsentinel.rp1,
+        name='host1',
+        generation=1),
+    dict(
+        uuid=uuidsentinel.rp2,
+        name='host2',
+        generation=1),
+    dict(
+        uuid=uuidsentinel.rp3,
+        name='host3',
+        generation=1),
+    dict(
+        uuid=uuidsentinel.rp4,
+        name='host4',
+        generation=1),
+]
+
 SERVICES = [
         objects.Service(host='host1', disabled=False),
         objects.Service(host='host2', disabled=True),
@@ -137,12 +156,12 @@ def get_service_by_host(host):
 
 class FakeHostState(host_manager.HostState):
     def __init__(self, host, node, attribute_dict, instances=None):
-        super(FakeHostState, self).__init__(host, node)
+        super(FakeHostState, self).__init__(host, node, None)
         if instances:
             self.instances = {inst.uuid: inst for inst in instances}
         else:
             self.instances = {}
-        for (key, val) in six.iteritems(attribute_dict):
+        for (key, val) in attribute_dict.items():
             setattr(self, key, val)
 
 

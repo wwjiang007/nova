@@ -27,13 +27,15 @@ higher level APIs around the raw libvirt API. These APIs are
 then used by all the other libvirt related classes
 """
 
+import time
+
 from lxml import etree
 from oslo_log import log as logging
 from oslo_service import loopingcall
 from oslo_utils import encodeutils
 from oslo_utils import excutils
 from oslo_utils import importutils
-import time
+import six
 
 from nova.compute import power_state
 from nova import exception
@@ -120,6 +122,8 @@ class Guest(object):
         :returns guest.Guest: Guest ready to be launched
         """
         try:
+            if six.PY3 and isinstance(xml, six.binary_type):
+                xml = xml.decode('utf-8')
             guest = host.write_instance_config(xml)
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -257,16 +261,17 @@ class Guest(object):
         :returns: guest.VCPUInfo
         """
         vcpus = self._domain.vcpus()
-        if vcpus is not None:
-            for vcpu in vcpus[0]:
-                yield VCPUInfo(
-                    id=vcpu[0], cpu=vcpu[3], state=vcpu[1], time=vcpu[2])
+        for vcpu in vcpus[0]:
+            yield VCPUInfo(
+                id=vcpu[0], cpu=vcpu[3], state=vcpu[1], time=vcpu[2])
 
-    def delete_configuration(self):
+    def delete_configuration(self, support_uefi=False):
         """Undefines a domain from hypervisor."""
         try:
-            self._domain.undefineFlags(
-                libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE)
+            flags = libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
+            if support_uefi:
+                flags |= libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+            self._domain.undefineFlags(flags)
         except libvirt.libvirtError:
             LOG.debug("Error from libvirt during undefineFlags. %d"
                       "Retrying with undefine", self.id)
@@ -296,9 +301,22 @@ class Guest(object):
         """
         flags = persistent and libvirt.VIR_DOMAIN_AFFECT_CONFIG or 0
         flags |= live and libvirt.VIR_DOMAIN_AFFECT_LIVE or 0
+
         device_xml = conf.to_xml()
+        if six.PY3 and isinstance(device_xml, six.binary_type):
+            device_xml = device_xml.decode('utf-8')
+
         LOG.debug("attach device xml: %s", device_xml)
         self._domain.attachDeviceFlags(device_xml, flags=flags)
+
+    def get_config(self):
+        """Returns the config instance for a guest
+
+        :returns: LibvirtConfigGuest instance
+        """
+        config = vconfig.LibvirtConfigGuest()
+        config.parse_str(self._domain.XMLDesc(0))
+        return config
 
     def get_disk(self, device):
         """Returns the disk mounted at device
@@ -309,7 +327,15 @@ class Guest(object):
             doc = etree.fromstring(self._domain.XMLDesc(0))
         except Exception:
             return None
+
+        # FIXME(lyarwood): Workaround for the device being either a target dev
+        # when called via swap_volume or source file when called via
+        # live_snapshot. This should be removed once both are refactored to use
+        # only the target dev of the device.
         node = doc.find("./devices/disk/target[@dev='%s'].." % device)
+        if node is None:
+            node = doc.find("./devices/disk/source[@file='%s'].." % device)
+
         if node is not None:
             conf = vconfig.LibvirtConfigGuestDisk()
             conf.parse_dom(node)
@@ -370,12 +396,36 @@ class Guest(object):
                                inc_sleep_time. On reaching this threshold,
                                max_sleep_time will be used as the sleep time.
         """
+        def _try_detach_device(conf, persistent=False, live=False):
+            # Raise DeviceNotFound if the device isn't found during detach
+            try:
+                self.detach_device(conf, persistent=persistent, live=live)
+                LOG.debug('Successfully detached device %s from guest. '
+                          'Persistent? %s. Live? %s',
+                          device, persistent, live)
+            except libvirt.libvirtError as ex:
+                with excutils.save_and_reraise_exception():
+                    errcode = ex.get_error_code()
+                    if errcode == libvirt.VIR_ERR_OPERATION_FAILED:
+                        errmsg = ex.get_error_message()
+                        if 'not found' in errmsg:
+                            # This will be raised if the live domain
+                            # detach fails because the device is not found
+                            raise exception.DeviceNotFound(device=device)
+                    elif errcode == libvirt.VIR_ERR_INVALID_ARG:
+                        errmsg = ex.get_error_message()
+                        if 'no target device' in errmsg:
+                            # This will be raised if the persistent domain
+                            # detach fails because the device is not found
+                            raise exception.DeviceNotFound(device=device)
 
         conf = get_device_conf_func(device)
         if conf is None:
             raise exception.DeviceNotFound(device=device)
 
-        self.detach_device(conf, persistent, live)
+        LOG.debug('Attempting initial detach for device %s', device)
+        _try_detach_device(conf, persistent, live)
+        LOG.debug('Start retrying detach until device %s is gone.', device)
 
         @loopingcall.RetryDecorator(max_retry_count=max_retry_count,
                                     inc_sleep_time=inc_sleep_time,
@@ -384,17 +434,9 @@ class Guest(object):
         def _do_wait_and_retry_detach():
             config = get_device_conf_func(device)
             if config is not None:
-                try:
-                    # Device is already detached from persistent domain
-                    # and only transient domain needs update
-                    self.detach_device(config, persistent=False, live=live)
-                except libvirt.libvirtError as ex:
-                    with excutils.save_and_reraise_exception():
-                        errcode = ex.get_error_code()
-                        if errcode == libvirt.VIR_ERR_OPERATION_FAILED:
-                            errmsg = ex.get_error_message()
-                            if 'not found' in errmsg:
-                                raise exception.DeviceNotFound(device=device)
+                # Device is already detached from persistent domain
+                # and only transient domain needs update
+                _try_detach_device(config, persistent=False, live=live)
 
                 reason = _("Unable to detach from guest transient domain.")
                 raise exception.DeviceDetachFailed(device=device,
@@ -413,7 +455,11 @@ class Guest(object):
         """
         flags = persistent and libvirt.VIR_DOMAIN_AFFECT_CONFIG or 0
         flags |= live and libvirt.VIR_DOMAIN_AFFECT_LIVE or 0
+
         device_xml = conf.to_xml()
+        if six.PY3 and isinstance(device_xml, six.binary_type):
+            device_xml = device_xml.decode('utf-8')
+
         LOG.debug("detach device xml: %s", device_xml)
         self._domain.detachDeviceFlags(device_xml, flags=flags)
 
@@ -479,7 +525,7 @@ class Guest(object):
                    {'instance_name': self.name,
                     'error_code': error_code,
                     'ex': ex})
-            raise exception.NovaException(msg)
+            raise exception.InternalError(msg)
 
         return hardware.InstanceInfo(
             state=LIBVIRT_POWER_STATE[dom_info[0]],
@@ -521,7 +567,12 @@ class Guest(object):
         flags |= reuse_ext and (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REUSE_EXT
                                 or 0)
         flags |= quiesce and libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_QUIESCE or 0
-        self._domain.snapshotCreateXML(conf.to_xml(), flags=flags)
+
+        device_xml = conf.to_xml()
+        if six.PY3 and isinstance(device_xml, six.binary_type):
+            device_xml = device_xml.decode('utf-8')
+
+        self._domain.snapshotCreateXML(device_xml, flags=flags)
 
     def shutdown(self):
         """Shutdown guest"""
@@ -580,7 +631,7 @@ class Guest(object):
         else:
             if params:
                 if migrate_uri:
-                    # In migrateToURI3 this paramenter is searched in
+                    # In migrateToURI3 this parameter is searched in
                     # the `params` dict
                     params['migrate_uri'] = migrate_uri
                 self._domain.migrateToURI3(
@@ -761,7 +812,14 @@ class BlockDevice(object):
         # The earliest tag which contains this commit is v2.3.0-rc1, so we
         # should be able to remove this workaround when MIN_LIBVIRT_VERSION
         # reaches 2.3.0, or we move to handling job events instead.
-        return status.end != 0 and status.cur == status.end
+        # NOTE(lyarwood): Use the mirror element to determine if we can pivot
+        # to the new disk once blockjobinfo reports progress as complete.
+        if status.end != 0 and status.cur == status.end:
+            disk = self._guest.get_disk(self._disk)
+            if disk and disk.mirror:
+                return disk.mirror.ready == 'yes'
+
+        return False
 
 
 class VCPUInfo(object):

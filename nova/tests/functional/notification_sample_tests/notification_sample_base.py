@@ -61,6 +61,15 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.api = api_fixture.api
         self.admin_api = api_fixture.admin_api
+
+        # NOTE(gibi): Notification payloads always reflect the data needed
+        # for every supported API microversion so we can safe to use the latest
+        # API version in the tests. This helps the test to use the new API
+        # features too.
+        max_version = 'latest'
+        self.api.microversion = max_version
+        self.admin_api.microversion = max_version
+
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
 
@@ -143,11 +152,22 @@ class NotificationSampleTestBase(test.TestCase,
                                   }}
 
         flavor_id = self.api.post_flavor(flavor_body)['id']
+        extra_specs = {
+            "extra_specs": {
+                "hw:watchdog_action": "disabled"}}
+        self.admin_api.post_extra_spec(flavor_id, extra_specs)
+
+        # Ignore the create flavor notification
+        fake_notifier.reset()
 
         server = self._build_minimal_create_server_request(
             self.api, 'some-server',
             image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
             flavor_id=flavor_id)
+
+        # NOTE(gibi): from microversion 2.19 the description is not set to the
+        # instance name automatically but can be provided at boot.
+        server['description'] = 'some-server'
 
         if extra_params:
             extra_params['return_reservation_id'] = True
@@ -166,6 +186,9 @@ class NotificationSampleTestBase(test.TestCase,
         found_server = self._wait_for_state_change(self.api, created_server,
                                                    expected_status)
         found_server['reservation_id'] = reservation_id
+
+        if found_server['status'] == 'ACTIVE':
+            self.api.put_server_tags(found_server['id'], ['tag1'])
         return found_server
 
     def _wait_until_deleted(self, server):
@@ -192,3 +215,25 @@ class NotificationSampleTestBase(test.TestCase,
         self.assertTrue(
             received,
             'notification %s hasn\'t been received' % event_type)
+
+    def _wait_for_notifications(self, event_type, expected_count, timeout=1.0):
+        notifications = []
+        start_time = time.clock()
+
+        while (len(notifications) < expected_count
+               and time.clock() - start_time < timeout):
+
+            fake_notifier.wait_for_versioned_notification(event_type, timeout)
+            notifications += self._get_notifications(event_type)
+            # NOTE(gibi): reading and then resetting the fake_notifier without
+            # synchronization doesn't lead to race condition as the only
+            # parallelism is due to eventlet.
+            fake_notifier.reset()
+
+        self.assertEqual(expected_count, len(notifications),
+                         'Unexpected number of %s notifications '
+                         'within the given timeout. '
+                         'Expected %d, got %d: %s' %
+                         (event_type, expected_count, len(notifications),
+                          notifications))
+        return notifications

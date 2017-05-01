@@ -1,15 +1,17 @@
 .. -*- rst -*-
 
+.. _os-services:
+
 ================================
  Compute services (os-services)
 ================================
 
-Lists all running Compute services for a tenant, enables or disables
+Lists all running Compute services in a region, enables or disables
 scheduling for a Compute service, logs disabled Compute service
 information, and deletes a Compute service.
 
 For an overview of Compute services, see `OpenStack
-Compute <http://docs.openstack.org/liberty/install-guide-obs/common/get_started_compute.html>`__.
+Compute <https://docs.openstack.org/ocata/install-guide-obs/common/get-started-compute.html>`__.
 
 List Compute Services
 =====================

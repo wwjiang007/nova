@@ -14,7 +14,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Compute API that proxies via Cells Service."""
+"""Compute API that proxies via Cells Service.
+
+This relates to cells v1. This layer is basically responsible for intercepting
+compute/api calls at the top layer and forwarding to the child cell to be
+replayed there.
+"""
 
 import oslo_messaging as messaging
 from oslo_utils import excutils
@@ -24,6 +29,7 @@ from nova.cells import rpcapi as cells_rpcapi
 from nova.cells import utils as cells_utils
 from nova.compute import api as compute_api
 from nova.compute import rpcapi as compute_rpcapi
+from nova.compute import task_states
 from nova.compute import vm_states
 from nova import exception
 from nova import objects
@@ -32,6 +38,7 @@ from nova import rpc
 
 
 check_instance_state = compute_api.check_instance_state
+reject_instance_state = compute_api.reject_instance_state
 check_instance_lock = compute_api.check_instance_lock
 check_instance_cell = compute_api.check_instance_cell
 
@@ -232,7 +239,8 @@ class ComputeCellsAPI(compute_api.API):
                 # set now.  We handle this similarly to how the
                 # ObjectActionError is handled below.
                 with excutils.save_and_reraise_exception() as exc:
-                    instance = self._lookup_instance(context, instance.uuid)
+                    _cell, instance = self._lookup_instance(context,
+                                                            instance.uuid)
                     if instance is None:
                         exc.reraise = False
                     elif instance.cell_name:
@@ -247,7 +255,7 @@ class ComputeCellsAPI(compute_api.API):
             # lookup is attempted which will either return a full Instance or
             # None if not found. If not found then it's acceptable to skip the
             # rest of the delete processing.
-            instance = self._lookup_instance(context, instance.uuid)
+            _cell, instance = self._lookup_instance(context, instance.uuid)
             if instance is None:
                 # Instance has been deleted out from under us
                 return
@@ -372,6 +380,8 @@ class ComputeCellsAPI(compute_api.API):
         self._cast_to_cells(context, instance, 'unshelve')
 
     @check_instance_cell
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_vnc_console(self, context, instance, console_type):
         """Get a url to a VNC Console."""
         if not instance.host:
@@ -387,6 +397,8 @@ class ComputeCellsAPI(compute_api.API):
         return {'url': connect_info['access_url']}
 
     @check_instance_cell
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_spice_console(self, context, instance, console_type):
         """Get a url to a SPICE Console."""
         if not instance.host:
@@ -402,6 +414,8 @@ class ComputeCellsAPI(compute_api.API):
         return {'url': connect_info['access_url']}
 
     @check_instance_cell
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_rdp_console(self, context, instance, console_type):
         """Get a url to a RDP Console."""
         if not instance.host:
@@ -417,6 +431,8 @@ class ComputeCellsAPI(compute_api.API):
         return {'url': connect_info['access_url']}
 
     @check_instance_cell
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_serial_console(self, context, instance, console_type):
         """Get a url to a serial console."""
         if not instance.host:
@@ -535,7 +551,13 @@ class HostAPI(compute_api.HostAPI):
         """Returns the result of calling "uptime" on the target host."""
         return self.cells_rpcapi.get_host_uptime(context, host_name)
 
-    def service_get_all(self, context, filters=None, set_zones=False):
+    def service_get_all(self, context, filters=None, set_zones=False,
+                        all_cells=False):
+        """Get all services.
+
+        Note that this is the cellsv1 variant, which means we ignore the
+        "all_cells" parameter.
+        """
         if filters is None:
             filters = {}
         if 'availability_zone' in filters:

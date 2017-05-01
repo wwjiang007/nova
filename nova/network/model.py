@@ -26,7 +26,7 @@ from nova import utils
 
 def ensure_string_keys(d):
     # http://bugs.python.org/issue4978
-    return {str(k): v for k, v in six.iteritems(d)}
+    return {str(k): v for k, v in d.items()}
 
 # Constants for the 'vif_type' field in VIF class
 VIF_TYPE_OVS = 'ovs'
@@ -37,6 +37,7 @@ VIF_TYPE_BRIDGE = 'bridge'
 VIF_TYPE_802_QBG = '802.1qbg'
 VIF_TYPE_802_QBH = '802.1qbh'
 VIF_TYPE_HW_VEB = 'hw_veb'
+VIF_TYPE_HYPERV = 'hyperv'
 VIF_TYPE_HOSTDEV = 'hostdev_physical'
 VIF_TYPE_IB_HOSTDEV = 'ib_hostdev'
 VIF_TYPE_MIDONET = 'midonet'
@@ -46,6 +47,7 @@ VIF_TYPE_OTHER = 'other'
 VIF_TYPE_TAP = 'tap'
 VIF_TYPE_MACVTAP = 'macvtap'
 VIF_TYPE_BINDING_FAILED = 'binding_failed'
+VIF_TYPE_VIF = 'vif'
 
 # Constants for dictionary keys in the 'vif_details' field in the VIF
 # class
@@ -96,8 +98,16 @@ VNIC_TYPE_MACVTAP = 'macvtap'
 VNIC_TYPE_DIRECT_PHYSICAL = 'direct-physical'
 VNIC_TYPE_BAREMETAL = 'baremetal'
 
+# Define list of ports which needs pci request.
+# Note: The macvtap port needs a PCI request as it is a tap interface
+# with VF as the lower physical interface.
 VNIC_TYPES_SRIOV = (VNIC_TYPE_DIRECT, VNIC_TYPE_MACVTAP,
                     VNIC_TYPE_DIRECT_PHYSICAL)
+
+# Define list of ports which are passthrough to the guest
+# and need a special treatment on snapshot and suspend/resume
+VNIC_TYPES_DIRECT_PASSTHROUGH = (VNIC_TYPE_DIRECT,
+                                 VNIC_TYPE_DIRECT_PHYSICAL)
 
 # Constants for the 'vif_model' values
 VIF_MODEL_VIRTIO = 'virtio'
@@ -108,6 +118,7 @@ VIF_MODEL_E1000 = 'e1000'
 VIF_MODEL_E1000E = 'e1000e'
 VIF_MODEL_NETFRONT = 'netfront'
 VIF_MODEL_SPAPR_VLAN = 'spapr-vlan'
+VIF_MODEL_LAN9118 = 'lan9118'
 
 VIF_MODEL_SRIOV = 'sriov'
 VIF_MODEL_VMXNET = 'vmxnet'
@@ -122,9 +133,22 @@ VIF_MODEL_ALL = (
     VIF_MODEL_E1000E,
     VIF_MODEL_NETFRONT,
     VIF_MODEL_SPAPR_VLAN,
+    VIF_MODEL_LAN9118,
     VIF_MODEL_SRIOV,
     VIF_MODEL_VMXNET,
     VIF_MODEL_VMXNET3,
+)
+
+# these types have been leaked to guests in network_data.json
+LEGACY_EXPOSED_VIF_TYPES = (
+    VIF_TYPE_BRIDGE,
+    VIF_TYPE_DVS,
+    VIF_TYPE_HW_VEB,
+    VIF_TYPE_HYPERV,
+    VIF_TYPE_OVS,
+    VIF_TYPE_TAP,
+    VIF_TYPE_VHOSTUSER,
+    VIF_TYPE_VIF,
 )
 
 # Constant for max length of network interface names

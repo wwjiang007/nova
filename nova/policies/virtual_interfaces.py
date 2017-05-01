@@ -13,22 +13,25 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-virtual-interfaces'
-POLICY_ROOT = 'os_compute_api:os-virtual-interfaces:%s'
 
 
 virtual_interfaces_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
+    base.create_rule_default(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        """List Virtual Interfaces.
+
+This works only with the nova-network service, which is now deprecated""",
+        [
+            {
+                'method': 'GET',
+                'path': '/servers/{server_id}/os-virtual-interfaces'
+            }
+        ]),
 ]
 
 

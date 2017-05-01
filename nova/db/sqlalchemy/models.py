@@ -81,10 +81,12 @@ class Service(BASE, NovaBase, models.SoftDeleteMixin):
         schema.UniqueConstraint("host", "topic", "deleted",
                                 name="uniq_services0host0topic0deleted"),
         schema.UniqueConstraint("host", "binary", "deleted",
-                                name="uniq_services0host0binary0deleted")
-        )
+                                name="uniq_services0host0binary0deleted"),
+        Index('services_uuid_idx', 'uuid', unique=True),
+    )
 
     id = Column(Integer, primary_key=True)
+    uuid = Column(String(36), nullable=True)
     host = Column(String(255))  # , ForeignKey('hosts.id'))
     binary = Column(String(255))
     topic = Column(String(255))
@@ -177,6 +179,7 @@ class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
     ram_allocation_ratio = Column(Float, nullable=True)
     cpu_allocation_ratio = Column(Float, nullable=True)
     disk_allocation_ratio = Column(Float, nullable=True)
+    mapped = Column(Integer, nullable=True, default=0)
 
 
 class Certificate(BASE, NovaBase, models.SoftDeleteMixin):
@@ -622,6 +625,8 @@ class BlockDeviceMapping(BASE, NovaBase, models.SoftDeleteMixin):
     connection_info = Column(MediumText())
 
     tag = Column(String(255))
+
+    attachment_id = Column(String(36))
 
 
 class SecurityGroupInstanceAssociation(BASE, NovaBase, models.SoftDeleteMixin):

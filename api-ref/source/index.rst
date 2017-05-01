@@ -18,10 +18,11 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: servers-action-evacuate.inc
 .. include:: servers-action-deferred-delete.inc
 .. include:: servers-action-console-output.inc
-.. include:: servers-action-remote-consoles.inc
 .. include:: servers-action-shelve.inc
 .. include:: servers-action-crash-dump.inc
+.. include:: servers-action-remote-consoles.inc
 .. include:: servers-admin-action.inc
+.. include:: servers-remote-consoles.inc
 .. include:: server-security-groups.inc
 .. include:: diagnostics.inc
 .. include:: ips.inc
@@ -29,7 +30,6 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-instance-actions.inc
 .. include:: os-interface.inc
 .. include:: os-server-password.inc
-.. include:: os-virtual-interfaces.inc
 .. include:: os-volume-attachments.inc
 .. include:: flavors.inc
 .. include:: os-flavor-access.inc
@@ -42,7 +42,6 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-availability-zone.inc
 .. include:: os-cells.inc
 .. include:: os-consoles.inc
-.. include:: os-hosts.inc
 .. include:: os-hypervisors.inc
 .. include:: os-instance-usage-audit-log.inc
 .. include:: os-migrations.inc
@@ -55,7 +54,6 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-server-external-events.inc
 .. include:: os-cloudpipe.inc
 .. include:: extensions.inc
-.. include:: os-certificates.inc
 .. include:: os-networks.inc
 .. include:: os-volumes.inc
 .. include:: images.inc
@@ -70,3 +68,14 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-security-groups.inc
 .. include:: os-security-group-default-rules.inc
 .. include:: os-security-group-rules.inc
+.. include:: os-hosts.inc
+.. include:: os-virtual-interfaces.inc
+
+=============
+Obsolete APIs
+=============
+
+This section contains the reference for APIs that were part of the OpenStack
+Compute API in the past, but no longer exist.
+
+.. include:: os-certificates.inc

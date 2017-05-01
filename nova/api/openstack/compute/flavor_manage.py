@@ -28,7 +28,7 @@ ALIAS = "os-flavor-manage"
 
 class FlavorManageController(wsgi.Controller):
     """The Flavor Lifecycle API controller for the OpenStack API."""
-    _view_builder_class = flavors_view.ViewBuilderV21
+    _view_builder_class = flavors_view.ViewBuilder
 
     def __init__(self):
         super(FlavorManageController, self).__init__()
@@ -88,19 +88,3 @@ class FlavorManageController(wsgi.Controller):
                 'Not all flavors have been migrated to the API database'))
 
         return self._view_builder.show(req, flavor)
-
-
-class FlavorManage(extensions.V21APIExtensionBase):
-    """Flavor create/delete API support."""
-
-    name = "FlavorManage"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = FlavorManageController()
-        extension = extensions.ControllerExtension(self, 'flavors', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

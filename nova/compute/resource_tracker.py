@@ -18,6 +18,7 @@ Track resources like memory and disk for a compute host.  Provides the
 scheduler with useful information about availability through the ComputeNode
 model.
 """
+import collections
 import copy
 
 from oslo_log import log as logging
@@ -81,18 +82,18 @@ class ResourceTracker(object):
     are built and destroyed.
     """
 
-    def __init__(self, host, driver, nodename):
+    def __init__(self, host, driver):
         self.host = host
         self.driver = driver
         self.pci_tracker = None
-        self.nodename = nodename
-        self.compute_node = None
+        # Dict of objects.ComputeNode objects, keyed by nodename
+        self.compute_nodes = {}
         self.stats = stats.Stats()
         self.tracked_instances = {}
         self.tracked_migrations = {}
         monitor_handler = monitors.MonitorHandler(self)
         self.monitors = monitor_handler.monitors
-        self.old_resources = objects.ComputeNode()
+        self.old_resources = collections.defaultdict(objects.ComputeNode)
         self.scheduler_client = scheduler_client.SchedulerClient()
         self.ram_allocation_ratio = CONF.ram_allocation_ratio
         self.cpu_allocation_ratio = CONF.cpu_allocation_ratio
@@ -116,9 +117,15 @@ class ResourceTracker(object):
                   be used to revert the resource usage if an error occurs
                   during the instance build.
         """
-        if self.disabled:
-            # compute_driver doesn't support resource tracking, just
-            # set the 'host' and node fields and continue the build:
+        if self.disabled(nodename):
+            # instance_claim() was called before update_available_resource()
+            # (which ensures that a compute node exists for nodename). We
+            # shouldn't get here but in case we do, just set the instance's
+            # host and nodename attribute (probably incorrect) and return a
+            # NoopClaim.
+            # TODO(jaypipes): Remove all the disabled junk from the resource
+            # tracker. Servicegroup API-level active-checking belongs in the
+            # nova-compute manager.
             self._set_instance_host_and_node(instance, nodename)
             return claims.NopClaim()
 
@@ -141,10 +148,14 @@ class ResourceTracker(object):
         LOG.debug("Disk overhead for %(flavor)d GB instance; %(overhead)d "
                   "GB", {'flavor': instance.flavor.root_gb,
                          'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug("CPU overhead for %(flavor)d vCPUs instance; %(overhead)d "
+                  "vCPU(s)", {'flavor': instance.flavor.vcpus,
+                              'overhead': overhead.get('vcpus', 0)})
 
+        cn = self.compute_nodes[nodename]
         pci_requests = objects.InstancePCIRequests.get_by_instance_uuid(
             context, instance.uuid)
-        claim = claims.Claim(context, instance, self, self.compute_node,
+        claim = claims.Claim(context, instance, nodename, self, cn,
                              pci_requests, overhead=overhead, limits=limits)
 
         # self._set_instance_host_and_node() will save instance to the DB
@@ -166,7 +177,7 @@ class ResourceTracker(object):
 
         elevated = context.elevated()
         # persist changes to the compute node:
-        self._update(elevated)
+        self._update(elevated, cn)
 
         return claim
 
@@ -217,7 +228,7 @@ class ResourceTracker(object):
                                                new_instance_type,
                                                nodename, move_type)
 
-        if self.disabled:
+        if self.disabled(nodename):
             # compute_driver doesn't support resource tracking, just
             # generate the migration record and continue the resize:
             return claims.NopClaim(migration=migration)
@@ -230,6 +241,11 @@ class ResourceTracker(object):
         LOG.debug("Disk overhead for %(flavor)d GB instance; %(overhead)d "
                   "GB", {'flavor': instance.flavor.root_gb,
                          'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug("CPU overhead for %(flavor)d vCPUs instance; %(overhead)d "
+                  "vCPU(s)", {'flavor': instance.flavor.vcpus,
+                              'overhead': overhead.get('vcpus', 0)})
+
+        cn = self.compute_nodes[nodename]
 
         # TODO(moshele): we are recreating the pci requests even if
         # there was no change on resize. This will cause allocating
@@ -246,8 +262,8 @@ class ResourceTracker(object):
             for request in instance.pci_requests.requests:
                 if request.alias_name is None:
                     new_pci_requests.requests.append(request)
-        claim = claims.MoveClaim(context, instance, new_instance_type,
-                                 image_meta, self, self.compute_node,
+        claim = claims.MoveClaim(context, instance, nodename,
+                                 new_instance_type, image_meta, self, cn,
                                  new_pci_requests, overhead=overhead,
                                  limits=limits)
 
@@ -281,7 +297,7 @@ class ResourceTracker(object):
         self._update_usage_from_migration(context, instance, migration,
                                           nodename)
         elevated = context.elevated()
-        self._update(elevated)
+        self._update(elevated, cn)
 
         return claim
 
@@ -352,12 +368,25 @@ class ResourceTracker(object):
         instance.clear_numa_topology()
         self._unset_instance_host_and_node(instance)
 
-        self._update(context.elevated())
+        self._update(context.elevated(), self.compute_nodes[nodename])
+
+    def _drop_pci_devices(self, instance, nodename, prefix):
+        if self.pci_tracker:
+            # free old/new allocated pci devices
+            pci_devices = self._get_migration_context_resource(
+                'pci_devices', instance, prefix=prefix)
+            if pci_devices:
+                for pci_device in pci_devices:
+                    self.pci_tracker.free_device(pci_device, instance)
+
+                dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+                self.compute_nodes[nodename].pci_device_pools = dev_pools_obj
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
     def drop_move_claim(self, context, instance, nodename,
                         instance_type=None, prefix='new_'):
-        """Remove usage for an incoming/outgoing migration."""
+        # Remove usage for an incoming/outgoing migration on the destination
+        # node.
         if instance['uuid'] in self.tracked_migrations:
             migration = self.tracked_migrations.pop(instance['uuid'])
 
@@ -371,24 +400,29 @@ class ResourceTracker(object):
                     'numa_topology', instance, prefix=prefix)
                 usage = self._get_usage_dict(
                         instance_type, numa_topology=numa_topology)
-                if self.pci_tracker:
-                    # free old/new allocated pci devices
-                    pci_devices = self._get_migration_context_resource(
-                        'pci_devices', instance, prefix=prefix)
-                    if pci_devices:
-                        for pci_device in pci_devices:
-                            self.pci_tracker.free_device(pci_device, instance)
-                self._update_usage(usage, sign=-1)
+                self._drop_pci_devices(instance, nodename, prefix)
+                self._update_usage(usage, nodename, sign=-1)
 
                 ctxt = context.elevated()
-                self._update(ctxt)
+                self._update(ctxt, self.compute_nodes[nodename])
+        # Remove usage for an instance that is not tracked in migrations (such
+        # as on the source node after a migration).
+        # NOTE(lbeliveau): On resize on the same node, the instance is
+        # included in both tracked_migrations and tracked_instances.
+        elif (instance['uuid'] in self.tracked_instances):
+            self.tracked_instances.pop(instance['uuid'])
+            self._drop_pci_devices(instance, nodename, prefix)
+            # TODO(lbeliveau): Validate if numa needs the same treatment.
+
+            ctxt = context.elevated()
+            self._update(ctxt, self.compute_nodes[nodename])
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
     def update_usage(self, context, instance, nodename):
         """Update the resource usage and stats after a change in an
         instance
         """
-        if self.disabled:
+        if self.disabled(nodename):
             return
 
         uuid = instance['uuid']
@@ -397,11 +431,11 @@ class ResourceTracker(object):
         # claim first:
         if uuid in self.tracked_instances:
             self._update_usage_from_instance(context, instance, nodename)
-            self._update(context.elevated())
+            self._update(context.elevated(), self.compute_nodes[nodename])
 
-    @property
-    def disabled(self):
-        return self.compute_node is None
+    def disabled(self, nodename):
+        return (nodename not in self.compute_nodes or
+                not self.driver.node_is_available(nodename))
 
     def _init_compute_node(self, context, resources):
         """Initialize the compute node if it does not already exist.
@@ -421,38 +455,41 @@ class ResourceTracker(object):
 
         # if there is already a compute node just use resources
         # to initialize
-        if self.compute_node:
-            self._copy_resources(resources)
-            self._setup_pci_tracker(context, resources)
-            self.scheduler_client.update_resource_stats(self.compute_node)
+        if nodename in self.compute_nodes:
+            cn = self.compute_nodes[nodename]
+            self._copy_resources(cn, resources)
+            self._setup_pci_tracker(context, cn, resources)
+            self._update(context, cn)
             return
 
         # now try to get the compute node record from the
         # database. If we get one we use resources to initialize
-        self.compute_node = self._get_compute_node(context, nodename)
-        if self.compute_node:
-            self._copy_resources(resources)
-            self._setup_pci_tracker(context, resources)
-            self.scheduler_client.update_resource_stats(self.compute_node)
+        cn = self._get_compute_node(context, nodename)
+        if cn:
+            self.compute_nodes[nodename] = cn
+            self._copy_resources(cn, resources)
+            self._setup_pci_tracker(context, cn, resources)
+            self._update(context, cn)
             return
 
         # there was no local copy and none in the database
         # so we need to create a new compute node. This needs
         # to be initialized with resource values.
-        self.compute_node = objects.ComputeNode(context)
-        self.compute_node.host = self.host
-        self._copy_resources(resources)
-        self.compute_node.create()
+        cn = objects.ComputeNode(context)
+        cn.host = self.host
+        self._copy_resources(cn, resources)
+        self.compute_nodes[nodename] = cn
+        cn.create()
         LOG.info(_LI('Compute_service record created for '
                      '%(host)s:%(node)s'),
                  {'host': self.host, 'node': nodename})
 
-        self._setup_pci_tracker(context, resources)
-        self.scheduler_client.update_resource_stats(self.compute_node)
+        self._setup_pci_tracker(context, cn, resources)
+        self._update(context, cn)
 
-    def _setup_pci_tracker(self, context, resources):
+    def _setup_pci_tracker(self, context, compute_node, resources):
         if not self.pci_tracker:
-            n_id = self.compute_node.id if self.compute_node else None
+            n_id = compute_node.id
             self.pci_tracker = pci_manager.PciDevTracker(context, node_id=n_id)
             if 'pci_passthrough_devices' in resources:
                 dev_json = resources.pop('pci_passthrough_devices')
@@ -460,24 +497,22 @@ class ResourceTracker(object):
                         dev_json)
 
             dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
-            self.compute_node.pci_device_pools = dev_pools_obj
+            compute_node.pci_device_pools = dev_pools_obj
 
-    def _copy_resources(self, resources):
-        """Copy resource values to initialize compute_node and related
-        data structures.
-        """
+    def _copy_resources(self, compute_node, resources):
+        """Copy resource values to supplied compute_node."""
         # purge old stats and init with anything passed in by the driver
         self.stats.clear()
         self.stats.digest_stats(resources.get('stats'))
-        self.compute_node.stats = copy.deepcopy(self.stats)
+        compute_node.stats = copy.deepcopy(self.stats)
 
         # update the allocation ratios for the related ComputeNode object
-        self.compute_node.ram_allocation_ratio = self.ram_allocation_ratio
-        self.compute_node.cpu_allocation_ratio = self.cpu_allocation_ratio
-        self.compute_node.disk_allocation_ratio = self.disk_allocation_ratio
+        compute_node.ram_allocation_ratio = self.ram_allocation_ratio
+        compute_node.cpu_allocation_ratio = self.cpu_allocation_ratio
+        compute_node.disk_allocation_ratio = self.disk_allocation_ratio
 
         # now copy rest to compute_node
-        self.compute_node.update_from_virt_driver(resources)
+        compute_node.update_from_virt_driver(resources)
 
     def _get_host_metrics(self, context, nodename):
         """Get the metrics from monitors and
@@ -563,12 +598,13 @@ class ResourceTracker(object):
         # if it does not already exist.
         self._init_compute_node(context, resources)
 
+        nodename = resources['hypervisor_hostname']
+
         # if we could not init the compute node the tracker will be
         # disabled and we should quit now
-        if self.disabled:
+        if self.disabled(nodename):
             return
 
-        nodename = resources['hypervisor_hostname']
         # Grab all instances assigned to this node:
         instances = objects.InstanceList.get_by_host_and_node(
             context, self.host, nodename,
@@ -589,7 +625,9 @@ class ResourceTracker(object):
         # Detect and account for orphaned instances that may exist on the
         # hypervisor, but are not in the DB:
         orphans = self._find_orphaned_instances()
-        self._update_usage_from_orphans(orphans)
+        self._update_usage_from_orphans(orphans, nodename)
+
+        cn = self.compute_nodes[nodename]
 
         # NOTE(yjiang5): Because pci device tracker status is not cleared in
         # this periodic task, and also because the resource tracker is not
@@ -597,17 +635,17 @@ class ResourceTracker(object):
         # from deleted instances.
         self.pci_tracker.clean_usage(instances, migrations, orphans)
         dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
-        self.compute_node.pci_device_pools = dev_pools_obj
+        cn.pci_device_pools = dev_pools_obj
 
         self._report_final_resource_view(nodename)
 
         metrics = self._get_host_metrics(context, nodename)
         # TODO(pmurray): metrics should not be a json string in ComputeNode,
         # but it is. This should be changed in ComputeNode
-        self.compute_node.metrics = jsonutils.dumps(metrics)
+        cn.metrics = jsonutils.dumps(metrics)
 
         # update the compute_node
-        self._update(context)
+        self._update(context, cn)
         LOG.debug('Compute_service record updated for %(host)s:%(node)s',
                   {'host': self.host, 'node': nodename})
 
@@ -663,10 +701,11 @@ class ResourceTracker(object):
         including instance calculations and in-progress resource claims. These
         values will be exposed via the compute node table to the scheduler.
         """
-        vcpus = self.compute_node.vcpus
+        cn = self.compute_nodes[nodename]
+        vcpus = cn.vcpus
         if vcpus:
             tcpu = vcpus
-            ucpu = self.compute_node.vcpus_used
+            ucpu = cn.vcpus_used
             LOG.debug("Total usable vcpus: %(tcpu)s, "
                       "total allocated vcpus: %(ucpu)s",
                       {'tcpu': vcpus,
@@ -674,8 +713,8 @@ class ResourceTracker(object):
         else:
             tcpu = 0
             ucpu = 0
-        pci_stats = (list(self.compute_node.pci_device_pools) if
-            self.compute_node.pci_device_pools else [])
+        pci_stats = (list(cn.pci_device_pools) if
+            cn.pci_device_pools else [])
         LOG.info(_LI("Final resource view: "
                      "name=%(node)s "
                      "phys_ram=%(phys_ram)sMB "
@@ -686,56 +725,74 @@ class ResourceTracker(object):
                      "used_vcpus=%(used_vcpus)s "
                      "pci_stats=%(pci_stats)s"),
                  {'node': nodename,
-                  'phys_ram': self.compute_node.memory_mb,
-                  'used_ram': self.compute_node.memory_mb_used,
-                  'phys_disk': self.compute_node.local_gb,
-                  'used_disk': self.compute_node.local_gb_used,
+                  'phys_ram': cn.memory_mb,
+                  'used_ram': cn.memory_mb_used,
+                  'phys_disk': cn.local_gb,
+                  'used_disk': cn.local_gb_used,
                   'total_vcpus': tcpu,
                   'used_vcpus': ucpu,
                   'pci_stats': pci_stats})
 
-    def _resource_change(self):
+    def _resource_change(self, compute_node):
         """Check to see if any resources have changed."""
-        if not obj_base.obj_equal_prims(self.compute_node, self.old_resources):
-            self.old_resources = copy.deepcopy(self.compute_node)
+        nodename = compute_node.hypervisor_hostname
+        old_compute = self.old_resources[nodename]
+        if not obj_base.obj_equal_prims(
+                compute_node, old_compute, ['updated_at']):
+            self.old_resources[nodename] = copy.deepcopy(compute_node)
             return True
         return False
 
-    def _update(self, context):
+    def _update(self, context, compute_node):
         """Update partial stats locally and populate them to Scheduler."""
-        if not self._resource_change():
+        if not self._resource_change(compute_node):
             return
+        nodename = compute_node.hypervisor_hostname
+        compute_node.save()
         # Persist the stats to the Scheduler
-        self.scheduler_client.update_resource_stats(self.compute_node)
+        try:
+            inv_data = self.driver.get_inventory(nodename)
+            self.scheduler_client.set_inventory_for_provider(
+                compute_node.uuid,
+                compute_node.hypervisor_hostname,
+                inv_data,
+            )
+        except NotImplementedError:
+            # Eventually all virt drivers will return an inventory dict in the
+            # format that the placement API expects and we'll be able to remove
+            # this code branch
+            self.scheduler_client.update_compute_node(compute_node)
+
         if self.pci_tracker:
             self.pci_tracker.save(context)
 
-    def _update_usage(self, usage, sign=1):
+    def _update_usage(self, usage, nodename, sign=1):
         mem_usage = usage['memory_mb']
         disk_usage = usage.get('root_gb', 0)
+        vcpus_usage = usage.get('vcpus', 0)
 
         overhead = self.driver.estimate_instance_overhead(usage)
         mem_usage += overhead['memory_mb']
         disk_usage += overhead.get('disk_gb', 0)
+        vcpus_usage += overhead.get('vcpus', 0)
 
-        self.compute_node.memory_mb_used += sign * mem_usage
-        self.compute_node.local_gb_used += sign * disk_usage
-        self.compute_node.local_gb_used += sign * usage.get('ephemeral_gb', 0)
-        self.compute_node.vcpus_used += sign * usage.get('vcpus', 0)
+        cn = self.compute_nodes[nodename]
+        cn.memory_mb_used += sign * mem_usage
+        cn.local_gb_used += sign * disk_usage
+        cn.local_gb_used += sign * usage.get('ephemeral_gb', 0)
+        cn.vcpus_used += sign * vcpus_usage
 
         # free ram and disk may be negative, depending on policy:
-        self.compute_node.free_ram_mb = (self.compute_node.memory_mb -
-                                         self.compute_node.memory_mb_used)
-        self.compute_node.free_disk_gb = (self.compute_node.local_gb -
-                                          self.compute_node.local_gb_used)
+        cn.free_ram_mb = cn.memory_mb - cn.memory_mb_used
+        cn.free_disk_gb = cn.local_gb - cn.local_gb_used
 
-        self.compute_node.running_vms = self.stats.num_instances
+        cn.running_vms = self.stats.num_instances
 
         # Calculate the numa usage
         free = sign == -1
         updated_numa_topology = hardware.get_host_numa_usage_from_instance(
-                self.compute_node, usage, free)
-        self.compute_node.numa_topology = updated_numa_topology
+                cn, usage, free)
+        cn.numa_topology = updated_numa_topology
 
     def _get_migration_context_resource(self, resource, instance,
                                         prefix='new_'):
@@ -810,18 +867,19 @@ class ResourceTracker(object):
                 'numa_topology', instance, prefix='old_')
 
         if itype:
+            cn = self.compute_nodes[nodename]
             usage = self._get_usage_dict(
                         itype, numa_topology=numa_topology)
             if self.pci_tracker and sign:
                 self.pci_tracker.update_pci_for_instance(
                     context, instance, sign=sign)
-            self._update_usage(usage)
+            self._update_usage(usage, nodename)
             if self.pci_tracker:
                 obj = self.pci_tracker.stats.to_device_pools_obj()
-                self.compute_node.pci_device_pools = obj
+                cn.pci_device_pools = obj
             else:
                 obj = objects.PciDevicePoolList()
-                self.compute_node.pci_device_pools = obj
+                cn.pci_device_pools = obj
             self.tracked_migrations[uuid] = migration
 
     def _update_usage_from_migrations(self, context, migrations, nodename):
@@ -889,8 +947,9 @@ class ResourceTracker(object):
             self.tracked_instances.pop(uuid)
             sign = -1
 
+        cn = self.compute_nodes[nodename]
         self.stats.update_stats_for_instance(instance, is_removed_instance)
-        self.compute_node.stats = copy.deepcopy(self.stats)
+        cn.stats = copy.deepcopy(self.stats)
 
         # if it's a new or deleted instance:
         if is_new_instance or is_removed_instance:
@@ -899,16 +958,17 @@ class ResourceTracker(object):
                                                          instance,
                                                          sign=sign)
             self.scheduler_client.reportclient.update_instance_allocation(
-                self.compute_node, instance, sign)
+                cn, instance, sign)
             # new instance, update compute node resource usage:
-            self._update_usage(self._get_usage_dict(instance), sign=sign)
+            self._update_usage(self._get_usage_dict(instance), nodename,
+                               sign=sign)
 
-        self.compute_node.current_workload = self.stats.calculate_workload()
+        cn.current_workload = self.stats.calculate_workload()
         if self.pci_tracker:
             obj = self.pci_tracker.stats.to_device_pools_obj()
-            self.compute_node.pci_device_pools = obj
+            cn.pci_device_pools = obj
         else:
-            self.compute_node.pci_device_pools = objects.PciDevicePoolList()
+            cn.pci_device_pools = objects.PciDevicePoolList()
 
     def _update_usage_from_instances(self, context, instances, nodename):
         """Calculate resource usage based on instance utilization.  This is
@@ -918,25 +978,24 @@ class ResourceTracker(object):
         """
         self.tracked_instances.clear()
 
+        cn = self.compute_nodes[nodename]
         # set some initial values, reserve room for host/hypervisor:
-        self.compute_node.local_gb_used = CONF.reserved_host_disk_mb / 1024
-        self.compute_node.memory_mb_used = CONF.reserved_host_memory_mb
-        self.compute_node.vcpus_used = 0
-        self.compute_node.free_ram_mb = (self.compute_node.memory_mb -
-                                         self.compute_node.memory_mb_used)
-        self.compute_node.free_disk_gb = (self.compute_node.local_gb -
-                                          self.compute_node.local_gb_used)
-        self.compute_node.current_workload = 0
-        self.compute_node.running_vms = 0
+        cn.local_gb_used = CONF.reserved_host_disk_mb / 1024
+        cn.memory_mb_used = CONF.reserved_host_memory_mb
+        cn.vcpus_used = CONF.reserved_host_cpus
+        cn.free_ram_mb = (cn.memory_mb - cn.memory_mb_used)
+        cn.free_disk_gb = (cn.local_gb - cn.local_gb_used)
+        cn.current_workload = 0
+        cn.running_vms = 0
 
         for instance in instances:
             if instance.vm_state not in vm_states.ALLOW_RESOURCE_REMOVAL:
                 self._update_usage_from_instance(context, instance, nodename)
 
         self.scheduler_client.reportclient.remove_deleted_instances(
-                self.compute_node, self.tracked_instances.values())
-        self.compute_node.free_ram_mb = max(0, self.compute_node.free_ram_mb)
-        self.compute_node.free_disk_gb = max(0, self.compute_node.free_disk_gb)
+                cn, self.tracked_instances.values())
+        cn.free_ram_mb = max(0, cn.free_ram_mb)
+        cn.free_disk_gb = max(0, cn.free_disk_gb)
 
     def _find_orphaned_instances(self):
         """Given the set of instances and migrations already account for
@@ -959,7 +1018,7 @@ class ResourceTracker(object):
 
         return orphans
 
-    def _update_usage_from_orphans(self, orphans):
+    def _update_usage_from_orphans(self, orphans, nodename):
         """Include orphaned instances in usage."""
         for orphan in orphans:
             memory_mb = orphan['memory_mb']
@@ -970,7 +1029,7 @@ class ResourceTracker(object):
 
             # just record memory usage for the orphan
             usage = {'memory_mb': memory_mb}
-            self._update_usage(usage)
+            self._update_usage(usage, nodename)
 
     def _verify_resources(self, resources):
         resource_keys = ["vcpus", "memory_mb", "local_gb", "cpu_info",

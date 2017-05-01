@@ -61,7 +61,7 @@ class FakeRequest(object):
 
 
 class ServerVirtualInterfaceTestV21(test.NoDBTestCase):
-    wsgi_api_version = None
+    wsgi_api_version = '2.1'
     expected_response = {
         'virtual_interfaces': [
             {'id': uuids.vif1_uuid,
@@ -71,6 +71,10 @@ class ServerVirtualInterfaceTestV21(test.NoDBTestCase):
 
     def setUp(self):
         super(ServerVirtualInterfaceTestV21, self).setUp()
+        # These APIs aren't implemented by the neutronv2 API code in Nova so
+        # the tests need to specifically run against nova-network unless
+        # otherwise setup to run with Neutron and expect failure.
+        self.flags(use_neutron=False)
         self.stubs.Set(compute.api.API, "get",
                        compute_api_get)
         self.stubs.Set(network.api.API, "get_vifs_by_instance",
@@ -84,6 +88,14 @@ class ServerVirtualInterfaceTestV21(test.NoDBTestCase):
         req = fakes.HTTPRequest.blank('', version=self.wsgi_api_version)
         res_dict = self.controller.index(req, 'fake_uuid')
         self.assertEqual(self.expected_response, res_dict)
+
+    def test_get_virtual_interfaces_list_offset_and_limit(self):
+        path = '/v2/fake/os-virtual-interfaces?offset=1&limit=1'
+        req = fakes.HTTPRequest.blank(path, version=self.wsgi_api_version)
+        res_dict = self.controller.index(req, 'fake_uuid')
+        name = 'virtual_interfaces'
+        limited_response = {name: [self.expected_response[name][1]]}
+        self.assertEqual(limited_response, res_dict)
 
     def test_vif_instance_not_found(self):
         self.mox.StubOutWithMock(compute_api.API, 'get')
@@ -143,3 +155,15 @@ class ServerVirtualInterfaceEnforcementV21(test.NoDBTestCase):
         self.assertEqual(
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
+
+
+class ServerVirtualInterfaceDeprecationTest(test.NoDBTestCase):
+
+    def setUp(self):
+        super(ServerVirtualInterfaceDeprecationTest, self).setUp()
+        self.controller = vi21.ServerVirtualInterfaceController()
+        self.req = fakes.HTTPRequest.blank('', version='2.44')
+
+    def test_index_not_found(self):
+        self.assertRaises(exception.VersionNotFoundForAPIMethod,
+            self.controller.index, self.req, FAKE_UUID)

@@ -15,7 +15,6 @@
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 import requests
-import six
 from six.moves.urllib import parse
 
 
@@ -82,6 +81,10 @@ class OpenStackApiException(Exception):
                         '_body': _body})
 
         super(OpenStackApiException, self).__init__(message)
+        # py35 does not give special meaning to the first arg and store it
+        # as the message variable.
+        if not hasattr(self, 'message'):
+            self.message = message
 
 
 class OpenStackApiAuthenticationException(OpenStackApiException):
@@ -192,7 +195,7 @@ class TestOpenStackClient(object):
                     raise OpenStackApiAuthorizationException(response=response)
                 else:
                     raise OpenStackApiException(
-                        message="Unexpected status code",
+                        message="Unexpected status code: %s" % response.text,
                         response=response)
 
         return response
@@ -255,7 +258,7 @@ class TestOpenStackClient(object):
 
         if search_opts is not None:
             qparams = {}
-            for opt, val in six.iteritems(search_opts):
+            for opt, val in search_opts.items():
                 qparams[opt] = val
             if qparams:
                 query_string = "?%s" % parse.urlencode(qparams)
@@ -388,3 +391,28 @@ class TestOpenStackClient(object):
     def get_instance_actions(self, server_id):
         return self.api_get('/servers/%s/os-instance-actions' %
                             (server_id)).body['instanceActions']
+
+    def post_aggregate(self, aggregate):
+        return self.api_post('/os-aggregates', aggregate).body['aggregate']
+
+    def delete_aggregate(self, aggregate_id):
+        self.api_delete('/os-aggregates/%s' % aggregate_id)
+
+    def get_limits(self):
+        return self.api_get('/limits').body['limits']
+
+    def put_server_tags(self, server_id, tags):
+        """Put (or replace) a list of tags on the given server.
+
+        Returns the list of tags from the response.
+        """
+        return self.api_put('/servers/%s/tags' % server_id,
+                            {'tags': tags}).body['tags']
+
+    def get_port_interfaces(self, server_id):
+        return self.api_get('/servers/%s/os-interface' %
+                            (server_id)).body['interfaceAttachments']
+
+    def detach_interface(self, server_id, port_id):
+        return self.api_delete('/servers/%s/os-interface/%s' %
+                               (server_id, port_id))

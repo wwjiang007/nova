@@ -34,11 +34,11 @@ Response
 .. rest_parameters:: parameters.yaml
 
   - server_groups: server_groups_list
-  - id: server_group_id
+  - id: server_group_id_body
   - name: name_server_group
   - policies: policies
   - members: members
-  - metadata: metadata_required
+  - metadata: metadata_object 
   - project_id: project_id_server_group
   - user_id: user_id_server_group
 
@@ -63,6 +63,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+  - server_group: server_group
   - name: name_server_group
   - policies: policies
 
@@ -76,12 +77,12 @@ Response
 
 .. rest_parameters:: parameters.yaml
 
-  - server_groups: server_groups_list
-  - id: server_group_id
+  - server_group: server_group
+  - id: server_group_id_body
   - name: name_server_group
   - policies: policies
   - members: members
-  - metadata: metadata_required
+  - metadata: metadata_object 
   - project_id: project_id_server_group
   - user_id: user_id_server_group
 
@@ -113,12 +114,12 @@ Response
 
 .. rest_parameters:: parameters.yaml
 
-  - server_groups: server_groups_list
-  - id: server_group_id
+  - server_group: server_group
+  - id: server_group_id_body
   - name: name_server_group
   - policies: policies
   - members: members
-  - metadata: metadata_required
+  - metadata: metadata_object 
   - project_id: project_id_server_group
   - user_id: user_id_server_group
 

@@ -17,6 +17,7 @@ import functools
 import os
 import tempfile
 
+import ddt
 import mock
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -39,6 +40,7 @@ from nova.virt.libvirt import utils as libvirt_utils
 CONF = cfg.CONF
 
 
+@ddt.ddt
 class LibvirtUtilsTestCase(test.NoDBTestCase):
 
     @mock.patch('nova.utils.execute')
@@ -334,6 +336,32 @@ ID        TAG                 VM SIZE                DATE       VM CLOCK
                            '/the/new/cow'),)]
         self.assertEqual(expected_args, mock_execute.call_args_list)
 
+    @ddt.unpack
+    @ddt.data({'fs_type': 'some_fs_type',
+               'default_eph_format': None,
+               'expected_fs_type': 'some_fs_type'},
+              {'fs_type': None,
+               'default_eph_format': None,
+               'expected_fs_type': disk.FS_FORMAT_EXT4},
+              {'fs_type': None,
+               'default_eph_format': 'eph_format',
+               'expected_fs_type': 'eph_format'})
+    def test_create_ploop_image(self, fs_type,
+                                default_eph_format,
+                                expected_fs_type):
+        with mock.patch('nova.utils.execute') as mock_execute:
+            self.flags(default_ephemeral_format=default_eph_format)
+            libvirt_utils.create_ploop_image('expanded', '/some/path',
+                                             '5G', fs_type)
+            mock_execute.assert_has_calls([
+                mock.call('mkdir', '-p', '/some/path'),
+                mock.call('ploop', 'init', '-s', '5G',
+                          '-f', 'expanded', '-t', expected_fs_type,
+                          '/some/path/root.hds',
+                          run_as_root=True, check_exit_code=True),
+                mock.call('chmod', '-R', 'a+r', '/some/path',
+                          run_as_root=True, check_exit_code=True)])
+
     def test_pick_disk_driver_name(self):
         type_map = {'kvm': ([True, 'qemu'], [False, 'qemu'], [None, 'qemu']),
                     'qemu': ([True, 'qemu'], [False, 'qemu'], [None, 'qemu']),
@@ -342,7 +370,7 @@ ID        TAG                 VM SIZE                DATE       VM CLOCK
         # NOTE(aloga): Xen is tested in test_pick_disk_driver_name_xen
 
         version = 1005001
-        for (virt_type, checks) in six.iteritems(type_map):
+        for (virt_type, checks) in type_map.items():
             self.flags(virt_type=virt_type, group='libvirt')
             for (is_block_dev, expected_result) in checks:
                 result = libvirt_utils.pick_disk_driver_name(version,
@@ -740,3 +768,165 @@ disk size: 4.4M
             with mock.patch.object(libvirt_utils.LOG, 'warning') as mock_log:
                 libvirt_utils.update_mtime(mock.sentinel.path)
         self.assertTrue(mock_log.called)
+
+    def test_is_mounted(self):
+        mount_path = "/var/lib/nova/mnt"
+        source = "192.168.0.1:/nova"
+        proc_with_mnt = """/dev/sda3 / xfs rw,seclabel,attr2,inode64 0 0
+tmpfs /tmp tmpfs rw,seclabel 0 0
+hugetlbfs /dev/hugepages hugetlbfs rw,seclabel,relatime 0 0
+mqueue /dev/mqueue mqueue rw,seclabel,relatime 0 0
+debugfs /sys/kernel/debug debugfs rw,seclabel,relatime 0 0
+nfsd /proc/fs/nfsd nfsd rw,relatime 0 0
+/dev/sda1 /boot ext4 rw,seclabel,relatime,data=ordered 0 0
+sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
+192.168.0.1:/nova /var/lib/nova/mnt nfs4 rw,relatime,vers=4.1
+"""
+        proc_wrong_mnt = """/dev/sda3 / xfs rw,seclabel,attr2,inode64 0 0
+tmpfs /tmp tmpfs rw,seclabel 0 0
+hugetlbfs /dev/hugepages hugetlbfs rw,seclabel,relatime 0 0
+mqueue /dev/mqueue mqueue rw,seclabel,relatime 0 0
+debugfs /sys/kernel/debug debugfs rw,seclabel,relatime 0 0
+nfsd /proc/fs/nfsd nfsd rw,relatime 0 0
+/dev/sda1 /boot ext4 rw,seclabel,relatime,data=ordered 0 0
+sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
+192.168.0.2:/nova /var/lib/nova/mnt nfs4 rw,relatime,vers=4.1
+"""
+        proc_without_mnt = """/dev/sda3 / xfs rw,seclabel,,attr2,inode64 0 0
+tmpfs /tmp tmpfs rw,seclabel 0 0
+hugetlbfs /dev/hugepages hugetlbfs rw,seclabel,relatime 0 0
+mqueue /dev/mqueue mqueue rw,seclabel,relatime 0 0
+debugfs /sys/kernel/debug debugfs rw,seclabel,relatime 0 0
+nfsd /proc/fs/nfsd nfsd rw,relatime 0 0
+/dev/sda1 /boot ext4 rw,seclabel,relatime,data=ordered 0 0
+sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
+"""
+        with mock.patch.object(os.path, 'ismount') as mock_ismount:
+            # is_mounted(mount_path) with no source is equivalent to
+            # os.path.ismount(mount_path)
+            mock_ismount.return_value = False
+            self.assertFalse(libvirt_utils.is_mounted(mount_path))
+
+            mock_ismount.return_value = True
+            self.assertTrue(libvirt_utils.is_mounted(mount_path))
+
+            # Source is given, and matches source in /proc/mounts
+            proc_mnt = mock.mock_open(read_data=proc_with_mnt)
+            with mock.patch.object(six.moves.builtins, "open", proc_mnt):
+                self.assertTrue(libvirt_utils.is_mounted(mount_path, source))
+
+            # Source is given, and doesn't match source in /proc/mounts
+            proc_mnt = mock.mock_open(read_data=proc_wrong_mnt)
+            with mock.patch.object(six.moves.builtins, "open", proc_mnt):
+                self.assertFalse(libvirt_utils.is_mounted(mount_path, source))
+
+            # Source is given, and mountpoint isn't present in /proc/mounts
+            # Note that this shouldn't occur, as os.path.ismount should have
+            # previously returned False in this case.
+            proc_umnt = mock.mock_open(read_data=proc_without_mnt)
+            with mock.patch.object(six.moves.builtins, "open", proc_umnt):
+                self.assertFalse(libvirt_utils.is_mounted(mount_path, source))
+
+    def test_find_disk_file_device(self):
+        xml = """
+          <domain type='kvm'>
+            <os>
+              <type>linux</type>
+            </os>
+            <devices>
+              <disk type="file" device="disk">
+                <driver name="qemu" type="qcow2" cache="none" io="native"/>
+                <source file="/tmp/hello"/>
+                <target bus="ide" dev="/dev/hda"/>
+              </disk>
+            </devices>
+          </domain>
+        """
+        virt_dom = mock.Mock(XMLDesc=mock.Mock(return_value=xml))
+        disk_path, format = libvirt_utils.find_disk(virt_dom)
+        self.assertEqual('/tmp/hello', disk_path)
+        self.assertEqual('qcow2', format)
+
+    def test_find_disk_block_device(self):
+        xml = """
+          <domain type='kvm'>
+            <os>
+              <type>linux</type>
+            </os>
+            <devices>
+              <disk type="block" device="disk">
+                <driver name="qemu" type="raw"/>
+                <source dev="/dev/nova-vg/hello"/>
+                <target bus="ide" dev="/dev/hda"/>
+              </disk>
+            </devices>
+          </domain>
+        """
+        virt_dom = mock.Mock(XMLDesc=mock.Mock(return_value=xml))
+        disk_path, format = libvirt_utils.find_disk(virt_dom)
+        self.assertEqual('/dev/nova-vg/hello', disk_path)
+        self.assertEqual('raw', format)
+
+    def test_find_disk_rbd(self):
+        xml = """
+          <domain type='kvm'>
+            <os>
+              <type>linux</type>
+            </os>
+            <devices>
+              <disk type="network" device="disk">
+                <driver name="qemu" type="raw"/>
+                <source name="pool/image" protocol="rbd">
+                  <host name="1.2.3.4" port="456"/>
+                </source>
+                <target bus="virtio" dev="/dev/vda"/>
+              </disk>
+            </devices>
+          </domain>
+        """
+        self.flags(images_type='rbd', group='libvirt')
+        virt_dom = mock.Mock(XMLDesc=mock.Mock(return_value=xml))
+        disk_path, format = libvirt_utils.find_disk(virt_dom)
+        self.assertEqual('rbd:pool/image', disk_path)
+        self.assertEqual('raw', format)
+
+    def test_find_disk_lxc(self):
+        xml = """
+          <domain type='lxc'>
+            <os>
+              <type>exe</type>
+            </os>
+            <devices>
+              <filesystem type="mount">
+                <source dir="/myhome/rootfs"/>
+                <target dir="/"/>
+              </filesystem>
+            </devices>
+          </domain>
+        """
+        self.flags(virt_type='lxc', group='libvirt')
+        virt_dom = mock.Mock(XMLDesc=mock.Mock(return_value=xml))
+        disk_path, format = libvirt_utils.find_disk(virt_dom)
+        self.assertEqual('/myhome/disk', disk_path)
+        self.assertIsNone(format)
+
+    def test_find_disk_parallels(self):
+        xml = """
+          <domain type='parallels'>
+            <os>
+              <type>exe</type>
+            </os>
+            <devices>
+              <filesystem type='file'>"
+                <driver format='ploop' type='ploop'/>"
+                <source file='/test/disk'/>"
+                <target dir='/'/>
+              </filesystem>"
+            </devices>
+          </domain>
+        """
+        self.flags(virt_type='parallels', group='libvirt')
+        virt_dom = mock.Mock(XMLDesc=mock.Mock(return_value=xml))
+        disk_path, format = libvirt_utils.find_disk(virt_dom)
+        self.assertEqual('/test/disk', disk_path)
+        self.assertEqual('ploop', format)

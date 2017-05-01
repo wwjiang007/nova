@@ -13,22 +13,23 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_policy import policy
-
 from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-console-output'
-POLICY_ROOT = 'os_compute_api:os-console-output:%s'
 
 
 console_output_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
+    base.create_rule_default(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        'Show console output for a server',
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (os-getConsoleOutput)'
+            }
+        ])
 ]
 
 

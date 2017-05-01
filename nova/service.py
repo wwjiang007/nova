@@ -43,6 +43,10 @@ from nova import utils
 from nova import version
 from nova import wsgi
 
+osprofiler = importutils.try_import("osprofiler")
+osprofiler_initializer = importutils.try_import("osprofiler.initializer")
+
+
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
@@ -51,7 +55,6 @@ SERVICE_MANAGERS = {
     'nova-compute': 'nova.compute.manager.ComputeManager',
     'nova-console': 'nova.console.manager.ConsoleProxyManager',
     'nova-consoleauth': 'nova.consoleauth.manager.ConsoleAuthManager',
-    'nova-cert': 'nova.cert.manager.CertManager',
     'nova-conductor': 'nova.conductor.manager.ConductorManager',
     'nova-metadata': 'nova.api.manager.MetadataManager',
     'nova-scheduler': 'nova.scheduler.manager.SchedulerManager',
@@ -79,6 +82,17 @@ def _update_service_ref(service):
                   'new': service_obj.SERVICE_VERSION})
         service.version = service_obj.SERVICE_VERSION
         service.save()
+
+
+def setup_profiler(binary, host):
+    if osprofiler and CONF.profiler.enabled:
+        osprofiler.initializer.init_from_conf(
+            conf=CONF,
+            context=context.get_admin_context().to_dict(),
+            project="nova",
+            service=binary,
+            host=host)
+        LOG.info(_LI("OSProfiler is enabled."))
 
 
 class Service(service.Service):
@@ -110,6 +124,7 @@ class Service(service.Service):
         if objects_base.NovaObject.indirection_api:
             conductor_api = conductor.API()
             conductor_api.wait_until_ready(context.get_admin_context())
+        setup_profiler(binary, self.host)
 
     def __repr__(self):
         return "<%(cls_name)s: host=%(host)s, binary=%(binary)s, " \
@@ -319,6 +334,7 @@ class WSGIService(service.Service):
         # Pull back actual port used
         self.port = self.server.port
         self.backdoor_port = None
+        setup_profiler(name, self.host)
 
     def reset(self):
         """Reset server greenpool size to default and service version cache.

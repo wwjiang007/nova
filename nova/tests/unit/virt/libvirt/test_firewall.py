@@ -227,7 +227,9 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
         mock_instlist.side_effect = _fake_instlist
 
         def fake_iptables_execute(*cmd, **kwargs):
-            process_input = kwargs.get('process_input', None)
+            process_input = kwargs.get('process_input')
+            if process_input is not None and isinstance(process_input, bytes):
+                process_input = process_input.decode('utf-8')
             if cmd == ('ip6tables-save', '-c'):
                 return '\n'.join(self.in6_filter_rules), None
             if cmd == ('iptables-save', '-c'):
@@ -279,12 +281,14 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
 
         regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p icmp '
                            '-s 192.168.11.0/24')
-        self.assertGreater(len(filter(regex.match, self.out_rules)), 0,
+        match_rules = [rule for rule in self.out_rules if regex.match(rule)]
+        self.assertGreater(len(match_rules), 0,
                            "ICMP acceptance rule wasn't added")
 
         regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p icmp -m icmp '
                            '--icmp-type 8 -s 192.168.11.0/24')
-        self.assertGreater(len(filter(regex.match, self.out_rules)), 0,
+        match_rules = [rule for rule in self.out_rules if regex.match(rule)]
+        self.assertGreater(len(match_rules), 0,
                            "ICMP Echo Request acceptance rule wasn't added")
 
         for ip in network_model.fixed_ips():
@@ -292,32 +296,29 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
                 continue
             regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p tcp -m multiport '
                                '--dports 80:81 -s %s' % ip['address'])
-            self.assertGreater(len(filter(regex.match, self.out_rules)), 0,
+            match_rules = [rule for rule in self.out_rules
+                           if regex.match(rule)]
+            self.assertGreater(len(match_rules), 0,
                                "TCP port 80/81 acceptance rule wasn't added")
             regex = re.compile('\[0\:0\] -A .* -j ACCEPT -s '
                                '%s' % ip['address'])
-            self.assertGreater(len(filter(regex.match, self.out_rules)), 0,
+            match_rules = [rule for rule in self.out_rules
+                           if regex.match(rule)]
+            self.assertGreater(len(match_rules), 0,
                                "Protocol/port-less acceptance rule"
                                " wasn't added")
 
         regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p tcp '
                            '-m multiport --dports 80:81 -s 192.168.10.0/24')
-        self.assertGreater(len(filter(regex.match, self.out_rules)), 0,
+        match_rules = [rule for rule in self.out_rules if regex.match(rule)]
+        self.assertGreater(len(match_rules), 0,
                            "TCP port 80/81 acceptance rule wasn't added")
 
-    def test_filters_for_instance_with_ip_v6(self):
-        self.flags(use_ipv6=True)
+    def test_filters_for_instance(self):
         network_info = _fake_network_info(self, 1)
         rulesv4, rulesv6 = self.fw._filters_for_instance("fake", network_info)
         self.assertEqual(len(rulesv4), 2)
         self.assertEqual(len(rulesv6), 1)
-
-    def test_filters_for_instance_without_ip_v6(self):
-        self.flags(use_ipv6=False)
-        network_info = _fake_network_info(self, 1)
-        rulesv4, rulesv6 = self.fw._filters_for_instance("fake", network_info)
-        self.assertEqual(len(rulesv4), 2)
-        self.assertEqual(len(rulesv6), 0)
 
     @mock.patch.object(objects.SecurityGroupRuleList, "get_by_instance")
     def test_multinic_iptables(self, mock_secrule):

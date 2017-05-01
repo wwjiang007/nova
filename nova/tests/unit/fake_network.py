@@ -33,6 +33,7 @@ from nova.objects import virtual_interface as vif_obj
 from nova.tests.unit.objects import test_fixed_ip
 from nova.tests.unit.objects import test_instance_info_cache
 from nova.tests.unit.objects import test_pci_device
+from nova.tests.unit import utils
 from nova.tests import uuidsentinel as uuids
 
 
@@ -218,16 +219,16 @@ def fake_network_obj(context, network_id=1, ipv6=None):
 
 
 def fake_vif(x):
-    return{'id': x,
-           'created_at': None,
-           'updated_at': None,
-           'deleted_at': None,
-           'deleted': 0,
-           'address': 'DE:AD:BE:EF:00:%02x' % x,
-           'uuid': getattr(uuids, 'vif%i' % x),
-           'network_id': x,
-           'instance_uuid': uuids.vifs_1,
-           'tag': 'fake-tag'}
+    return {'id': x,
+            'created_at': None,
+            'updated_at': None,
+            'deleted_at': None,
+            'deleted': 0,
+            'address': 'DE:AD:BE:EF:00:%02x' % x,
+            'uuid': getattr(uuids, 'vif%i' % x),
+            'network_id': x,
+            'instance_uuid': uuids.vifs_1,
+            'tag': 'fake-tag'}
 
 
 def floating_ip_ids():
@@ -418,7 +419,7 @@ def _get_fake_cache():
         return ip_dict
 
     info = [{'address': 'aa:bb:cc:dd:ee:ff',
-             'id': 1,
+             'id': utils.FAKE_NETWORK_UUID,
              'network': {'bridge': 'br0',
                          'id': 1,
                          'label': 'private',

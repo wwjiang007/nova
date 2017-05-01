@@ -29,6 +29,8 @@ class TestNotifier(test.NoDBTestCase):
                                                              mock_noti_trans,
                                                              mock_transport):
         conf = mock.Mock()
+        conf.notifications.versioned_notifications_topics = [
+            'versioned_notifications']
 
         cases = {
             'unversioned': [
@@ -46,7 +48,7 @@ class TestNotifier(test.NoDBTestCase):
         for config in cases:
             mock_notifier.reset_mock()
             mock_notifier.side_effect = ['first', 'second']
-            conf.notification_format = config
+            conf.notifications.notification_format = config
             rpc.init(conf)
             self.assertEqual(cases[config], mock_notifier.call_args_list)
             self.assertEqual('first', rpc.LEGACY_NOTIFIER)

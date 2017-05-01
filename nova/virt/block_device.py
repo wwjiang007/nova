@@ -15,10 +15,11 @@
 import functools
 import itertools
 
+from os_brick import encryptors
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
-import six
+
 
 from nova import block_device
 import nova.conf
@@ -26,7 +27,6 @@ from nova import exception
 from nova.i18n import _LE
 from nova.i18n import _LI
 from nova.i18n import _LW
-from nova.volume import encryptors
 
 CONF = nova.conf.CONF
 
@@ -153,8 +153,26 @@ class DriverBlockDevice(dict):
         """
         raise NotImplementedError()
 
+    def detach(self, **kwargs):
+        """Detach the device from an instance and detach in Cinder.
+
+        Note: driver_detach is called as part of this method.
+
+        To be overridden in subclasses with the detaching logic for
+        the type of device the subclass represents.
+        """
+        raise NotImplementedError()
+
+    def driver_detach(self, **kwargs):
+        """Detach the device from an instance (don't detach in Cinder).
+
+        To be overridden in subclasses with the detaching logic for
+        the type of device the subclass represents.
+        """
+        raise NotImplementedError()
+
     def save(self):
-        for attr_name, key_name in six.iteritems(self._update_on_save):
+        for attr_name, key_name in self._update_on_save.items():
             lookup_name = key_name or attr_name
             if self[lookup_name] != getattr(self._bdm_obj, attr_name):
                 setattr(self._bdm_obj, attr_name, self[lookup_name])
@@ -206,7 +224,8 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
     _legacy_fields = set(['connection_info', 'mount_device',
                           'delete_on_termination'])
     _new_fields = set(['guest_format', 'device_type',
-                       'disk_bus', 'boot_index'])
+                       'disk_bus', 'boot_index',
+                       'attachment_id'])
     _fields = _legacy_fields | _new_fields
 
     _valid_source = 'volume'
@@ -224,7 +243,7 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
             raise _InvalidType
 
         self.update(
-            {k: v for k, v in six.iteritems(self._bdm_obj)
+            {k: v for k, v in self._bdm_obj.items()
              if k in self._new_fields | set(['delete_on_termination'])}
         )
         self['mount_device'] = self._bdm_obj.device_name
@@ -242,12 +261,112 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
                 LOG.info(_LI('preserve multipath_id %s'),
                          connection_info['data']['multipath_id'])
 
+    def driver_detach(self, context, instance, volume_api, virt_driver):
+        connection_info = self['connection_info']
+        mp = self['mount_device']
+        volume_id = self.volume_id
+
+        LOG.info(_LI('Attempting to driver detach volume %(volume_id)s from '
+                     ' mountpoint %(mp)s'), {'volume_id': volume_id, 'mp': mp},
+                     instance=instance)
+        try:
+            if not virt_driver.instance_exists(instance):
+                LOG.warning(_LW('Detaching volume from unknown instance'),
+                                instance=instance)
+
+            encryption = encryptors.get_encryption_metadata(context,
+                    volume_api, volume_id, connection_info)
+            virt_driver.detach_volume(connection_info, instance, mp,
+                                      encryption=encryption)
+        except exception.DiskNotFound as err:
+            LOG.warning(_LW('Ignoring DiskNotFound exception while '
+                            'detaching volume %(volume_id)s from '
+                            '%(mp)s : %(err)s'),
+                        {'volume_id': volume_id, 'mp': mp,
+                         'err': err}, instance=instance)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.exception(_LE('Failed to detach volume '
+                                  '%(volume_id)s from %(mp)s'),
+                              {'volume_id': volume_id, 'mp': mp},
+                              instance=instance)
+                volume_api.roll_detaching(context, volume_id)
+
+    def detach(self, context, instance, volume_api, virt_driver,
+               attachment_id=None, destroy_bdm=False):
+
+        connector = virt_driver.get_volume_connector(instance)
+        connection_info = self['connection_info']
+        volume_id = self.volume_id
+
+        # Only attempt to detach and disconnect from the volume if the instance
+        # is currently associated with the local compute host.
+        if CONF.host == instance.host:
+            self.driver_detach(context, instance, volume_api, virt_driver)
+        elif not destroy_bdm:
+            LOG.debug("Skipping _driver_detach during remote rebuild.",
+                      instance=instance)
+        elif destroy_bdm:
+            LOG.error(_LE("Unable to call for a driver detach of volume "
+                          "%(vol_id)s due to the instance being "
+                          "registered to the remote host %(inst_host)s."),
+                      {'vol_id': volume_id,
+                       'inst_host': instance.host}, instance=instance)
+
+        if connection_info and not destroy_bdm and (
+           connector.get('host') != instance.host):
+            # If the volume is attached to another host (evacuate) then
+            # this connector is for the wrong host. Use the connector that
+            # was stored in connection_info instead (if we have one, and it
+            # is for the expected host).
+            stashed_connector = connection_info.get('connector')
+            if not stashed_connector:
+                # Volume was attached before we began stashing connectors
+                LOG.warning(_LW("Host mismatch detected, but stashed "
+                                "volume connector not found. Instance host is "
+                                "%(ihost)s, but volume connector host is "
+                                "%(chost)s."),
+                            {'ihost': instance.host,
+                             'chost': connector.get('host')})
+            elif stashed_connector.get('host') != instance.host:
+                # Unexpected error. The stashed connector is also not matching
+                # the needed instance host.
+                LOG.error(_LE("Host mismatch detected in stashed volume "
+                              "connector. Will use local volume connector. "
+                              "Instance host is %(ihost)s. Local volume "
+                              "connector host is %(chost)s. Stashed volume "
+                              "connector host is %(schost)s."),
+                          {'ihost': instance.host,
+                           'chost': connector.get('host'),
+                           'schost': stashed_connector.get('host')})
+            else:
+                # Fix found. Use stashed connector.
+                LOG.debug("Host mismatch detected. Found usable stashed "
+                          "volume connector. Instance host is %(ihost)s. "
+                          "Local volume connector host was %(chost)s. "
+                          "Stashed volume connector host is %(schost)s.",
+                          {'ihost': instance.host,
+                           'chost': connector.get('host'),
+                           'schost': stashed_connector.get('host')})
+                connector = stashed_connector
+
+        # NOTE(jdg): For now we need to actually inspect the bdm for an
+        # attachment_id as opposed to relying on what may have been passed
+        # in, we want to force usage of the old detach flow for now and only
+        # use the new flow when we explicitly used it for the attach.
+        if not self['attachment_id']:
+            volume_api.terminate_connection(context, volume_id, connector)
+            volume_api.detach(context.elevated(), volume_id, instance.uuid,
+                              attachment_id)
+        else:
+            volume_api.attachment_delete(context, self['attachment_id'])
+
     @update_db
     def attach(self, context, instance, volume_api, virt_driver,
-               do_check_attach=True, do_driver_attach=False, **kwargs):
+               do_driver_attach=False, **kwargs):
         volume = volume_api.get(context, self.volume_id)
-        if do_check_attach:
-            volume_api.check_attach(context, volume, instance=instance)
+        volume_api.check_availability_zone(context, volume,
+                                           instance=instance)
 
         volume_id = volume['id']
         context = context.elevated()
@@ -367,7 +486,7 @@ class DriverSnapshotBlockDevice(DriverVolumeBlockDevice):
     _proxy_as_attr = set(['volume_size', 'volume_id', 'snapshot_id'])
 
     def attach(self, context, instance, volume_api,
-               virt_driver, wait_func=None, do_check_attach=True):
+               virt_driver, wait_func=None):
 
         if not self.volume_id:
             av_zone = _get_volume_create_az_value(instance)
@@ -382,8 +501,7 @@ class DriverSnapshotBlockDevice(DriverVolumeBlockDevice):
 
         # Call the volume attach now
         super(DriverSnapshotBlockDevice, self).attach(
-            context, instance, volume_api, virt_driver,
-            do_check_attach=do_check_attach)
+            context, instance, volume_api, virt_driver)
 
 
 class DriverImageBlockDevice(DriverVolumeBlockDevice):
@@ -392,7 +510,7 @@ class DriverImageBlockDevice(DriverVolumeBlockDevice):
     _proxy_as_attr = set(['volume_size', 'volume_id', 'image_id'])
 
     def attach(self, context, instance, volume_api,
-               virt_driver, wait_func=None, do_check_attach=True):
+               virt_driver, wait_func=None):
         if not self.volume_id:
             av_zone = _get_volume_create_az_value(instance)
             vol = volume_api.create(context, self.volume_size,
@@ -404,8 +522,7 @@ class DriverImageBlockDevice(DriverVolumeBlockDevice):
             self.volume_id = vol['id']
 
         super(DriverImageBlockDevice, self).attach(
-            context, instance, volume_api, virt_driver,
-            do_check_attach=do_check_attach)
+            context, instance, volume_api, virt_driver)
 
 
 class DriverBlankBlockDevice(DriverVolumeBlockDevice):
@@ -414,7 +531,7 @@ class DriverBlankBlockDevice(DriverVolumeBlockDevice):
     _proxy_as_attr = set(['volume_size', 'volume_id', 'image_id'])
 
     def attach(self, context, instance, volume_api,
-               virt_driver, wait_func=None, do_check_attach=True):
+               virt_driver, wait_func=None):
         if not self.volume_id:
             vol_name = instance.uuid + '-blank-vol'
             av_zone = _get_volume_create_az_value(instance)
@@ -426,8 +543,7 @@ class DriverBlankBlockDevice(DriverVolumeBlockDevice):
             self.volume_id = vol['id']
 
         super(DriverBlankBlockDevice, self).attach(
-            context, instance, volume_api, virt_driver,
-            do_check_attach=do_check_attach)
+            context, instance, volume_api, virt_driver)
 
 
 def _convert_block_devices(device_type, block_device_mapping):

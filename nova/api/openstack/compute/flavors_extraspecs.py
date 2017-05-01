@@ -26,8 +26,6 @@ from nova.i18n import _
 from nova.policies import flavor_extra_specs as fes_policies
 from nova import utils
 
-ALIAS = 'os-flavor-extra-specs'
-
 
 class FlavorExtraSpecsController(wsgi.Controller):
     """The flavor extra specs API controller for the OpenStack API."""
@@ -38,7 +36,7 @@ class FlavorExtraSpecsController(wsgi.Controller):
     # NOTE(gmann): Max length for numeric value is being checked
     # explicitly as json schema cannot have max length check for numeric value
     def _check_extra_specs_value(self, specs):
-        for key, value in six.iteritems(specs):
+        for value in specs.values():
             try:
                 if isinstance(value, (six.integer_types, float)):
                     value = six.text_type(value)
@@ -130,21 +128,3 @@ class FlavorExtraSpecsController(wsgi.Controller):
                     "key %(key)s.") % dict(flavor_id=flavor_id,
                                            key=id)
             raise webob.exc.HTTPNotFound(explanation=msg)
-
-
-class FlavorsExtraSpecs(extensions.V21APIExtensionBase):
-    """Flavors extra specs support."""
-    name = 'FlavorExtraSpecs'
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        extra_specs = extensions.ResourceExtension(
-                'os-extra_specs',
-                FlavorExtraSpecsController(),
-                parent=dict(member_name='flavor', collection_name='flavors'))
-
-        return [extra_specs]
-
-    def get_controller_extensions(self):
-        return []

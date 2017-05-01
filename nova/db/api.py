@@ -254,6 +254,19 @@ def compute_node_get_all(context):
     return IMPL.compute_node_get_all(context)
 
 
+def compute_node_get_all_mapped_less_than(context, mapped_less_than):
+    """Get all ComputeNode objects with specific mapped values.
+
+    :param context: The security context
+    :param mapped_less_than: Get compute nodes with mapped less than this
+                             value
+
+    :returns: List of dictionaries each containing compute node properties
+    """
+    return IMPL.compute_node_get_all_mapped_less_than(context,
+                                                      mapped_less_than)
+
+
 def compute_node_get_all_by_pagination(context, limit=None, marker=None):
     """Get compute nodes by pagination.
     :param context: The security context
@@ -1903,9 +1916,11 @@ def instance_fault_create(context, values):
     return IMPL.instance_fault_create(context, values)
 
 
-def instance_fault_get_by_instance_uuids(context, instance_uuids):
+def instance_fault_get_by_instance_uuids(context, instance_uuids,
+                                         latest=False):
     """Get all instance faults for the provided instance_uuids."""
-    return IMPL.instance_fault_get_by_instance_uuids(context, instance_uuids)
+    return IMPL.instance_fault_get_by_instance_uuids(context, instance_uuids,
+                                                     latest=latest)
 
 
 ####################
@@ -2040,14 +2055,6 @@ def archive_deleted_rows(max_rows=None):
 
 def pcidevice_online_data_migration(context, max_count):
     return IMPL.pcidevice_online_data_migration(context, max_count)
-
-
-def aggregate_uuids_online_data_migration(context, max_count):
-    return IMPL.aggregate_uuids_online_data_migration(context, max_count)
-
-
-def computenode_uuids_online_data_migration(context, max_count):
-    return IMPL.computenode_uuids_online_data_migration(context, max_count)
 
 
 ####################

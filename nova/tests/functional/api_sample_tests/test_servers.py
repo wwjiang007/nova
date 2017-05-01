@@ -60,7 +60,8 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
             'glance_host': self._get_glance_host(),
             'access_ip_v4': '1.2.3.4',
             'access_ip_v6': '80fe::',
-            'user_data': self.user_data,
+            'user_data': (self.user_data if six.PY2
+                          else self.user_data.decode('utf-8')),
             'uuid': '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}'
                     '-[0-9a-f]{4}-[0-9a-f]{12}',
             'name': 'new-server-test' if name is None else name,
@@ -103,7 +104,8 @@ class ServersSampleJsonTest(ServersSampleBase):
         subs['mac_addr'] = '(?:[a-f0-9]{2}:){5}[a-f0-9]{2}'
         subs['access_ip_v4'] = '1.2.3.4'
         subs['access_ip_v6'] = '80fe::'
-        subs['user_data'] = self.user_data
+        subs['user_data'] = (self.user_data if six.PY2
+                             else self.user_data.decode('utf-8'))
         # config drive can be a string for True or empty value for False
         subs['cdrive'] = '.*'
         self._verify_response('server-get-resp', subs, response, 200)
@@ -128,7 +130,8 @@ class ServersSampleJsonTest(ServersSampleBase):
         subs['mac_addr'] = '(?:[a-f0-9]{2}:){5}[a-f0-9]{2}'
         subs['access_ip_v4'] = '1.2.3.4'
         subs['access_ip_v6'] = '80fe::'
-        subs['user_data'] = self.user_data
+        subs['user_data'] = (self.user_data if six.PY2
+                             else self.user_data.decode('utf-8'))
         # config drive can be a string for True or empty value for False
         subs['cdrive'] = '.*'
         self._verify_response('servers-details-resp', subs, response, 200)
@@ -190,6 +193,15 @@ class ServersSampleJson237Test(ServersSampleBase):
         self._post_server(use_common_server_api_samples=False)
 
 
+class ServersSampleJson242Test(ServersSampleBase):
+    microversion = '2.42'
+    sample_dir = 'servers'
+    scenarios = [('v2_42', {'api_major_version': 'v2.1'})]
+
+    def test_servers_post(self):
+        self._post_server(use_common_server_api_samples=False)
+
+
 class ServersUpdateSampleJsonTest(ServersSampleBase):
 
     def test_update_server(self):
@@ -213,8 +225,7 @@ class ServerSortKeysJsonTests(ServersSampleBase):
                               200)
 
 
-class ServersActionsJsonTest(ServersSampleBase):
-
+class _ServersActionsJsonTestMixin(object):
     def _test_server_action(self, uuid, action, req_tpl,
                             subs=None, resp_tpl=None, code=202):
         subs = subs or {}
@@ -227,7 +238,11 @@ class ServersActionsJsonTest(ServersSampleBase):
             self._verify_response(resp_tpl, subs, response, code)
         else:
             self.assertEqual(code, response.status_code)
-            self.assertEqual("", response.content)
+            self.assertEqual("", response.text)
+        return response
+
+
+class ServersActionsJsonTest(ServersSampleBase, _ServersActionsJsonTestMixin):
 
     def test_server_reboot_hard(self):
         uuid = self._post_server()
@@ -278,12 +293,6 @@ class ServersActionsJsonTest(ServersSampleBase):
         self._test_server_action(uuid, "confirmResize",
                                  'server-action-confirm-resize',
                                  code=204)
-
-    def test_server_create_image(self):
-        uuid = self._post_server()
-        self._test_server_action(uuid, 'createImage',
-                                 'server-action-create-image',
-                                 {'name': 'foo-image'})
 
     def _wait_for_active_server(self, uuid):
         """Wait 10 seconds for the server to be ACTIVE, else fail.
@@ -358,6 +367,34 @@ class ServersActionsJson219Test(ServersSampleBase):
         self._verify_response('server-action-rebuild-resp', subs, resp, 202)
 
 
+class ServersCreateImageJsonTest(ServersSampleBase,
+                                 _ServersActionsJsonTestMixin):
+    """Tests the createImage server action API against 2.1."""
+    def test_server_create_image(self):
+        uuid = self._post_server()
+        resp = self._test_server_action(uuid, 'createImage',
+                                        'server-action-create-image',
+                                        {'name': 'foo-image'})
+        # we should have gotten a location header back
+        self.assertIn('location', resp.headers)
+        # we should not have gotten a body back
+        self.assertEqual(0, len(resp.content))
+
+
+class ServersCreateImageJsonTestv2_45(ServersCreateImageJsonTest):
+    """Tests the createImage server action API against 2.45."""
+    microversion = '2.45'
+    scenarios = [('v2_45', {'api_major_version': 'v2.1'})]
+
+    def test_server_create_image(self):
+        uuid = self._post_server()
+        resp = self._test_server_action(
+            uuid, 'createImage', 'server-action-create-image',
+            {'name': 'foo-image'}, 'server-action-create-image-resp')
+        # assert that no location header was returned
+        self.assertNotIn('location', resp.headers)
+
+
 class ServerStartStopJsonTest(ServersSampleBase):
 
     def _test_server_action(self, uuid, action, req_tpl):
@@ -365,7 +402,7 @@ class ServerStartStopJsonTest(ServersSampleBase):
                                  req_tpl,
                                  {'action': action})
         self.assertEqual(202, response.status_code)
-        self.assertEqual("", response.content)
+        self.assertEqual("", response.text)
 
     def test_server_start(self):
         uuid = self._post_server()
@@ -397,4 +434,4 @@ class ServerTriggerCrashDumpJsonTest(ServersSampleBase):
                                  'server-action-trigger-crash-dump',
                                  {})
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.content, "")
+        self.assertEqual(response.text, "")

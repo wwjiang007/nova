@@ -15,24 +15,23 @@
 import datetime
 
 import iso8601
+from oslo_config import cfg
 
 from nova.api.openstack.compute import availability_zone as az_v21
 from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import servers as servers_v21
 from nova import availability_zones
 from nova.compute import api as compute_api
-from nova.compute import flavors
 from nova import context
 from nova import db
 from nova import exception
 from nova import servicegroup
 from nova import test
 from nova.tests.unit.api.openstack import fakes
-from nova.tests.unit import fake_instance
 from nova.tests.unit.image import fake
 from nova.tests.unit import matchers
 from nova.tests.unit.objects import test_service
-from oslo_config import cfg
+from nova.tests import uuidsentinel
 
 FAKE_UUID = fakes.FAKE_UUID
 
@@ -98,6 +97,7 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
     def setUp(self):
         super(AvailabilityZoneApiTestV21, self).setUp()
         availability_zones.reset_cache()
+        fakes.stub_out_nw_api(self)
         self.stub_out('nova.db.service_get_all', fake_service_get_all)
         self.stubs.Set(availability_zones, 'set_availability_zones',
                        fake_set_availability_zones)
@@ -183,69 +183,23 @@ class ServersControllerCreateTestV21(test.TestCase):
         super(ServersControllerCreateTestV21, self).setUp()
 
         self.instance_cache_num = 0
-
+        fakes.stub_out_nw_api(self)
         self._set_up_controller()
 
-        def instance_create(context, inst):
-            inst_type = flavors.get_flavor_by_flavor_id(3)
-            image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
-            def_image_ref = 'http://localhost/images/%s' % image_uuid
-            self.instance_cache_num += 1
-            instance = fake_instance.fake_db_instance(**{
-                'id': self.instance_cache_num,
-                'display_name': inst['display_name'] or 'test',
-                'uuid': FAKE_UUID,
-                'instance_type': inst_type,
-                'access_ip_v4': '1.2.3.4',
-                'access_ip_v6': 'fead::1234',
-                'image_ref': inst.get('image_ref', def_image_ref),
-                'user_id': 'fake',
-                'project_id': 'fake',
-                'availability_zone': 'nova',
-                'reservation_id': inst['reservation_id'],
-                "created_at": datetime.datetime(2010, 10, 10, 12, 0, 0),
-                "updated_at": datetime.datetime(2010, 11, 11, 11, 0, 0),
-                "progress": 0,
-                "fixed_ips": [],
-                "task_state": "",
-                "vm_state": "",
-                "root_device_name": inst.get('root_device_name', 'vda'),
-            })
-
+        def create_db_entry_for_new_instance(*args, **kwargs):
+            instance = args[4]
+            instance.uuid = FAKE_UUID
             return instance
 
         fake.stub_out_image_service(self)
-        self.stub_out('nova.db.instance_create', instance_create)
-
+        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
+                      create_db_entry_for_new_instance)
         self.req = fakes.HTTPRequest.blank('')
 
     def _set_up_controller(self):
         ext_info = extension_info.LoadedExtensionInfo()
         self.controller = servers_v21.ServersController(
             extension_info=ext_info)
-        CONF.set_override('extensions_blacklist',
-                          'os-availability-zone',
-                          'osapi_v21')
-        self.no_availability_zone_controller = servers_v21.ServersController(
-            extension_info=ext_info)
-
-    def _test_create_extra(self, params, controller):
-        image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
-        server = dict(name='server_test', imageRef=image_uuid, flavorRef=2)
-        server.update(params)
-        body = dict(server=server)
-        server = controller.create(self.req, body=body).obj['server']
-
-    def test_create_instance_with_availability_zone_disabled(self):
-        params = {'availability_zone': 'foo'}
-        old_create = compute_api.API.create
-
-        def create(*args, **kwargs):
-            self.assertIsNone(kwargs['availability_zone'])
-            return old_create(*args, **kwargs)
-
-        self.stubs.Set(compute_api.API, 'create', create)
-        self._test_create_extra(params, self.no_availability_zone_controller)
 
     def _create_instance_with_availability_zone(self, zone_name):
         def create(*args, **kwargs):
@@ -276,7 +230,8 @@ class ServersControllerCreateTestV21(test.TestCase):
                                           'topic': 'compute',
                                           'report_count': 0})
         agg = db.aggregate_create(admin_context,
-                {'name': 'agg1'}, {'availability_zone': 'nova'})
+                {'name': 'agg1', 'uuid': uuidsentinel.agg_uuid},
+                {'availability_zone': 'nova'})
         db.aggregate_host_add(admin_context, agg['id'], 'host1_zones')
         return self.req, body
 

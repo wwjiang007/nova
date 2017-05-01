@@ -24,6 +24,7 @@ from nova import exception
 from nova import objects
 from nova.policies import server_groups as sg_policies
 from nova import test
+from nova.tests import fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import policy_fixture
 from nova.tests import uuidsentinel
@@ -75,7 +76,8 @@ def server_group_db(sg):
     return AttrDict(attrs)
 
 
-class ServerGroupTestV21(test.TestCase):
+class ServerGroupTestV21(test.NoDBTestCase):
+    USES_DB_SELF = True
     validation_error = exception.ValidationError
 
     def setUp(self):
@@ -85,6 +87,22 @@ class ServerGroupTestV21(test.TestCase):
         self.admin_req = fakes.HTTPRequest.blank('', use_admin_context=True)
         self.foo_req = fakes.HTTPRequest.blank('', project_id='foo')
         self.policy = self.useFixture(policy_fixture.RealPolicyFixture())
+
+        self.useFixture(fixtures.Database(database='api'))
+        cells = fixtures.CellDatabases()
+        cells.add_cell_database(uuidsentinel.cell1)
+        cells.add_cell_database(uuidsentinel.cell2)
+        self.useFixture(cells)
+
+        ctxt = context.get_admin_context()
+        self.cells = {}
+        for uuid in (uuidsentinel.cell1, uuidsentinel.cell2):
+            cm = objects.CellMapping(context=ctxt,
+                                uuid=uuid,
+                                database_connection=uuid,
+                                transport_url=uuid)
+            cm.create()
+            self.cells[cm.uuid] = cm
 
     def _setup_controller(self):
         self.controller = sg_v21.ServerGroupController()
@@ -138,14 +156,21 @@ class ServerGroupTestV21(test.TestCase):
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
 
-    def _create_instance(self, context):
-        instance = objects.Instance(context=context,
-                                    image_ref=uuidsentinel.fake_image_ref,
-                                    node='node1', reservation_id='a',
-                                    host='host1', project_id='fake',
-                                    vm_state='fake',
-                                    system_metadata={'key': 'value'})
-        instance.create()
+    def _create_instance(self, ctx, cell):
+        with context.target_cell(ctx, cell) as cctx:
+            instance = objects.Instance(context=cctx,
+                                        image_ref=uuidsentinel.fake_image_ref,
+                                        node='node1', reservation_id='a',
+                                        host='host1', project_id='fake',
+                                        vm_state='fake',
+                                        system_metadata={'key': 'value'})
+            instance.create()
+        im = objects.InstanceMapping(context=ctx,
+                                     project_id=ctx.project_id,
+                                     user_id=ctx.user_id,
+                                     cell_mapping=cell,
+                                     instance_uuid=instance.uuid)
+        im.create()
         return instance
 
     def _create_instance_group(self, context, members):
@@ -156,17 +181,25 @@ class ServerGroupTestV21(test.TestCase):
         return ig.uuid
 
     def _create_groups_and_instances(self, ctx):
-        instances = [self._create_instance(ctx), self._create_instance(ctx)]
+        cell1 = self.cells[uuidsentinel.cell1]
+        cell2 = self.cells[uuidsentinel.cell2]
+        instances = [self._create_instance(ctx, cell=cell1),
+                     self._create_instance(ctx, cell=cell2),
+                     self._create_instance(ctx, cell=None)]
         members = [instance.uuid for instance in instances]
         ig_uuid = self._create_instance_group(ctx, members)
         return (ig_uuid, instances, members)
 
+    def _test_list_server_group_all(self, api_version='2.1'):
+        self._test_list_server_group(api_version=api_version, limited=False)
+
+    def _test_list_server_group_offset_and_limit(self, api_version='2.1'):
+        self._test_list_server_group(api_version=api_version, limited=True)
+
     @mock.patch.object(nova.db, 'instance_group_get_all_by_project_id')
     @mock.patch.object(nova.db, 'instance_group_get_all')
-    def _test_list_server_group_all(self,
-                                    mock_get_all,
-                                    mock_get_by_project,
-                                    api_version='2.1'):
+    def _test_list_server_group(self, mock_get_all, mock_get_by_project,
+                                api_version='2.1', limited=False):
         policies = ['anti-affinity']
         members = []
         metadata = {}  # always empty
@@ -202,8 +235,12 @@ class ServerGroupTestV21(test.TestCase):
         tenant_groups = [sg2]
         all_groups = [sg1, sg2]
 
-        all = {'server_groups': all_groups}
-        tenant_specific = {'server_groups': tenant_groups}
+        if limited:
+            all = {'server_groups': [sg2]}
+            tenant_specific = {'server_groups': []}
+        else:
+            all = {'server_groups': all_groups}
+            tenant_specific = {'server_groups': tenant_groups}
 
         def return_all_server_groups():
             return [server_group_db(sg) for sg in all_groups]
@@ -216,7 +253,8 @@ class ServerGroupTestV21(test.TestCase):
         mock_get_by_project.return_value = return_tenant_server_groups()
 
         path = '/os-server-groups?all_projects=True'
-
+        if limited:
+            path += '&offset=1&limit=1'
         req = fakes.HTTPRequest.blank(path, version=api_version)
         admin_req = fakes.HTTPRequest.blank(path, use_admin_context=True,
                                             version=api_version)
@@ -282,7 +320,7 @@ class ServerGroupTestV21(test.TestCase):
         (ig_uuid, instances, members) = self._create_groups_and_instances(ctx)
         res_dict = self.controller.show(self.req, ig_uuid)
         result_members = res_dict['server_group']['members']
-        self.assertEqual(2, len(result_members))
+        self.assertEqual(3, len(result_members))
         for member in members:
             self.assertIn(member, result_members)
 
@@ -295,7 +333,11 @@ class ServerGroupTestV21(test.TestCase):
         (ig_uuid, instances, members) = self._create_groups_and_instances(ctx)
 
         # delete an instance
-        instances[1].destroy()
+        im = objects.InstanceMapping.get_by_instance_uuid(ctx,
+                                                          instances[1].uuid)
+        with context.target_cell(ctx, im.cell_mapping):
+            instances[1].destroy()
+
         # check that the instance does not exist
         self.assertRaises(exception.InstanceNotFound,
                           objects.Instance.get_by_uuid,
@@ -303,7 +345,7 @@ class ServerGroupTestV21(test.TestCase):
         res_dict = self.controller.show(self.req, ig_uuid)
         result_members = res_dict['server_group']['members']
         # check that only the active instance is displayed
-        self.assertEqual(1, len(result_members))
+        self.assertEqual(2, len(result_members))
         self.assertIn(instances[0].uuid, result_members)
 
     def test_display_members_rbac_default(self):
@@ -454,6 +496,9 @@ class ServerGroupTestV21(test.TestCase):
     def test_list_server_group_all(self):
         self._test_list_server_group_all(api_version='2.1')
 
+    def test_list_server_group_offset_and_limit(self):
+        self._test_list_server_group_offset_and_limit(api_version='2.1')
+
     def test_list_server_groups_rbac_default(self):
         # test as admin
         self.controller.index(self.admin_req)
@@ -549,6 +594,9 @@ class ServerGroupTestV213(ServerGroupTestV21):
 
     def test_list_server_group_all(self):
         self._test_list_server_group_all(api_version='2.13')
+
+    def test_list_server_group_offset_and_limit(self):
+        self._test_list_server_group_offset_and_limit(api_version='2.13')
 
     def test_list_server_group_by_tenant(self):
         self._test_list_server_group_by_tenant(api_version='2.13')

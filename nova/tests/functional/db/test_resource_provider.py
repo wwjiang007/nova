@@ -51,19 +51,23 @@ class ResourceProviderBaseCase(test.NoDBTestCase):
         self.api_db = self.useFixture(fixtures.Database(database='api'))
         self.context = context.RequestContext('fake-user', 'fake-project')
 
-    def _make_allocation(self, rp_uuid=None):
+    def _make_allocation(self, rp_uuid=None, inv_dict=None):
         rp_uuid = rp_uuid or uuidsentinel.allocation_resource_provider
         rp = objects.ResourceProvider(
             context=self.context,
             uuid=rp_uuid,
             name=rp_uuid)
         rp.create()
-        alloc = objects.Allocation(
-            self.context,
-            resource_provider=rp,
-            **DISK_ALLOCATION
-        )
-        alloc.create()
+        inv_dict = inv_dict or DISK_INVENTORY
+        disk_inv = objects.Inventory(context=self.context,
+                resource_provider=rp, **inv_dict)
+        disk_inv.create()
+        inv_list = objects.InventoryList(objects=[disk_inv])
+        rp.set_inventory(inv_list)
+        alloc = objects.Allocation(self.context, resource_provider=rp,
+                **DISK_ALLOCATION)
+        alloc_list = objects.AllocationList(self.context, objects=[alloc])
+        alloc_list.create_all()
         return rp, alloc
 
 
@@ -232,6 +236,61 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
         self.assertRaises(exception.ResourceClassNotFound,
                           rp.set_inventory, inv_list)
 
+    def test_set_inventory_fail_in_used(self):
+        """Test attempting to set inventory which would result in removing an
+        inventory record for a resource class that still has allocations
+        against it.
+        """
+        rp = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.rp_uuid,
+            name='compute-host',
+        )
+        rp.create()
+
+        inv = objects.Inventory(
+            resource_provider=rp,
+            resource_class='VCPU',
+            total=12,
+            reserved=0,
+            min_unit=1,
+            max_unit=12,
+            step_size=1,
+            allocation_ratio=1.0,
+        )
+
+        inv_list = objects.InventoryList(objects=[inv])
+        rp.set_inventory(inv_list)
+
+        alloc = objects.Allocation(
+            resource_provider=rp,
+            resource_class='VCPU',
+            consumer_id=uuidsentinel.consumer,
+            used=1,
+        )
+
+        alloc_list = objects.AllocationList(
+            self.context,
+            objects=[alloc]
+        )
+        alloc_list.create_all()
+
+        inv = objects.Inventory(
+            resource_provider=rp,
+            resource_class='MEMORY_MB',
+            total=1024,
+            reserved=0,
+            min_unit=256,
+            max_unit=1024,
+            step_size=256,
+            allocation_ratio=1.0,
+        )
+
+        inv_list = objects.InventoryList(objects=[inv])
+        self.assertRaises(exception.InventoryInUse,
+                          rp.set_inventory,
+                          inv_list)
+
     @mock.patch('nova.objects.resource_provider.LOG')
     def test_set_inventory_over_capacity(self, mock_log):
         rp = objects.ResourceProvider(context=self.context,
@@ -242,10 +301,10 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
         disk_inv = objects.Inventory(
                 resource_provider=rp,
                 resource_class=fields.ResourceClass.DISK_GB,
-                total=1024,
+                total=2048,
                 reserved=15,
                 min_unit=10,
-                max_unit=100,
+                max_unit=600,
                 step_size=10,
                 allocation_ratio=1.0)
         vcpu_inv = objects.Inventory(
@@ -268,8 +327,9 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
             resource_provider=rp,
             consumer_id=uuidsentinel.consumer,
             resource_class='DISK_GB',
-            used=512)
-        alloc.create()
+            used=500)
+        alloc_list = objects.AllocationList(self.context, objects=[alloc])
+        alloc_list.create_all()
 
         # Update our inventory to over-subscribe us after the above allocation
         disk_inv.total = 400
@@ -426,13 +486,7 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
                       str(error))
 
     def test_delete_inventory_with_allocation(self):
-        rp, allocation = self._make_allocation()
-        disk_inv = objects.Inventory(resource_provider=rp,
-                                     resource_class='DISK_GB',
-                                     total=2048)
-        disk_inv.obj_set_defaults()
-        inv_list = objects.InventoryList(objects=[disk_inv])
-        rp.set_inventory(inv_list)
+        rp, allocation = self._make_allocation(inv_dict=DISK_INVENTORY)
         error = self.assertRaises(exception.InventoryInUse,
                                   rp.delete_inventory,
                                   'DISK_GB')
@@ -460,12 +514,6 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
         # their inventory to something that violates allocations so
         # we need to make that possible.
         rp, allocation = self._make_allocation()
-        disk_inv = objects.Inventory(resource_provider=rp,
-                                     resource_class='DISK_GB',
-                                     total=2048)
-        disk_inv.obj_set_defaults()
-        inv_list = objects.InventoryList(objects=[disk_inv])
-        rp.set_inventory(inv_list)
         # attempt to set inventory to less than currently allocated
         # amounts
         new_total = 1
@@ -502,6 +550,20 @@ class ResourceProviderTestCase(ResourceProviderBaseCase):
                       % fields.ResourceClass.DISK_GB, str(error))
         self.assertIn("on resource provider '%s'."
                       % rp.uuid, str(error))
+
+    def test_add_allocation_increments_generation(self):
+        rp = objects.ResourceProvider(context=self.context,
+                uuid=uuidsentinel.inventory_resource_provider, name='foo')
+        rp.create()
+        inv = objects.Inventory(context=self.context, resource_provider=rp,
+                **DISK_INVENTORY)
+        inv.create()
+        expected_gen = rp.generation + 1
+        alloc = objects.Allocation(context=self.context, resource_provider=rp,
+                **DISK_ALLOCATION)
+        alloc_list = objects.AllocationList(self.context, objects=[alloc])
+        alloc_list.create_all()
+        self.assertEqual(expected_gen, rp.generation)
 
 
 class ResourceProviderListTestCase(ResourceProviderBaseCase):
@@ -637,6 +699,48 @@ class ResourceProviderListTestCase(ResourceProviderBaseCase):
             objects.ResourceProviderList.get_all_by_filters,
             self.context, {'resources': {'FOOBAR': 3}})
 
+    def test_get_all_by_filters_aggregate(self):
+        for rp_i in [1, 2, 3, 4]:
+            uuid = getattr(uuidsentinel, 'rp_uuid_' + str(rp_i))
+            name = 'rp_name_' + str(rp_i)
+            rp = objects.ResourceProvider(self.context, name=name, uuid=uuid)
+            rp.create()
+            if rp_i % 2:
+                aggregate_uuids = [uuidsentinel.agg_a, uuidsentinel.agg_b]
+                rp.set_aggregates(aggregate_uuids)
+
+        resource_providers = objects.ResourceProviderList.get_all_by_filters(
+            self.context, filters={'member_of': [uuidsentinel.agg_a]})
+
+        self.assertEqual(2, len(resource_providers))
+        names = [_rp.name for _rp in resource_providers]
+        self.assertIn('rp_name_1', names)
+        self.assertIn('rp_name_3', names)
+        self.assertNotIn('rp_name_2', names)
+        self.assertNotIn('rp_name_4', names)
+
+        resource_providers = objects.ResourceProviderList.get_all_by_filters(
+            self.context, filters={'member_of':
+                                   [uuidsentinel.agg_a, uuidsentinel.agg_b]})
+        self.assertEqual(2, len(resource_providers))
+
+        resource_providers = objects.ResourceProviderList.get_all_by_filters(
+            self.context, filters={'member_of':
+                                   [uuidsentinel.agg_a, uuidsentinel.agg_b],
+                                   'name': u'rp_name_1'})
+        self.assertEqual(1, len(resource_providers))
+
+        resource_providers = objects.ResourceProviderList.get_all_by_filters(
+            self.context, filters={'member_of':
+                                   [uuidsentinel.agg_a, uuidsentinel.agg_b],
+                                   'name': u'barnabas'})
+        self.assertEqual(0, len(resource_providers))
+
+        resource_providers = objects.ResourceProviderList.get_all_by_filters(
+            self.context, filters={'member_of':
+                                   [uuidsentinel.agg_1, uuidsentinel.agg_2]})
+        self.assertEqual(0, len(resource_providers))
+
 
 class TestResourceProviderAggregates(test.NoDBTestCase):
 
@@ -719,12 +823,17 @@ class TestAllocation(ResourceProviderBaseCase):
         )
         resource_provider.create()
         resource_class = fields.ResourceClass.DISK_GB
+        inv = objects.Inventory(context=self.context,
+                resource_provider=resource_provider, **DISK_INVENTORY)
+        inv.create()
         disk_allocation = objects.Allocation(
             context=self.context,
             resource_provider=resource_provider,
             **DISK_ALLOCATION
         )
-        disk_allocation.create()
+        alloc_list = objects.AllocationList(self.context,
+                objects=[disk_allocation])
+        alloc_list.create_all()
 
         self.assertEqual(resource_class, disk_allocation.resource_class)
         self.assertEqual(resource_provider,
@@ -805,21 +914,30 @@ class TestAllocation(ResourceProviderBaseCase):
             resource_provider=rp1,
             used=2,
         )
-        alloc3.create()
+        alloc_list = objects.AllocationList(self.context, objects=[alloc3])
+        alloc_list.create_all()
         allocations = objects.AllocationList.get_all_by_resource_provider_uuid(
             self.context, rp1.uuid)
         self.assertEqual(2, len(allocations))
 
         # add more allocations for the first resource provider
         # of a different class
+        # First we need to add sufficient inventory
+        res_cls = fields.ResourceClass.IPV4_ADDRESS
+        inv = objects.Inventory(self.context, resource_provider=rp1,
+                resource_class=res_cls, total=256, max_unit=10)
+        inv.obj_set_defaults()
+        inv.create()
+        # Now allocate 4 of them.
         alloc4 = objects.Allocation(
             self.context,
-            consumer_id=uuidsentinel.consumer1,
-           resource_class=fields.ResourceClass.IPV4_ADDRESS,
-           resource_provider=rp1,
-           used=4,
+            consumer_id=uuidsentinel.consumer2,
+            resource_class=res_cls,
+            resource_provider=rp1,
+            used=4,
         )
-        alloc4.create()
+        alloc_list = objects.AllocationList(self.context, objects=[alloc4])
+        alloc_list.create_all()
         allocations = objects.AllocationList.get_all_by_resource_provider_uuid(
             self.context, rp1.uuid)
         self.assertEqual(3, len(allocations))
@@ -1291,7 +1409,7 @@ class ResourceClassTestCase(ResourceProviderBaseCase):
             name='CUSTOM_TWO',
         )
         rc2.RESOURCE_CREATE_RETRY_COUNT = 3
-        self.assertRaises(exception.ResourceClassExists, rc2.create)
+        self.assertRaises(exception.MaxDBRetriesExceeded, rc2.create)
 
     def test_create_duplicate_custom(self):
         rc = objects.ResourceClass(
@@ -1415,3 +1533,210 @@ class ResourceClassTestCase(ResourceProviderBaseCase):
                           objects.ResourceClass.get_by_name,
                           self.context,
                           'CUSTOM_IRON_NFV')
+
+
+class ResourceProviderTraitTestCase(ResourceProviderBaseCase):
+
+    def _assert_traits(self, expected_traits, traits_objs):
+        expected_traits.sort()
+        traits = []
+        for obj in traits_objs:
+            traits.append(obj.name)
+        traits.sort()
+        self.assertEqual(expected_traits, traits)
+
+    def test_trait_create(self):
+        t = objects.Trait(self.context)
+        t.name = 'CUSTOM_TRAIT_A'
+        t.create()
+        self.assertIn('id', t)
+        self.assertEqual(t.name, 'CUSTOM_TRAIT_A')
+
+    def test_trait_create_with_id_set(self):
+        t = objects.Trait(self.context)
+        t.name = 'CUSTOM_TRAIT_A'
+        t.id = 1
+        self.assertRaises(exception.ObjectActionError, t.create)
+
+    def test_trait_create_without_name_set(self):
+        t = objects.Trait(self.context)
+        self.assertRaises(exception.ObjectActionError, t.create)
+
+    def test_trait_create_duplicated_trait(self):
+        trait = objects.Trait(self.context)
+        trait.name = 'CUSTOM_TRAIT_A'
+        trait.create()
+        tmp_trait = objects.Trait.get_by_name(self.context, 'CUSTOM_TRAIT_A')
+        self.assertEqual('CUSTOM_TRAIT_A', tmp_trait.name)
+        duplicated_trait = objects.Trait(self.context)
+        duplicated_trait.name = 'CUSTOM_TRAIT_A'
+        self.assertRaises(exception.TraitExists, duplicated_trait.create)
+
+    def test_trait_get(self):
+        t = objects.Trait(self.context)
+        t.name = 'CUSTOM_TRAIT_A'
+        t.create()
+        t = objects.Trait.get_by_name(self.context, 'CUSTOM_TRAIT_A')
+        self.assertEqual(t.name, 'CUSTOM_TRAIT_A')
+
+    def test_trait_get_non_existed_trait(self):
+        self.assertRaises(exception.TraitNotFound,
+            objects.Trait.get_by_name, self.context, 'CUSTOM_TRAIT_A')
+
+    def test_trait_destroy(self):
+        t = objects.Trait(self.context)
+        t.name = 'CUSTOM_TRAIT_A'
+        t.create()
+        t = objects.Trait.get_by_name(self.context, 'CUSTOM_TRAIT_A')
+        self.assertEqual(t.name, 'CUSTOM_TRAIT_A')
+        t.destroy()
+        self.assertRaises(exception.TraitNotFound, objects.Trait.get_by_name,
+                          self.context, 'CUSTOM_TRAIT_A')
+
+    def test_trait_destroy_with_standard_trait(self):
+        t = objects.Trait(self.context)
+        t.id = 1
+        t.name = 'HW_CPU_X86_AVX'
+        self.assertRaises(exception.TraitCannotDeleteStandard, t.destroy)
+
+    def test_traits_get_all(self):
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+
+        self._assert_traits(trait_names,
+                            objects.TraitList.get_all(self.context))
+
+    def test_traits_get_all_with_name_in_filter(self):
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+
+        traits = objects.TraitList.get_all(self.context,
+            filters={'name_in': ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B']})
+        self._assert_traits(['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B'], traits)
+
+    def test_traits_get_all_with_non_existed_name(self):
+        traits = objects.TraitList.get_all(self.context,
+            filters={'name_in': ['CUSTOM_TRAIT_X', 'CUSTOM_TRAIT_Y']})
+        self.assertEqual(0, len(traits))
+
+    def test_traits_get_all_with_prefix_filter(self):
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+
+        traits = objects.TraitList.get_all(self.context,
+                                           filters={'prefix': 'CUSTOM'})
+        self._assert_traits(
+            ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C'],
+            traits)
+
+    def test_traits_get_all_with_non_existed_prefix(self):
+        traits = objects.TraitList.get_all(self.context,
+            filters={"prefix": "NOT_EXISTED"})
+        self.assertEqual(0, len(traits))
+
+    def test_set_traits_for_resource_provider(self):
+        rp = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider,
+            name=uuidsentinel.fake_resource_name,
+        )
+        rp.create()
+        generation = rp.generation
+        self.assertIsInstance(rp.id, int)
+
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        trait_objs = []
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+            trait_objs.append(t)
+
+        rp.set_traits(trait_objs)
+        self._assert_traits(trait_names, rp.get_traits())
+        self.assertEqual(rp.generation, generation + 1)
+        generation = rp.generation
+
+        trait_names.remove('CUSTOM_TRAIT_A')
+        updated_traits = objects.TraitList.get_all(self.context,
+            filters={'name_in': trait_names})
+        self._assert_traits(trait_names, updated_traits)
+        rp.set_traits(updated_traits)
+        self._assert_traits(trait_names, rp.get_traits())
+        self.assertEqual(rp.generation, generation + 1)
+
+    def test_trait_delete_in_use(self):
+        rp = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider,
+            name=uuidsentinel.fake_resource_name,
+        )
+        rp.create()
+        t = objects.Trait(self.context)
+        t.name = 'CUSTOM_TRAIT_A'
+        t.create()
+        rp.set_traits([t])
+        self.assertRaises(exception.TraitInUse, t.destroy)
+
+    def test_traits_get_all_with_associated_true(self):
+        rp1 = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider1,
+            name=uuidsentinel.fake_resource_name1,
+        )
+        rp1.create()
+        rp2 = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider2,
+            name=uuidsentinel.fake_resource_name2,
+        )
+        rp2.create()
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+
+        associated_traits = objects.TraitList.get_all(self.context,
+            filters={'name_in': ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B']})
+        rp1.set_traits(associated_traits)
+        rp2.set_traits(associated_traits)
+        self._assert_traits(['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B'],
+            objects.TraitList.get_all(self.context,
+                filters={'associated': True}))
+
+    def test_traits_get_all_with_associated_false(self):
+        rp1 = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider1,
+            name=uuidsentinel.fake_resource_name1,
+        )
+        rp1.create()
+        rp2 = objects.ResourceProvider(
+            context=self.context,
+            uuid=uuidsentinel.fake_resource_provider2,
+            name=uuidsentinel.fake_resource_name2,
+        )
+        rp2.create()
+        trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
+        for name in trait_names:
+            t = objects.Trait(self.context)
+            t.name = name
+            t.create()
+
+        associated_traits = objects.TraitList.get_all(self.context,
+            filters={'name_in': ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B']})
+        rp1.set_traits(associated_traits)
+        rp2.set_traits(associated_traits)
+        self._assert_traits(['CUSTOM_TRAIT_C'],
+            objects.TraitList.get_all(self.context,
+                filters={'associated': False}))

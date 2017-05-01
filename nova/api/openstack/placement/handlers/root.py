@@ -12,13 +12,14 @@
 """Handler for the root of the Placement API."""
 
 from oslo_serialization import jsonutils
-import webob
+from oslo_utils import encodeutils
 
 
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement import wsgi_wrapper
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 def home(req):
     min_version = microversion.min_version_string()
     max_version = microversion.max_version_string()
@@ -31,6 +32,6 @@ def home(req):
         'min_version': min_version,
     }
     version_json = jsonutils.dumps({'versions': [version_data]})
-    req.response.body = version_json
+    req.response.body = encodeutils.to_utf8(version_json)
     req.response.content_type = 'application/json'
     return req.response

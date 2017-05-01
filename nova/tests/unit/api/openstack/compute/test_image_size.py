@@ -75,10 +75,6 @@ class ImageSizeTestV21(test.NoDBTestCase):
     def setUp(self):
         super(ImageSizeTestV21, self).setUp()
 
-        self.stub_out('nova.image.glance.GlanceImageService.show',
-                      fake_show)
-        self.stub_out('nova.image.glance.GlanceImageService.detail',
-                      fake_detail)
         self.stub_out('nova.image.glance.GlanceImageServiceV2.show',
                       fake_show)
         self.stub_out('nova.image.glance.GlanceImageServiceV2.detail',
@@ -93,7 +89,7 @@ class ImageSizeTestV21(test.NoDBTestCase):
         return res
 
     def _get_app(self):
-        return fakes.wsgi_app_v21(init_only=('images', 'image-size'))
+        return fakes.wsgi_app_v21()
 
     def _get_image(self, body):
         return jsonutils.loads(body).get('image')

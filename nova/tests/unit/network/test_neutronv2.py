@@ -20,6 +20,7 @@ import uuid
 
 from keystoneauth1.fixture import V2Token
 from keystoneauth1 import loading as ks_loading
+from keystoneauth1 import service_token
 import mock
 from mox3 import mox
 import netaddr
@@ -75,7 +76,7 @@ class MyComparator(mox.Comparator):
     def _com_dict(self, lhs, rhs):
         if len(lhs) != len(rhs):
             return False
-        for key, value in six.iteritems(lhs):
+        for key, value in lhs.items():
             if key not in rhs:
                 return False
             rhs_value = rhs[key]
@@ -139,6 +140,17 @@ class TestNeutronClient(test.NoDBTestCase):
         self.assertRaises(exception.Unauthorized,
                           neutronapi.get_client,
                           my_context)
+
+    def test_non_admin_with_service_token(self):
+        self.flags(send_service_user_token=True, group='service_user')
+
+        my_context = context.RequestContext('userid',
+                                            uuids.my_tenant,
+                                            auth_token='token')
+
+        cl = neutronapi.get_client(my_context)
+        self.assertIsInstance(cl.httpclient.auth,
+                              service_token.ServiceTokenAuthWrapper)
 
     @mock.patch.object(client.Client, "list_networks",
                        side_effect=exceptions.Unauthorized())
@@ -699,7 +711,8 @@ class TestNeutronv2Base(test.TestCase):
                 if network is None:
                     continue
 
-                port_req_body_create = {'port': {}}
+                port_req_body_create = {'port': {'device_id':
+                                                 self.instance.uuid}}
                 request.address = fixed_ips.get(request.network_id)
                 if request.address:
                     port_req_body_create['port']['fixed_ips'] = [
@@ -794,8 +807,17 @@ class TestNeutronv2Base(test.TestCase):
 
         with mock.patch('nova.objects.VirtualInterface') as mock_vif:
             mock_vif.side_effect = _new_vif
+
+            requested_networks = kwargs.get("requested_networks", None)
+            allowed_keys = ["macs", "security_groups",
+                            "dhcp_options", "bind_host_id"]
+            afi_kwargs = {}
+            for key in kwargs.keys():
+                if key in allowed_keys:
+                    afi_kwargs[key] = kwargs[key]
+
             return api.allocate_for_instance(self.context, self.instance,
-                                             **kwargs)
+                    False, requested_networks, **afi_kwargs)
 
 
 class TestNeutronv2(TestNeutronv2Base):
@@ -1098,7 +1120,7 @@ class TestNeutronv2(TestNeutronv2Base):
         api = self._stub_allocate_for_instance(net_idx=2)
         self.assertRaises(exception.NetworkAmbiguous,
                           api.allocate_for_instance,
-                          self.context, self.instance)
+                          self.context, self.instance, False, None)
 
     def test_allocate_for_instance_accepts_macs_kwargs_None(self):
         # The macs kwarg should be accepted as None.
@@ -1159,7 +1181,7 @@ class TestNeutronv2(TestNeutronv2Base):
             _break='mac' + self.nets2[1]['id'])
         self.assertRaises(exception.PortNotFree,
                           api.allocate_for_instance, self.context,
-                          self.instance, requested_networks=requested_networks,
+                          self.instance, False, requested_networks,
                           macs=set(['my_mac1']))
         mock_unbind.assert_called_once_with(self.context, [],
                                             self.moxed_client, mock.ANY)
@@ -1182,7 +1204,7 @@ class TestNeutronv2(TestNeutronv2Base):
         with mock.patch.object(api, '_delete_ports'):
             self.assertRaises(exception.PortNotFree,
                               api.allocate_for_instance, self.context,
-                              self.instance,
+                              self.instance, False,
                               requested_networks=requested_networks,
                               macs=set(['my_mac2']))
         mock_unbind.assert_called_once_with(self.context, [],
@@ -1204,7 +1226,7 @@ class TestNeutronv2(TestNeutronv2Base):
         api = self._stub_allocate_for_instance(net_idx=3)
         self.assertRaises(exception.NetworkAmbiguous,
                           api.allocate_for_instance,
-                          self.context, self.instance)
+                          self.context, self.instance, False, None)
 
     def test_allocate_for_instance_with_requested_non_available_network(self):
         """verify that a non available network is ignored.
@@ -1259,7 +1281,7 @@ class TestNeutronv2(TestNeutronv2Base):
             _break='post_list_networks')
         self.assertRaises(exception.NetworkNotFound,
                           api.allocate_for_instance,
-                          self.context, self.instance,
+                          self.context, self.instance, False,
                           requested_networks=requested_networks)
 
     def test_allocate_for_instance_with_requested_networks_with_fixedip(self):
@@ -1291,7 +1313,8 @@ class TestNeutronv2(TestNeutronv2Base):
         self.moxed_client.list_networks(shared=True).AndReturn(
             {'networks': model.NetworkInfo([])})
         self.mox.ReplayAll()
-        nwinfo = api.allocate_for_instance(self.context, self.instance)
+        nwinfo = api.allocate_for_instance(self.context, self.instance,
+                                           False, None)
         self.assertEqual(0, len(nwinfo))
 
     @mock.patch(
@@ -1361,7 +1384,7 @@ class TestNeutronv2(TestNeutronv2Base):
         self.mox.ReplayAll()
         self.assertRaises(exception.PortInUse,
                           api.allocate_for_instance,
-                          self.context, self.instance,
+                          self.context, self.instance, False,
                           requested_networks=requested_networks)
         mock_unbind.assert_called_once_with(self.context, [],
                                             self.moxed_client, mock.ANY)
@@ -1396,7 +1419,7 @@ class TestNeutronv2(TestNeutronv2Base):
                 Exception("fail to create port"))
         self.mox.ReplayAll()
         self.assertRaises(NEUTRON_CLIENT_EXCEPTION, api.allocate_for_instance,
-                          self.context, self.instance,
+                          self.context, self.instance, False,
                           requested_networks=requested_networks)
 
     def test_allocate_for_instance_no_port_or_network(self):
@@ -1418,9 +1441,8 @@ class TestNeutronv2(TestNeutronv2Base):
         requested_networks = objects.NetworkRequestList(
             objects=[objects.NetworkRequest()])
         self.assertRaises(BailOutEarly,
-                          api.allocate_for_instance,
-                              self.context, self.instance,
-                              requested_networks=requested_networks)
+                          api.allocate_for_instance, self.context,
+                          self.instance, False, requested_networks)
 
     def test_allocate_for_instance_second_time(self):
         # Make sure that allocate_for_instance only returns ports that it
@@ -1442,7 +1464,7 @@ class TestNeutronv2(TestNeutronv2Base):
             _device=True)
         self.assertRaises(exception.PortInUse,
                           api.allocate_for_instance, self.context,
-                          self.instance, requested_networks=requested_networks)
+                          self.instance, False, requested_networks)
 
     def test_allocate_for_instance_port_not_found(self):
         # If a port is not found, an exception should be raised.
@@ -1454,7 +1476,7 @@ class TestNeutronv2(TestNeutronv2Base):
             _break='pre_list_networks')
         self.assertRaises(exception.PortNotFound,
                           api.allocate_for_instance, self.context,
-                          self.instance, requested_networks=requested_networks)
+                          self.instance, False, requested_networks)
 
     def test_allocate_for_instance_port_invalid_tenantid(self):
         self.tenant_id = 'invalid_id'
@@ -1466,7 +1488,7 @@ class TestNeutronv2(TestNeutronv2Base):
             _break='pre_list_networks')
         self.assertRaises(exception.PortNotUsable,
                           api.allocate_for_instance, self.context,
-                          self.instance, requested_networks=requested_networks)
+                          self.instance, False, requested_networks)
 
     def test_allocate_for_instance_with_externalnet_forbidden(self):
         """Only one network is available, it's external, and the client
@@ -1486,8 +1508,8 @@ class TestNeutronv2(TestNeutronv2Base):
         self.mox.ReplayAll()
         api = neutronapi.API()
         self.assertRaises(exception.ExternalNetworkAttachForbidden,
-                          api.allocate_for_instance,
-                          self.context, self.instance)
+                          api.allocate_for_instance, self.context,
+                          self.instance, False, None)
 
     def test_allocate_for_instance_with_externalnet_multiple(self):
         """Multiple networks are available, one the client is authorized
@@ -1509,7 +1531,7 @@ class TestNeutronv2(TestNeutronv2Base):
         self.assertRaises(
             exception.NetworkAmbiguous,
             api.allocate_for_instance,
-            self.context, self.instance)
+            self.context, self.instance, False, None)
 
     def test_allocate_for_instance_with_externalnet_admin_ctx(self):
         """Only one network is available, it's external, and the client
@@ -1519,14 +1541,14 @@ class TestNeutronv2(TestNeutronv2Base):
                                            is_admin=True)
         neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
         api = self._stub_allocate_for_instance(net_idx=8)
-        api.allocate_for_instance(admin_ctx, self.instance)
+        api.allocate_for_instance(admin_ctx, self.instance, False, None)
 
     def test_allocate_for_instance_with_external_shared_net(self):
         """Only one network is available, it's external and shared."""
         ctx = context.RequestContext('userid', uuids.my_tenant)
         neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
         api = self._stub_allocate_for_instance(net_idx=10)
-        api.allocate_for_instance(ctx, self.instance)
+        api.allocate_for_instance(ctx, self.instance, False, None)
 
     def _deallocate_for_instance(self, number, requested_networks=None):
         # TODO(mriedem): Remove this conversion when all neutronv2 APIs are
@@ -2794,6 +2816,32 @@ class TestNeutronv2(TestNeutronv2Base):
         self.assertNotIn('should_create_bridge', net)
         self.assertEqual('port-id', iid)
 
+    def test_nw_info_build_network_vhostuser_fp(self):
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id',
+            'binding:vif_type': model.VIF_TYPE_VHOSTUSER,
+            'binding:vif_details': {
+                    model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True,
+                    model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: False,
+                                    }
+            }
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
+        api = neutronapi.API()
+        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
+        self.mox.ReplayAll()
+        neutronapi.get_client(uuids.fake)
+        net, ovs_interfaceid = api._nw_info_build_network(
+            fake_port, fake_nets, fake_subnets)
+        self.assertEqual(fake_subnets, net['subnets'])
+        self.assertEqual('net-id', net['id'])
+        self.assertEqual('foo', net['label'])
+        self.assertEqual('tenant', net.get_meta('tenant_id'))
+        self.assertEqual('brqnet-id', net['bridge'])
+        self.assertIsNone(ovs_interfaceid)
+
     def _test_nw_info_build_custom_bridge(self, vif_type, extra_details=None):
         fake_port = {
             'fixed_ips': [{'ip_address': '1.1.1.1'}],
@@ -3813,6 +3861,7 @@ class TestNeutronv2WithMock(test.TestCase):
                              'pci_vendor_info': 'old_pci_vendor_info'}},
                         {'id': 'fake-port-2',
                          neutronapi.BINDING_HOST_ID: instance.host}]}
+        migration = {'status': 'confirmed'}
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -3820,7 +3869,7 @@ class TestNeutronv2WithMock(test.TestCase):
         get_client_mock.return_value.update_port = update_port_mock
 
         self.api._update_port_binding_for_instance(self.context, instance,
-                                                   instance.host)
+                                                   instance.host, migration)
         # Assert that update_port is called with the binding:profile
         # corresponding to the PCI device specified.
         update_port_mock.assert_called_once_with(
@@ -3867,6 +3916,7 @@ class TestNeutronv2WithMock(test.TestCase):
                             {'pci_slot': '0000:0a:00.1',
                              'physical_network': 'old_phys_net',
                              'pci_vendor_info': 'old_pci_vendor_info'}}]}
+        migration = {'status': 'confirmed'}
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -3875,7 +3925,55 @@ class TestNeutronv2WithMock(test.TestCase):
                           self.api._update_port_binding_for_instance,
                           self.context,
                           instance,
-                          instance.host)
+                          instance.host,
+                          migration)
+
+    @mock.patch.object(pci_whitelist.Whitelist, 'get_devspec')
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_update_port_bindings_for_instance_with_pci_no_migration(self,
+                                            get_client_mock,
+                                            get_pci_device_devspec_mock):
+        self.api._has_port_binding_extension = mock.Mock(return_value=True)
+
+        devspec = mock.Mock()
+        devspec.get_tags.return_value = {'physical_network': 'physnet1'}
+        get_pci_device_devspec_mock.return_value = devspec
+
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.migration_context = objects.MigrationContext()
+        instance.migration_context.old_pci_devices = objects.PciDeviceList(
+            objects=[objects.PciDevice(vendor_id='1377',
+                                       product_id='0047',
+                                       address='0000:0a:00.1',
+                                       compute_node_id=1,
+                                       request_id='1234567890')])
+        instance.migration_context.new_pci_devices = objects.PciDeviceList(
+            objects=[objects.PciDevice(vendor_id='1377',
+                                       product_id='0047',
+                                       address='0000:0b:00.1',
+                                       compute_node_id=2,
+                                       request_id='1234567890')])
+        instance.pci_devices = instance.migration_context.old_pci_devices
+
+        fake_ports = {'ports': [
+                        {'id': 'fake-port-1',
+                         'binding:vnic_type': 'direct',
+                         neutronapi.BINDING_HOST_ID: instance.host,
+                         neutronapi.BINDING_PROFILE:
+                            {'pci_slot': '0000:0a:00.1',
+                             'physical_network': 'phys_net',
+                             'pci_vendor_info': 'pci_vendor_info'}}]}
+        list_ports_mock = mock.Mock(return_value=fake_ports)
+        get_client_mock.return_value.list_ports = list_ports_mock
+
+        update_port_mock = mock.Mock()
+        get_client_mock.return_value.update_port = update_port_mock
+
+        # Try to update the port binding with no migration object.
+        self.api._update_port_binding_for_instance(self.context, instance,
+                                                   instance.host)
+        # No ports should be updated if the port's pci binding did not change.
+        update_port_mock.assert_not_called()
 
     def test_get_pci_mapping_for_migration(self):
         instance = fake_instance.fake_instance_obj(self.context)
@@ -4188,9 +4286,8 @@ class TestNeutronv2WithMock(test.TestCase):
         mock_avail_nets.return_value = [{'id': 'net-1',
                                          'subnets': ['subnet1']}]
 
-        self.api.allocate_for_instance(mock.sentinel.ctx,
-                                  mock_inst,
-                                  requested_networks=nw_req)
+        self.api.allocate_for_instance(mock.sentinel.ctx, mock_inst, False,
+                                       requested_networks=nw_req)
 
         mock_unbind.assert_called_once_with(mock.sentinel.ctx,
                                             [uuids.portid_1, uuids.portid_2],
@@ -4328,7 +4425,7 @@ class TestNeutronv2WithMock(test.TestCase):
         self.assertRaises(exception.PortBindingFailed,
                           self.api.allocate_for_instance,
                           mock.sentinel.ctx,
-                          mock_inst)
+                          mock_inst, False, None)
         mock_nc.delete_port.assert_called_once_with(uuids.portid_1)
 
     @mock.patch('nova.network.neutronv2.api.API._show_port')
@@ -4352,7 +4449,7 @@ class TestNeutronv2WithMock(test.TestCase):
 
         self.assertRaises(exception.PortBindingFailed,
                           self.api.allocate_for_instance,
-                          mock.sentinel.ctx, mock_inst,
+                          mock.sentinel.ctx, mock_inst, False,
                           requested_networks=nw_req)
 
     @mock.patch('nova.network.neutronv2.api.get_client')
@@ -4968,7 +5065,8 @@ class TestAllocateForInstance(test.NoDBTestCase):
         self.instance.project_id = ""
 
         self.assertRaises(exception.InvalidInput,
-            api.allocate_for_instance, self.context, self.instance)
+            api.allocate_for_instance, self.context, self.instance,
+            False, None)
 
     @mock.patch.object(neutronapi.API, 'get_instance_nw_info')
     @mock.patch.object(neutronapi.API, '_update_ports_for_instance')
@@ -4997,7 +5095,8 @@ class TestAllocateForInstance(test.NoDBTestCase):
             {"id": uuids.created}, {"id": uuids.preexist}, {"id": "foo"}
         ]
 
-        result = api.allocate_for_instance(self.context, self.instance)
+        result = api.allocate_for_instance(self.context, self.instance,
+                                           False, None)
 
         # TODO(johngarbutt) we need to replace the old mox coverage
         # with new tests that can build on this very poor test
@@ -5221,7 +5320,7 @@ class TestAllocateForInstance(test.NoDBTestCase):
         mock_client.create_port.assert_called_once_with(
             {'port': {
                 'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
-                'admin_state_up': True}})
+                'admin_state_up': True, 'device_id': self.instance.uuid}})
 
     def test_create_ports_for_instance_with_security_groups(self):
         api = neutronapi.API()
@@ -5238,7 +5337,8 @@ class TestAllocateForInstance(test.NoDBTestCase):
         mock_client.create_port.assert_called_once_with(
             {'port': {
                 'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
-                'admin_state_up': True, 'security_groups': security_groups}})
+                'admin_state_up': True, 'security_groups': security_groups,
+                'device_id': self.instance.uuid}})
 
     def test_create_ports_for_instance_with_cleanup_after_pc_failure(self):
         api = neutronapi.API()
@@ -5413,7 +5513,7 @@ class TestNeutronv2NeutronHostnameDNS(TestNeutronv2Base):
             _dns_name='my-instance')
         self.assertRaises(exception.PortNotUsableDNS,
                           api.allocate_for_instance, self.context,
-                          self.instance, requested_networks=requested_networks)
+                          self.instance, False, requested_networks)
 
 
 class TestNeutronv2NeutronHostnameDNSPortbinding(TestNeutronv2Base):
@@ -5593,7 +5693,7 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
         api = neutronapi.API()
         mock_create_port.return_value = {'id': 'foo', 'mac_address': 'bar'}
         api.allocate_for_instance(
-            'context', instance, requested_networks=onets,
+            'context', instance, False, requested_networks=onets,
             security_groups=secgroups)
 
         mock_process_security_groups.assert_called_once_with(
@@ -5649,7 +5749,7 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
         api = neutronapi.API()
         mock_create_port.return_value = {'id': 'foo', 'mac_address': 'bar'}
         api.allocate_for_instance(
-            'context', instance, requested_networks=onets,
+            'context', instance, False, requested_networks=onets,
             security_groups=secgroups)
 
         mock_create_port.assert_has_calls([
@@ -5703,7 +5803,7 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
         api = neutronapi.API()
         mock_create_port.return_value = {'id': 'foo', 'mac_address': 'bar'}
         api.allocate_for_instance(
-            'context', instance, requested_networks=onets,
+            'context', instance, False, requested_networks=onets,
             security_groups=secgroups)
 
         mock_process_security_groups.assert_called_once_with(
@@ -5760,7 +5860,7 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
         self.assertRaises(
             exception.SecurityGroupCannotBeApplied,
             api.allocate_for_instance,
-            'context', instance, requested_networks=onets,
+            'context', instance, False, requested_networks=onets,
             security_groups=secgroups)
 
         mock_process_security_groups.assert_called_once_with(
@@ -5998,7 +6098,7 @@ class TestNeutronv2AutoAllocateNetwork(test.NoDBTestCase):
             requested_networks = objects.NetworkRequestList(objects=[net_req])
 
             nw_info = self.api.allocate_for_instance(
-                self.context, instance, requested_networks=requested_networks)
+                self.context, instance, False, requested_networks)
             self.assertEqual(1, len(nw_info))
             self.assertEqual(uuids.port_id, nw_info[0]['id'])
             # assert that we filtered available networks on admin_state_up=True

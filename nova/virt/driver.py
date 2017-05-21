@@ -128,6 +128,8 @@ class ComputeDriver(object):
         "supports_migrate_to_same_host": False,
         "supports_attach_interface": False,
         "supports_device_tagging": False,
+        "supports_tagged_attach_interface": False,
+        "supports_tagged_attach_volume": False,
     }
 
     def __init__(self, virtapi):

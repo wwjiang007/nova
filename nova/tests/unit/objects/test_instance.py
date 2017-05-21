@@ -234,6 +234,25 @@ class _TestInstanceObject(object):
         self.assertEqual(1, len(instance.tags))
         self.assertEqual('foo', instance.tags[0].tag)
 
+    @mock.patch('nova.objects.instance.LOG.exception')
+    def test_save_does_not_log_exception_after_tags_loaded(self, mock_log):
+        instance = objects.Instance(self.context, uuid=uuids.instance,
+                                    user_id=self.context.user_id,
+                                    project_id=self.context.project_id)
+        instance.create()
+        tag = objects.Tag(self.context, resource_id=instance.uuid, tag='foo')
+        tag.create()
+
+        # this will lazy load tags so instance.tags will be set
+        self.assertEqual(1, len(instance.tags))
+
+        # instance.save will try to find a way to save tags but is should not
+        # spam the log with errors
+        instance.display_name = 'foobar'
+        instance.save()
+
+        self.assertFalse(mock_log.called)
+
     @mock.patch.object(db, 'instance_get')
     def test_get_by_id(self, mock_get):
         mock_get.return_value = self.fake_instance
@@ -1973,8 +1992,20 @@ class TestInstanceObjectMisc(test.TestCase):
                                  key_name='missingkey')
         inst3.create()
 
+        inst4 = objects.Instance(context=ctxt,
+                                 user_id=ctxt.user_id,
+                                 project_id=ctxt.project_id,
+                                 key_name='missingkey')
+        inst4.create()
+        inst4.destroy()
+
+        # NOTE(danms): Add an orphaned instance_extra record for
+        # a totally invalid instance to make sure we don't explode.
+        # See bug 1684861 for more information.
+        db.instance_extra_update_by_uuid(ctxt, 'foo', {})
+
         hit, done = instance.migrate_instance_keypairs(ctxt, 10)
-        self.assertEqual(2, hit)
+        self.assertEqual(3, hit)
         self.assertEqual(2, done)
         db_extra = db.instance_extra_get_by_instance_uuid(
             ctxt, inst1.uuid, ['keypairs'])

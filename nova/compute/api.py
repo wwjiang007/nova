@@ -1528,8 +1528,15 @@ class API(base.Base):
         instance.old_flavor = None
         instance.new_flavor = None
         if CONF.ephemeral_storage_encryption.enabled:
+            # NOTE(kfarr): dm-crypt expects the cipher in a
+            # hyphenated format: cipher-chainmode-ivmode
+            # (ex: aes-xts-plain64). The algorithm needs
+            # to be parsed out to pass to the key manager (ex: aes).
+            cipher = CONF.ephemeral_storage_encryption.cipher
+            algorithm = cipher.split('-')[0] if cipher else None
             instance.ephemeral_key_uuid = self.key_manager.create_key(
                 context,
+                algorithm=algorithm,
                 length=CONF.ephemeral_storage_encryption.key_size)
         else:
             instance.ephemeral_key_uuid = None
@@ -2110,7 +2117,8 @@ class API(base.Base):
         else:
             flavor = flavor or instance.flavor
             instance_vcpus = flavor.vcpus
-            instance_memory_mb = flavor.memory_mb
+            vram_mb = int(flavor.get('extra_specs', {}).get(VIDEO_RAM, 0))
+            instance_memory_mb = flavor.memory_mb + vram_mb
 
         quotas = objects.Quotas(context=context)
         quotas.reserve(project_id=project_id,
@@ -2154,21 +2162,26 @@ class API(base.Base):
         for bdm in bdms:
             if bdm.is_volume:
                 try:
-                    connector = self._get_stashed_volume_connector(
-                        bdm, instance)
-                    if connector:
-                        self.volume_api.terminate_connection(context,
-                                                             bdm.volume_id,
-                                                             connector)
+                    if bdm.attachment_id:
+                        self.volume_api.attachment_delete(context,
+                                                          bdm.attachment_id)
                     else:
-                        LOG.debug('Unable to find connector for volume %s, '
-                                  'not attempting terminate_connection.',
-                                  bdm.volume_id, instance=instance)
-                    # Attempt to detach the volume. If there was no connection
-                    # made in the first place this is just cleaning up the
-                    # volume state in the Cinder database.
-                    self.volume_api.detach(elevated, bdm.volume_id,
-                                           instance.uuid)
+                        connector = self._get_stashed_volume_connector(
+                            bdm, instance)
+                        if connector:
+                            self.volume_api.terminate_connection(context,
+                                                                 bdm.volume_id,
+                                                                 connector)
+                        else:
+                            LOG.debug('Unable to find connector for volume %s,'
+                                      ' not attempting terminate_connection.',
+                                      bdm.volume_id, instance=instance)
+                        # Attempt to detach the volume. If there was no
+                        # connection made in the first place this is just
+                        # cleaning up the volume state in the Cinder DB.
+                        self.volume_api.detach(elevated, bdm.volume_id,
+                                               instance.uuid)
+
                     if bdm.delete_on_termination:
                         self.volume_api.delete(context, bdm.volume_id)
                 except Exception as exc:

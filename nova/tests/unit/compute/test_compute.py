@@ -23,10 +23,10 @@ import operator
 import sys
 import time
 import traceback
-import uuid
 
 import ddt
 
+from castellan import key_manager
 import mock
 from neutronclient.common import exceptions as neutron_exceptions
 from oslo_log import log as logging
@@ -397,12 +397,17 @@ class ComputeVolumeTestCase(BaseTestCase):
             self.compute.attach_volume(self.context, instance, bdm=fake_bdm)
             self.assertEqual(self.cinfo.get('serial'), uuids.volume_id)
 
-    def test_attach_volume_raises(self):
+    @mock.patch('nova.context.RequestContext.elevated')
+    @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
+    def test_attach_volume_raises(self, mock_notify, mock_elevate):
+        mock_elevate.return_value = self.context
+
         fake_bdm = objects.BlockDeviceMapping(**self.fake_volume)
         instance = self._create_fake_instance_obj()
+        expected_exception = test.TestingException()
 
         def fake_attach(*args, **kwargs):
-            raise test.TestingException
+            raise expected_exception
 
         with test.nested(
             mock.patch.object(driver_block_device.DriverVolumeBlockDevice,
@@ -417,6 +422,15 @@ class ComputeVolumeTestCase(BaseTestCase):
                     self.context, instance, fake_bdm)
             self.assertTrue(mock_unreserve.called)
             self.assertTrue(mock_destroy.called)
+            mock_notify.assert_has_calls([
+                mock.call(self.context, instance, 'fake-mini',
+                          action='volume_attach', phase='start',
+                          volume_id=uuids.volume_id),
+                mock.call(self.context, instance, 'fake-mini',
+                          action='volume_attach', phase='error',
+                          volume_id=uuids.volume_id,
+                          exception=expected_exception),
+            ])
 
     def test_detach_volume_api_raises(self):
         fake_bdm = objects.BlockDeviceMapping(**self.fake_volume)
@@ -747,6 +761,8 @@ class ComputeVolumeTestCase(BaseTestCase):
         mock_get_bdms.assert_called_once_with(ctxt, use_slave=True)
         mock_update.assert_called_once_with(ctxt, [3, 4])
 
+    @mock.patch('nova.context.RequestContext.elevated')
+    @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
     @mock.patch.object(objects.BlockDeviceMapping,
                        'get_by_volume_and_instance')
     @mock.patch.object(fake.FakeDriver, 'block_stats')
@@ -754,7 +770,9 @@ class ComputeVolumeTestCase(BaseTestCase):
     @mock.patch.object(fake.FakeDriver, 'get_all_volume_usage')
     @mock.patch.object(fake.FakeDriver, 'instance_exists')
     def test_detach_volume_usage(self, mock_exists, mock_get_all,
-                                 mock_get_bdms, mock_stats, mock_get):
+                                 mock_get_bdms, mock_stats, mock_get,
+                                 mock_notify, mock_elevate):
+        mock_elevate.return_value = self.context
         # Test that detach volume update the volume usage cache table correctly
         instance = self._create_fake_instance_obj()
         bdm = objects.BlockDeviceMapping(context=self.context,
@@ -767,7 +785,8 @@ class ComputeVolumeTestCase(BaseTestCase):
                                          disk_bus='foo',
                                          device_type='disk',
                                          volume_size=1,
-                                         volume_id=uuids.volume_id)
+                                         volume_id=uuids.volume_id,
+                                         attachment_id=None)
         host_volume_bdms = {'id': 1, 'device_name': '/dev/vdb',
                'connection_info': '{}', 'instance_uuid': instance['uuid'],
                'volume_id': uuids.volume_id}
@@ -829,6 +848,21 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertEqual(30, volume_usage['tot_read_bytes'])
         self.assertEqual(1, volume_usage['tot_writes'])
         self.assertEqual(20, volume_usage['tot_write_bytes'])
+
+        mock_notify.assert_has_calls([
+            mock.call(self.context, instance, 'fake-mini',
+                      action='volume_attach', phase='start',
+                      volume_id=uuids.volume_id),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='volume_attach', phase='end',
+                      volume_id=uuids.volume_id),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='volume_detach', phase='start',
+                      volume_id=uuids.volume_id),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='volume_detach', phase='end',
+                      volume_id=uuids.volume_id),
+            ])
 
         mock_get.assert_called_once_with(self.context, uuids.volume_id,
                                          instance.uuid)
@@ -1292,7 +1326,7 @@ class ComputeVolumeTestCase(BaseTestCase):
                 self.instance_object, 'fake_id', 'fake_id2', {})
 
     @mock.patch.object(cinder.API, 'create',
-                       side_effect=exception.OverQuota(overs='volumes'))
+                       side_effect=exception.OverQuota(overs='something'))
     def test_prep_block_device_over_quota_failure(self, mock_create):
         instance = self._create_fake_instance_obj()
         bdms = [
@@ -1309,7 +1343,7 @@ class ComputeVolumeTestCase(BaseTestCase):
             })]
         bdms = block_device_obj.block_device_make_list_from_dicts(
             self.context, bdms)
-        self.assertRaises(exception.VolumeLimitExceeded,
+        self.assertRaises(exception.OverQuota,
                           compute_manager.ComputeManager()._prep_block_device,
                           self.context, instance, bdms)
         self.assertTrue(mock_create.called)
@@ -6187,6 +6221,10 @@ class ComputeTestCase(BaseTestCase):
             update_available_resource.assert_has_calls([mock.call(c)])
             self.assertEqual('completed', migration_obj.status)
             mig_save.assert_called_once_with()
+            # assert we logged a success message
+            self.assertIn(
+                'Migrating instance to desthost finished successfully.',
+                self.stdlog.logger.output)
 
     def test_post_live_migration_exc_on_dest_works_correctly(self):
         """Confirm that post_live_migration() completes successfully
@@ -6238,6 +6276,10 @@ class ComputeTestCase(BaseTestCase):
                                               migrate_data=migrate_data)
             update_available_resource.assert_has_calls([mock.call(c)])
             self.assertEqual('completed', migration_obj.status)
+            # assert we did not log a success message
+            self.assertNotIn(
+                'Migrating instance to desthost finished successfully.',
+                self.stdlog.logger.output)
 
     def test_post_live_migration_terminate_volume_connections(self):
         c = context.get_admin_context()
@@ -8305,6 +8347,36 @@ class ComputeAPITestCase(BaseTestCase):
                          instance['display_name'])
         self.assertIsNotNone(instance.get('uuid'))
         self.assertEqual([], instance.security_groups.objects)
+        self.assertIsNone(instance.ephemeral_key_uuid)
+
+    def test_populate_instance_for_create_encrypted(self, num_instances=1):
+        CONF.set_override('enabled', True,
+                          group='ephemeral_storage_encryption',
+                          enforce_type=True)
+        CONF.set_override('api_class',
+                          'castellan.tests.unit.key_manager.mock_key_manager.'
+                          'MockKeyManager',
+                          group='key_manager',
+                          enforce_type=True)
+        base_options = {'image_ref': self.fake_image['id'],
+                        'system_metadata': {'fake': 'value'},
+                        'display_name': 'foo',
+                        'uuid': uuids.instance}
+        instance = objects.Instance()
+        instance.update(base_options)
+        inst_type = flavors.get_flavor_by_name("m1.tiny")
+        self.compute_api.key_manager = key_manager.API()
+        index = 1
+        instance = self.compute_api._populate_instance_for_create(
+                                self.context,
+                                instance,
+                                self.fake_image,
+                                index,
+                                security_groups=objects.SecurityGroupList(),
+                                instance_type=inst_type,
+                                num_instances=num_instances,
+                                shutdown_terminate=False)
+        self.assertIsNotNone(instance.ephemeral_key_uuid)
 
     def test_default_hostname_generator(self):
         fake_uuids = [uuidutils.generate_uuid() for x in range(4)]
@@ -10186,6 +10258,66 @@ class ComputeAPITestCase(BaseTestCase):
             mock_detach.assert_called_once_with(mock.ANY, 'fake-id',
                                                 instance.uuid, None)
 
+    @mock.patch.object(context.RequestContext, 'elevated')
+    @mock.patch.object(cinder.API, 'attachment_delete')
+    @mock.patch.object(compute_manager.ComputeManager,
+                       '_get_instance_block_device_info')
+    def test_shutdown_with_attachment_delete(self, mock_info,
+                                             mock_attach_delete,
+                                             mock_elevated):
+        # test _shutdown_instance with volume bdm containing an
+        # attachment id. This should use the v3 cinder api.
+        admin = context.get_admin_context()
+        instance = self._create_fake_instance_obj()
+
+        attachment_id = uuids.attachment_id
+
+        vol_bdm = block_device_obj.BlockDeviceMapping(
+            instance_uuid=instance['uuid'],
+            source_type='volume', destination_type='volume',
+            delete_on_termination=False,
+            volume_id=uuids.volume_id,
+            attachment_id=attachment_id)
+        bdms = [vol_bdm]
+
+        mock_elevated.return_value = admin
+        self.compute._shutdown_instance(admin, instance, bdms)
+
+        mock_attach_delete.assert_called_once_with(admin, attachment_id)
+
+    @mock.patch.object(compute_manager.LOG, 'debug')
+    @mock.patch.object(cinder.API, 'attachment_delete')
+    @mock.patch.object(compute_manager.ComputeManager,
+                       '_get_instance_block_device_info')
+    def test_shutdown_with_attachment_not_found(self, mock_info,
+                                                mock_attach_delete,
+                                                mock_debug_log):
+        # test _shutdown_instance with attachment_delete throwing
+        # a VolumeAttachmentNotFound exception. This should not
+        # cause _shutdown_instance to fail. Only a debug log
+        # message should be generated.
+        admin = context.get_admin_context()
+        instance = self._create_fake_instance_obj()
+
+        attachment_id = uuids.attachment_id
+
+        vol_bdm = block_device_obj.BlockDeviceMapping(
+            instance_uuid=instance['uuid'],
+            source_type='volume', destination_type='volume',
+            delete_on_termination=False,
+            volume_id=uuids.volume_id,
+            attachment_id=attachment_id)
+        bdms = [vol_bdm]
+
+        mock_attach_delete.side_effect = \
+            exception.VolumeAttachmentNotFound(attachment_id=attachment_id)
+
+        self.compute._shutdown_instance(admin, instance, bdms)
+
+        # get last call to LOG.debug and verify correct exception is in there
+        self.assertIsInstance(mock_debug_log.call_args[0][1],
+                              exception.VolumeAttachmentNotFound)
+
     def test_terminate_with_volumes(self):
         # Make sure that volumes get detached during instance termination.
         admin = context.get_admin_context()
@@ -10605,7 +10737,7 @@ class ComputeAPITestCase(BaseTestCase):
         mock_migration.side_effect = fake_migrations
 
         migrations = self.compute_api.get_migrations(self.context,
-                                                             filters)
+                                                     filters)
         self.assertEqual(1, len(migrations))
         self.assertEqual(migrations[0].id, migration['id'])
         mock_migration.assert_called_once_with(self.context, filters)
@@ -10615,23 +10747,22 @@ class ComputeAPITestCase(BaseTestCase):
         migration = test_migration.fake_db_migration(
             instance_uuid=uuids.instance)
         mock_get.return_value = [migration]
-        db.migration_get_in_progress_by_instance(self.context,
-                                                 uuids.instance)
         migrations = self.compute_api.get_migrations_in_progress_by_instance(
                 self.context, uuids.instance)
         self.assertEqual(1, len(migrations))
         self.assertEqual(migrations[0].id, migration['id'])
+        mock_get.assert_called_once_with(self.context, uuids.instance, None)
 
     @mock.patch("nova.db.migration_get_by_id_and_instance")
     def test_get_migration_by_id_and_instance(self, mock_get):
         migration = test_migration.fake_db_migration(
             instance_uuid=uuids.instance)
         mock_get.return_value = migration
-        db.migration_get_by_id_and_instance(
-                self.context, migration['id'], uuid)
         res = self.compute_api.get_migration_by_id_and_instance(
                 self.context, migration['id'], uuids.instance)
         self.assertEqual(res.id, migration['id'])
+        mock_get.assert_called_once_with(self.context, migration['id'],
+                                         uuids.instance)
 
 
 class ComputeAPIIpFilterTestCase(test.NoDBTestCase):

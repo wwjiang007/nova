@@ -54,7 +54,6 @@ from nova import objects
 from nova.policies import servers as server_policies
 from nova import utils
 
-ALIAS = 'servers'
 TAG_SEARCH_FILTERS = ('tags', 'tags-any', 'not-tags', 'not-tags-any')
 DEVICE_TAGGING_MIN_COMPUTE_VERSION = 14
 
@@ -529,7 +528,10 @@ class ServersController(wsgi.Controller):
             requested_networks = self._get_requested_networks(
                 requested_networks, supports_device_tagging)
 
-        if requested_networks and len(requested_networks):
+        # Skip policy check for 'create:attach_network' if there is no
+        # network allocation request.
+        if requested_networks and len(requested_networks) and \
+                not requested_networks.no_allocate:
             context.can(server_policies.SERVERS % 'create:attach_network',
                         target)
 
@@ -1016,6 +1018,8 @@ class ServersController(wsgi.Controller):
                         'createImage', id)
         except exception.Invalid as err:
             raise exc.HTTPBadRequest(explanation=err.format_message())
+        except exception.OverQuota as e:
+            raise exc.HTTPForbidden(explanation=e.format_message())
 
         # Starting with microversion 2.45 we return a response body containing
         # the snapshot image id without the Location header.
@@ -1162,26 +1166,3 @@ def remove_invalid_sort_keys(context, sort_keys, sort_dirs,
             raise exc.HTTPForbidden(explanation=msg)
 
     return sort_keys, sort_dirs
-
-
-class Servers(extensions.V21APIExtensionBase):
-    """Servers."""
-
-    name = "Servers"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        member_actions = {'action': 'POST'}
-        collection_actions = {'detail': 'GET'}
-        resources = [
-            extensions.ResourceExtension(
-                ALIAS,
-                ServersController(extension_info=self.extension_info),
-                member_name='server', collection_actions=collection_actions,
-                member_actions=member_actions)]
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []

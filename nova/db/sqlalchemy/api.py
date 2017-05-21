@@ -475,6 +475,17 @@ def service_get(context, service_id):
     return result
 
 
+@pick_context_manager_reader
+def service_get_by_uuid(context, service_uuid):
+    query = model_query(context, models.Service).filter_by(uuid=service_uuid)
+
+    result = query.first()
+    if not result:
+        raise exception.ServiceNotFound(service_id=service_uuid)
+
+    return result
+
+
 @pick_context_manager_reader_allow_async
 def service_get_minimum_version(context, binaries):
     min_versions = context.session.query(
@@ -6522,6 +6533,24 @@ def archive_deleted_rows(max_rows=None):
         if total_rows_archived >= max_rows:
             break
     return table_to_rows_archived
+
+
+@pick_context_manager_writer
+def service_uuids_online_data_migration(context, max_count):
+    from nova.objects import service
+
+    count_all = 0
+    count_hit = 0
+
+    db_services = model_query(context, models.Service).filter_by(
+        uuid=None).limit(max_count)
+    for db_service in db_services:
+        count_all += 1
+        service_obj = service.Service._from_db_object(
+            context, service.Service(), db_service)
+        if 'uuid' in service_obj:
+            count_hit += 1
+    return count_all, count_hit
 
 
 ####################

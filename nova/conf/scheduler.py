@@ -133,12 +133,11 @@ This value controls how often (in seconds) the scheduler should attempt
 to discover new hosts that have been added to cells. If negative (the
 default), no automatic discovery will occur.
 
-Small deployments may want this periodic task enabled, as surveying the
-cells for new hosts is likely to be lightweight enough to not cause undue
-burdon to the scheduler. However, larger clouds (and those that are not
-adding hosts regularly) will likely want to disable this automatic
-behavior and instead use the `nova-manage cell_v2 discover_hosts` command
-when hosts have been added to a cell.
+Deployments where compute nodes come and go frequently may want this
+enabled, where others may prefer to manually discover hosts when one
+is added to avoid any overhead from constantly checking. If enabled,
+every time this runs, we will select any unmapped hosts out of each
+cell database on every run.
 """),
 ]
 
@@ -590,6 +589,9 @@ Configuration options for enabling Trusted Platform Module.
 
 trusted_opts = [
     cfg.HostAddressOpt("attestation_server",
+                       deprecated_for_removal=True,
+                       deprecated_reason="Incomplete filter",
+                       deprecated_since="Pike",
                        help="""
 The host to use as the attestation server.
 
@@ -618,6 +620,9 @@ Related options:
 * attestation_insecure_ssl
 """),
     cfg.StrOpt("attestation_server_ca_file",
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The absolute path to the certificate to use for authentication when connecting
 to the attestation server. See the `attestation_server` help text for more
@@ -643,6 +648,9 @@ Related options:
 """),
     cfg.PortOpt("attestation_port",
             default=8443,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The port to use when connecting to the attestation server. See the
 `attestation_server` help text for more information about host verification.
@@ -662,6 +670,9 @@ Related options:
 """),
     cfg.StrOpt("attestation_api_url",
             default="/OpenAttestationWebServices/V1.0",
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The URL on the attestation server to use. See the `attestation_server` help
 text for more information about host verification.
@@ -688,6 +699,9 @@ Related options:
 """),
     cfg.StrOpt("attestation_auth_blob",
             secret=True,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 Attestation servers require a specific blob that is used to authenticate. The
 content and format of the blob are determined by the particular attestation
@@ -715,6 +729,9 @@ Related options:
 """),
     cfg.IntOpt("attestation_auth_timeout",
             default=60,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             min=0,
             help="""
 This value controls how long a successful attestation is cached. Once this
@@ -742,6 +759,9 @@ Related options:
 """),
     cfg.BoolOpt("attestation_insecure_ssl",
             default=False,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 When set to True, the SSL certificate verification is skipped for the
 attestation service. See the `attestation_server` help text for more

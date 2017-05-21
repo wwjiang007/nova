@@ -90,7 +90,7 @@ def _reservation_get(context, uuid):
 
 def _make_compute_node(host, node, hv_type, service_id):
     compute_node_dict = dict(vcpus=2, memory_mb=1024, local_gb=2048,
-                        uuid=uuidsentinel.fake_compute_node,
+                        uuid=uuidutils.generate_uuid(),
                         vcpus_used=0, memory_mb_used=0,
                         local_gb_used=0, free_ram_mb=1024,
                         free_disk_gb=2048, hypervisor_type=hv_type,
@@ -3572,6 +3572,22 @@ class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self._assertEqualObjects(service1, real_service1,
                                  ignored_keys=['compute_node'])
 
+    def test_service_get_by_uuid(self):
+        service1 = self._create_service({'uuid': uuidsentinel.service1_uuid})
+        self._create_service({'host': 'some_other_fake_host',
+                              'uuid': uuidsentinel.other_uuid})
+        real_service1 = db.service_get_by_uuid(
+            self.ctxt, uuidsentinel.service1_uuid)
+        self._assertEqualObjects(service1, real_service1,
+                                 ignored_keys=['compute_node'])
+
+    def test_service_get_by_uuid_not_found(self):
+        """Asserts that ServiceNotFound is raised if a service is not found by
+        a given uuid.
+        """
+        self.assertRaises(exception.ServiceNotFound, db.service_get_by_uuid,
+                          self.ctxt, uuidsentinel.service_not_found)
+
     def test_service_get_minimum_version(self):
         self._create_service({'version': 1,
                               'host': 'host3',
@@ -3763,6 +3779,43 @@ class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         values.update({'binary': 'bin1'})
         self.assertRaises(exception.ServiceTopicExists, db.service_create,
                           self.ctxt, values)
+
+    def test_migrate_service_uuids(self):
+        # Start with nothing.
+        total, done = db.service_uuids_online_data_migration(self.ctxt, 10)
+        self.assertEqual(0, total)
+        self.assertEqual(0, done)
+
+        # Create two services, one with a uuid and one without.
+        db.service_create(self.ctxt,
+                          dict(host='host1', binary='nova-compute',
+                               topic='compute', report_count=1,
+                               disabled=False))
+        db.service_create(self.ctxt,
+                          dict(host='host2', binary='nova-compute',
+                               topic='compute', report_count=1,
+                               disabled=False, uuid=uuidsentinel.host2))
+
+        # Now migrate them, we should find one and update one.
+        total, done = db.service_uuids_online_data_migration(
+            self.ctxt, 10)
+        self.assertEqual(1, total)
+        self.assertEqual(1, done)
+
+        # Get the services back to make sure the original uuid didn't change.
+        services = db.service_get_all_by_binary(self.ctxt, 'nova-compute')
+        self.assertEqual(2, len(services))
+        for service in services:
+            if service['host'] == 'host2':
+                self.assertEqual(uuidsentinel.host2, service['uuid'])
+            else:
+                self.assertIsNotNone(service['uuid'])
+
+        # Run the online migration again to see nothing was processed.
+        total, done = db.service_uuids_online_data_migration(
+            self.ctxt, 10)
+        self.assertEqual(0, total)
+        self.assertEqual(0, done)
 
 
 class BaseInstanceTypeTestCase(test.TestCase, ModelsObjectComparatorMixin):
@@ -7787,7 +7840,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
                             disabled=False)
         self.service = db.service_create(self.ctxt, self.service_dict)
         self.compute_node_dict = dict(vcpus=2, memory_mb=1024, local_gb=2048,
-                                 uuid=uuidsentinel.fake_compute_node,
+                                 uuid=uuidutils.generate_uuid(),
                                  vcpus_used=0, memory_mb_used=0,
                                  local_gb_used=0, free_ram_mb=1024,
                                  free_disk_gb=2048, hypervisor_type="xen",
@@ -7835,12 +7888,14 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         cn = dict(self.compute_node_dict,
                   hostname='foo',
                   hypervisor_hostname='foo',
-                  mapped=None)
+                  mapped=None,
+                  uuid=uuidutils.generate_uuid())
         db.compute_node_create(self.ctxt, cn)
         cn = dict(self.compute_node_dict,
                   hostname='bar',
                   hypervisor_hostname='nar',
-                  mapped=3)
+                  mapped=3,
+                  uuid=uuidutils.generate_uuid())
         db.compute_node_create(self.ctxt, cn)
         cns = db.compute_node_get_all_mapped_less_than(self.ctxt, 1)
         self.assertEqual(2, len(cns))
@@ -7909,6 +7964,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
             # Create a compute node
             compute_node_data = self.compute_node_dict.copy()
+            compute_node_data['uuid'] = uuidutils.generate_uuid()
             compute_node_data['service_id'] = service['id']
             compute_node_data['stats'] = jsonutils.dumps(self.stats.copy())
             compute_node_data['hypervisor_hostname'] = 'hypervisor-%s' % x
@@ -7943,6 +7999,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
         for name in ['bm_node1', 'bm_node2']:
             compute_node_data = self.compute_node_dict.copy()
+            compute_node_data['uuid'] = uuidutils.generate_uuid()
             compute_node_data['service_id'] = service['id']
             compute_node_data['stats'] = jsonutils.dumps(self.stats)
             compute_node_data['hypervisor_hostname'] = name
@@ -7964,6 +8021,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         service2['host'] = 'host2'
         db.service_create(self.ctxt, service2)
         compute_node_another_host = self.compute_node_dict.copy()
+        compute_node_another_host['uuid'] = uuidutils.generate_uuid()
         compute_node_another_host['stats'] = jsonutils.dumps(self.stats)
         compute_node_another_host['hypervisor_hostname'] = 'node_2'
         compute_node_another_host['host'] = 'host2'
@@ -7978,6 +8036,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_compute_node_get_all_by_host_with_same_host(self):
         # Create another node on top of the same service
         compute_node_same_host = self.compute_node_dict.copy()
+        compute_node_same_host['uuid'] = uuidutils.generate_uuid()
         compute_node_same_host['stats'] = jsonutils.dumps(self.stats)
         compute_node_same_host['hypervisor_hostname'] = 'node_3'
 
@@ -8008,6 +8067,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_compute_nodes_get_by_service_id_multiple_results(self):
         # Create another node on top of the same service
         compute_node_same_host = self.compute_node_dict.copy()
+        compute_node_same_host['uuid'] = uuidutils.generate_uuid()
         compute_node_same_host['stats'] = jsonutils.dumps(self.stats)
         compute_node_same_host['hypervisor_hostname'] = 'node_2'
 
@@ -8030,6 +8090,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_compute_node_get_by_host_and_nodename(self):
         # Create another node on top of the same service
         compute_node_same_host = self.compute_node_dict.copy()
+        compute_node_same_host['uuid'] = uuidutils.generate_uuid()
         compute_node_same_host['stats'] = jsonutils.dumps(self.stats)
         compute_node_same_host['hypervisor_hostname'] = 'node_2'
 
@@ -8089,6 +8150,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
             self.compute_node_dict['service_id'] = service['id']
             self.compute_node_dict['hypervisor_hostname'] = 'testhost' + str(i)
             self.compute_node_dict['stats'] = jsonutils.dumps(self.stats)
+            self.compute_node_dict['uuid'] = uuidutils.generate_uuid()
             node = db.compute_node_create(self.ctxt, self.compute_node_dict)
             nodes_created.append(node)
         nodes = db.compute_node_search_by_hypervisor(self.ctxt, 'host')
@@ -8191,6 +8253,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         service2['host'] = 'host2'
         db_service2 = db.service_create(self.ctxt, service2)
         compute_node_old_host = self.compute_node_dict.copy()
+        compute_node_old_host['uuid'] = uuidutils.generate_uuid()
         compute_node_old_host['stats'] = jsonutils.dumps(self.stats)
         compute_node_old_host['hypervisor_hostname'] = 'node_2'
         compute_node_old_host['service_id'] = db_service2['id']
@@ -8257,6 +8320,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # This test could be removed once we are sure that all compute nodes
         # are populating the host field thanks to the ResourceTracker
         compute_node_old_host_dict = self.compute_node_dict.copy()
+        compute_node_old_host_dict['uuid'] = uuidutils.generate_uuid()
         compute_node_old_host_dict.pop('host')
         item_old = db.compute_node_create(self.ctxt,
                                           compute_node_old_host_dict)

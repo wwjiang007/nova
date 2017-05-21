@@ -19,7 +19,10 @@ import functools
 import nova.api.openstack
 from nova.api.openstack.compute import admin_actions
 from nova.api.openstack.compute import admin_password
+from nova.api.openstack.compute import agents
 from nova.api.openstack.compute import aggregates
+from nova.api.openstack.compute import assisted_volume_snapshots
+from nova.api.openstack.compute import availability_zone
 from nova.api.openstack.compute import config_drive
 from nova.api.openstack.compute import console_output
 from nova.api.openstack.compute import create_backup
@@ -30,13 +33,18 @@ from nova.api.openstack.compute import extended_server_attributes
 from nova.api.openstack.compute import extended_status
 from nova.api.openstack.compute import extended_volumes
 from nova.api.openstack.compute import extension_info
+from nova.api.openstack.compute import fixed_ips
 from nova.api.openstack.compute import flavor_access
 from nova.api.openstack.compute import flavor_manage
 from nova.api.openstack.compute import flavor_rxtx
 from nova.api.openstack.compute import flavors
 from nova.api.openstack.compute import flavors_extraspecs
+from nova.api.openstack.compute import floating_ip_dns
+from nova.api.openstack.compute import floating_ip_pools
 from nova.api.openstack.compute import floating_ips
+from nova.api.openstack.compute import floating_ips_bulk
 from nova.api.openstack.compute import hide_server_addresses
+from nova.api.openstack.compute import instance_usage_audit_log
 from nova.api.openstack.compute import keypairs
 from nova.api.openstack.compute import lock_server
 from nova.api.openstack.compute import migrate_server
@@ -45,9 +53,12 @@ from nova.api.openstack.compute import pause_server
 from nova.api.openstack.compute import remote_consoles
 from nova.api.openstack.compute import rescue
 from nova.api.openstack.compute import security_groups
+from nova.api.openstack.compute import server_metadata
+from nova.api.openstack.compute import server_password
 from nova.api.openstack.compute import server_usage
 from nova.api.openstack.compute import servers
 from nova.api.openstack.compute import shelve
+from nova.api.openstack.compute import simple_tenant_usage
 from nova.api.openstack.compute import suspend_server
 from nova.api.openstack import wsgi
 import nova.conf
@@ -72,12 +83,29 @@ def _create_controller(main_controller, controller_list,
     return controller
 
 
+agents_controller = functools.partial(
+    _create_controller, agents.AgentController, [], [])
+
+
 aggregates_controller = functools.partial(
     _create_controller, aggregates.AggregateController, [], [])
 
 
+assisted_volume_snapshots_controller = functools.partial(
+    _create_controller,
+    assisted_volume_snapshots.AssistedVolumeSnapshotsController, [], [])
+
+
+availability_zone_controller = functools.partial(
+    _create_controller, availability_zone.AvailabilityZoneController, [], [])
+
+
 keypairs_controller = functools.partial(
     _create_controller, keypairs.KeypairController, [], [])
+
+
+fixed_ips_controller = functools.partial(_create_controller,
+    fixed_ips.FixedIPController, [], [])
 
 
 flavor_controller = functools.partial(_create_controller,
@@ -99,6 +127,30 @@ flavor_access_controller = functools.partial(_create_controller,
 
 flavor_extraspec_controller = functools.partial(_create_controller,
     flavors_extraspecs.FlavorExtraSpecsController, [], [])
+
+
+floating_ip_dns_controller = functools.partial(_create_controller,
+    floating_ip_dns.FloatingIPDNSDomainController, [], [])
+
+
+floating_ip_dnsentry_controller = functools.partial(_create_controller,
+    floating_ip_dns.FloatingIPDNSEntryController, [], [])
+
+
+floating_ip_pools_controller = functools.partial(_create_controller,
+    floating_ip_pools.FloatingIPPoolsController, [], [])
+
+
+floating_ips_controller = functools.partial(_create_controller,
+    floating_ips.FloatingIPController, [], [])
+
+
+floating_ips_bulk_controller = functools.partial(_create_controller,
+    floating_ips_bulk.FloatingIPBulkController, [], [])
+
+
+instance_usage_audit_log_controller = functools.partial(_create_controller,
+    instance_usage_audit_log.InstanceUsageAuditLogController, [], [])
 
 
 server_controller = functools.partial(_create_controller,
@@ -133,6 +185,18 @@ server_controller = functools.partial(_create_controller,
         suspend_server.SuspendServerController
     ]
 )
+
+
+server_metadata_controller = functools.partial(_create_controller,
+    server_metadata.ServerMetadataController, [], [])
+
+
+server_password_controller = functools.partial(_create_controller,
+    server_password.ServerPasswordController, [], [])
+
+
+simple_tenant_usage_controller = functools.partial(_create_controller,
+    simple_tenant_usage.SimpleTenantUsageController, [], [])
 
 
 # NOTE(alex_xu): This is structure of this route list as below:
@@ -179,6 +243,14 @@ ROUTE_LIST = (
     ('/flavors/{flavor_id}/os-flavor-access', {
         'GET': [flavor_access_controller, 'index']
     }),
+    ('/os-agents', {
+        'GET': [agents_controller, 'index'],
+        'POST': [agents_controller, 'create']
+    }),
+    ('/os-agents/{id}', {
+        'PUT': [agents_controller, 'update'],
+        'DELETE': [agents_controller, 'delete']
+    }),
     ('/os-aggregates', {
         'GET': [aggregates_controller, 'index'],
         'POST': [aggregates_controller, 'create']
@@ -191,6 +263,61 @@ ROUTE_LIST = (
     ('/os-aggregates/{id}/action', {
         'POST': [aggregates_controller, 'action'],
     }),
+    ('/os-assisted-volume-snapshots', {
+        'POST': [assisted_volume_snapshots_controller, 'create']
+    }),
+    ('/os-assisted-volume-snapshots/{id}', {
+        'DELETE': [assisted_volume_snapshots_controller, 'delete']
+    }),
+    ('/os-availability-zone', {
+        'GET': [availability_zone_controller, 'index']
+    }),
+    ('/os-availability-zone/detail', {
+        'GET': [availability_zone_controller, 'detail'],
+    }),
+    ('/os-fixed-ips/{id}', {
+        'GET': [fixed_ips_controller, 'show']
+    }),
+    ('/os-fixed-ips/{id}/action', {
+        'POST': [fixed_ips_controller, 'action'],
+    }),
+    ('/os-floating-ip-dns', {
+        'GET': [floating_ip_dns_controller, 'index']
+    }),
+    ('/os-floating-ip-dns/{id}', {
+        'PUT': [floating_ip_dns_controller, 'update'],
+        'DELETE': [floating_ip_dns_controller, 'delete']
+    }),
+    ('/os-floating-ip-dns/{domain_id}/entries/{id}', {
+        'GET': [floating_ip_dnsentry_controller, 'show'],
+        'PUT': [floating_ip_dnsentry_controller, 'update'],
+        'DELETE': [floating_ip_dnsentry_controller, 'delete']
+    }),
+    ('/os-floating-ip-pools', {
+        'GET': [floating_ip_pools_controller, 'index'],
+    }),
+    ('/os-floating-ips', {
+        'GET': [floating_ips_controller, 'index'],
+        'POST': [floating_ips_controller, 'create']
+    }),
+    ('/os-floating-ips/{id}', {
+        'GET': [floating_ips_controller, 'show'],
+        'DELETE': [floating_ips_controller, 'delete']
+    }),
+    ('/os-floating-ips-bulk', {
+        'GET': [floating_ips_bulk_controller, 'index'],
+        'POST': [floating_ips_bulk_controller, 'create']
+    }),
+    ('/os-floating-ips-bulk/{id}', {
+        'GET': [floating_ips_bulk_controller, 'show'],
+        'PUT': [floating_ips_bulk_controller, 'update']
+    }),
+    ('/os-instance_usage_audit_log', {
+        'GET': [instance_usage_audit_log_controller, 'index']
+    }),
+    ('/os-instance_usage_audit_log/{id}', {
+        'GET': [instance_usage_audit_log_controller, 'show']
+    }),
     ('/os-keypairs', {
         'GET': [keypairs_controller, 'index'],
         'POST': [keypairs_controller, 'create']
@@ -198,6 +325,12 @@ ROUTE_LIST = (
     ('/os-keypairs/{id}', {
         'GET': [keypairs_controller, 'show'],
         'DELETE': [keypairs_controller, 'delete']
+    }),
+    ('/os-simple-tenant-usage', {
+        'GET': [simple_tenant_usage_controller, 'index']
+    }),
+    ('/os-simple-tenant-usage/{id}', {
+        'GET': [simple_tenant_usage_controller, 'show']
     }),
     ('/os-volumes_boot', {
         'GET': [server_controller, 'index'],
@@ -228,7 +361,21 @@ ROUTE_LIST = (
     }),
     ('/servers/{id}/action', {
         'POST': [server_controller, 'action']
-    })
+    }),
+    ('/servers/{server_id}/metadata', {
+        'GET': [server_metadata_controller, 'index'],
+        'POST': [server_metadata_controller, 'create'],
+        'PUT': [server_metadata_controller, 'update_all'],
+    }),
+    ('/servers/{server_id}/metadata/{id}', {
+        'GET': [server_metadata_controller, 'show'],
+        'PUT': [server_metadata_controller, 'update'],
+        'DELETE': [server_metadata_controller, 'delete'],
+    }),
+    ('/servers/{server_id}/os-server-password', {
+        'GET': [server_password_controller, 'index'],
+        'DELETE': [server_password_controller, 'clear']
+    }),
 )
 
 

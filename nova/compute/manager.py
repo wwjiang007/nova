@@ -55,7 +55,6 @@ from six.moves import range
 
 from nova import block_device
 from nova.cells import rpcapi as cells_rpcapi
-from nova.cloudpipe import pipelib
 from nova import compute
 from nova.compute import build_results
 from nova.compute import claims
@@ -529,6 +528,7 @@ class ComputeManager(manager.Manager):
                 CONF.max_concurrent_live_migrations)
         else:
             self._live_migration_semaphore = compute_utils.UnlimitedSemaphore()
+        self._failed_builds = 0
 
         super(ComputeManager, self).__init__(service_name="compute",
                                              *args, **kwargs)
@@ -1460,7 +1460,7 @@ class ComputeManager(manager.Manager):
         instance.save(expected_task_state=[None])
         self._update_resource_tracker(context, instance)
 
-        is_vpn = pipelib.is_vpn_image(instance.image_ref)
+        is_vpn = False
         return network_model.NetworkInfoAsyncWrapper(
                 self._allocate_network_async, context, instance,
                 requested_networks, macs, security_groups, is_vpn,
@@ -1583,11 +1583,11 @@ class ComputeManager(manager.Manager):
             self._block_device_info_to_legacy(block_device_info)
             return block_device_info
 
-        except exception.OverQuota:
-            msg = _LW('Failed to create block device for instance due to '
-                      'being over volume resource quota')
-            LOG.warning(msg, instance=instance)
-            raise exception.VolumeLimitExceeded()
+        except exception.OverQuota as e:
+            LOG.warning(_LW('Failed to create block device for instance due'
+                            ' to exceeding volume related resource quota.'
+                            ' Error: %s'), e.message, instance=instance)
+            raise
 
         except Exception:
             LOG.exception(_LE('Instance failed block device setup'),
@@ -1689,6 +1689,31 @@ class ComputeManager(manager.Manager):
 
         return block_device_info
 
+    def _build_failed(self):
+        self._failed_builds += 1
+        limit = CONF.compute.consecutive_build_service_disable_threshold
+        if limit and self._failed_builds >= limit:
+            # NOTE(danms): If we're doing a bunch of parallel builds,
+            # it is possible (although not likely) that we have already
+            # failed N-1 builds before this and we race with a successful
+            # build and disable ourselves here when we might've otherwise
+            # not.
+            LOG.error('Disabling service due to %(fails)i '
+                      'consecutive build failures',
+                      {'fails': self._failed_builds})
+            ctx = nova.context.get_admin_context()
+            service = objects.Service.get_by_compute_host(ctx, CONF.host)
+            service.disabled = True
+            service.disabled_reason = (
+                'Auto-disabled due to %i build failures' % self._failed_builds)
+            service.save()
+            # NOTE(danms): Reset our counter now so that when the admin
+            # re-enables us we can start fresh
+            self._failed_builds = 0
+        elif self._failed_builds > 1:
+            LOG.warning('%(fails)i consecutive build failures',
+                        {'fails': self._failed_builds})
+
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_fault
@@ -1705,7 +1730,18 @@ class ComputeManager(manager.Manager):
             # for a while and we want to make sure that nothing else tries
             # to do anything with this instance while we wait.
             with self._build_semaphore:
-                self._do_build_and_run_instance(*args, **kwargs)
+                try:
+                    result = self._do_build_and_run_instance(*args, **kwargs)
+                except Exception:
+                    result = build_results.FAILED
+                    raise
+                finally:
+                    fails = (build_results.FAILED,
+                             build_results.RESCHEDULED)
+                    if result in fails:
+                        self._build_failed()
+                    else:
+                        self._failed_builds = 0
 
         # NOTE(danms): We spawn here to return the RPC worker thread back to
         # the pool. Since what follows could take a really long time, we don't
@@ -2101,8 +2137,7 @@ class ComputeManager(manager.Manager):
                 if network_info is not None:
                     network_info.wait(do_raise=False)
         except (exception.UnexpectedTaskStateError,
-                exception.VolumeLimitExceeded,
-                exception.InvalidBDM) as e:
+                exception.OverQuota, exception.InvalidBDM) as e:
             # Make sure the async call finishes
             if network_info is not None:
                 network_info.wait(do_raise=False)
@@ -2259,13 +2294,22 @@ class ComputeManager(manager.Manager):
         timer.restart()
         for bdm in vol_bdms:
             try:
-                # NOTE(vish): actual driver detach done in driver.destroy, so
-                #             just tell cinder that we are done with it.
-                connector = self.driver.get_volume_connector(instance)
-                self.volume_api.terminate_connection(context,
-                                                     bdm.volume_id,
-                                                     connector)
-                self.volume_api.detach(context, bdm.volume_id, instance.uuid)
+                if bdm.attachment_id:
+                    self.volume_api.attachment_delete(context,
+                                                      bdm.attachment_id)
+                else:
+                    # NOTE(vish): actual driver detach done in driver.destroy,
+                    #             so just tell cinder that we are done with it.
+                    connector = self.driver.get_volume_connector(instance)
+                    self.volume_api.terminate_connection(context,
+                                                         bdm.volume_id,
+                                                         connector)
+                    self.volume_api.detach(context, bdm.volume_id,
+                                           instance.uuid)
+
+            except exception.VolumeAttachmentNotFound as exc:
+                LOG.debug('Ignoring VolumeAttachmentNotFound: %s', exc,
+                          instance=instance)
             except exception.DiskNotFound as exc:
                 LOG.debug('Ignoring DiskNotFound: %s', exc,
                           instance=instance)
@@ -4811,10 +4855,15 @@ class ComputeManager(manager.Manager):
                   {'volume_id': bdm.volume_id,
                   'mountpoint': bdm['mount_device']},
                  instance=instance)
+        compute_utils.notify_about_volume_attach_detach(
+            context, instance, self.host,
+            action=fields.NotificationAction.VOLUME_ATTACH,
+            phase=fields.NotificationPhase.START,
+            volume_id=bdm.volume_id)
         try:
             bdm.attach(context, instance, self.volume_api, self.driver,
                        do_driver_attach=True)
-        except Exception:
+        except Exception as e:
             with excutils.save_and_reraise_exception():
                 LOG.exception(_LE("Failed to attach %(volume_id)s "
                                   "at %(mountpoint)s"),
@@ -4822,10 +4871,21 @@ class ComputeManager(manager.Manager):
                                'mountpoint': bdm['mount_device']},
                               instance=instance)
                 self.volume_api.unreserve_volume(context, bdm.volume_id)
+                compute_utils.notify_about_volume_attach_detach(
+                    context, instance, self.host,
+                    action=fields.NotificationAction.VOLUME_ATTACH,
+                    phase=fields.NotificationPhase.ERROR,
+                    exception=e,
+                    volume_id=bdm.volume_id)
 
         info = {'volume_id': bdm.volume_id}
         self._notify_about_instance_usage(
             context, instance, "volume.attach", extra_usage_info=info)
+        compute_utils.notify_about_volume_attach_detach(
+            context, instance, self.host,
+            action=fields.NotificationAction.VOLUME_ATTACH,
+            phase=fields.NotificationPhase.END,
+            volume_id=bdm.volume_id)
 
     def _notify_volume_usage_detach(self, context, instance, bdm):
         if CONF.volume_usage_poll_interval <= 0:
@@ -4869,6 +4929,11 @@ class ComputeManager(manager.Manager):
                             like rebuild, when we don't want to destroy BDM
 
         """
+        compute_utils.notify_about_volume_attach_detach(
+            context, instance, self.host,
+            action=fields.NotificationAction.VOLUME_DETACH,
+            phase=fields.NotificationPhase.START,
+            volume_id=volume_id)
         bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
                 context, volume_id, instance.uuid)
 
@@ -4884,6 +4949,11 @@ class ComputeManager(manager.Manager):
         info = dict(volume_id=volume_id)
         self._notify_about_instance_usage(
             context, instance, "volume.detach", extra_usage_info=info)
+        compute_utils.notify_about_volume_attach_detach(
+            context, instance, self.host,
+            action=fields.NotificationAction.VOLUME_DETACH,
+            phase=fields.NotificationPhase.END,
+            volume_id=volume_id)
 
         if destroy_bdm:
             bdm.destroy()
@@ -5073,7 +5143,7 @@ class ComputeManager(manager.Manager):
         """Use hotplug to add an network adapter to an instance."""
         if not self.driver.capabilities['supports_attach_interface']:
             raise exception.AttachInterfaceNotSupported(
-                instance_id=instance.uuid)
+                instance_uuid=instance.uuid)
         bind_host_id = self.driver.network_binding_host_id(context, instance)
         network_info = self.network_api.allocate_port_for_instance(
             context, instance, port_id, network_id, requested_ip,
@@ -5543,10 +5613,12 @@ class ComputeManager(manager.Manager):
 
         # Define domain at destination host, without doing it,
         # pause/suspend/terminate do not work.
+        post_at_dest_success = True
         try:
             self.compute_rpcapi.post_live_migration_at_destination(ctxt,
                     instance, block_migration, dest)
         except Exception as error:
+            post_at_dest_success = False
             # We don't want to break _post_live_migration() if
             # post_live_migration_at_destination() fails as it should never
             # affect cleaning up source node.
@@ -5574,8 +5646,9 @@ class ComputeManager(manager.Manager):
         self._notify_about_instance_usage(ctxt, instance,
                                           "live_migration._post.end",
                                           network_info=network_info)
-        LOG.info(_LI('Migrating instance to %s finished successfully.'),
-                 dest, instance=instance)
+        if post_at_dest_success:
+            LOG.info('Migrating instance to %s finished successfully.',
+                     dest, instance=instance)
 
         if migrate_data and migrate_data.obj_attr_is_set('migration'):
             migrate_data.migration.status = 'completed'

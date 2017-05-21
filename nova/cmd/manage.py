@@ -205,8 +205,41 @@ def _db_error(caught_exception):
     sys.exit(1)
 
 
+class QuotaCommands(object):
+    """Class for managing quotas."""
+
+    @args('--project', dest='project_id', metavar='<Project Id>',
+            help='Project Id', required=True)
+    @args('--user', dest='user_id', metavar='<User Id>',
+            help='User Id')
+    @args('--key', metavar='<key>', help='Key')
+    def refresh(self, project_id, user_id=None, key=None):
+        """Refresh the quotas for a project or user.
+
+        If no quota key is provided, all the quota usages will be refreshed.
+        If a valid quota key is provided and it does not exist, it will be
+        created. Otherwise, it will be refreshed.
+        """
+        ctxt = context.get_admin_context()
+
+        keys = None
+        if key:
+            keys = [key]
+
+        try:
+            QUOTAS.usage_refresh(ctxt, project_id, user_id, keys)
+        except exception.QuotaUsageRefreshNotAllowed as e:
+            print(e.format_message())
+            return 2
+
+
 class ProjectCommands(object):
     """Class for managing projects."""
+
+    # TODO(stephenfin): Remove this during the Queens cycle
+    description = ('DEPRECATED: The project commands are deprecated since '
+                   'Pike as this information is available over the API. They '
+                   'will be removed in an upcoming release.')
 
     @args('--project', dest='project_id', metavar='<Project name>',
             help='Project name')
@@ -286,8 +319,11 @@ class ProjectCommands(object):
         """Refresh the quotas for project/user
 
         If no quota key is provided, all the quota usages will be refreshed.
-        If a valid quota key is provided and it does not exist,
-        it will be created. Otherwise, it will be refreshed.
+        If a valid quota key is provided and it does not exist, it will be
+        created. Otherwise, it will be refreshed.
+
+        DEPRECATED: This command is deprecated. Use ``nova-manage quota
+        refresh`` instead.
         """
         ctxt = context.get_admin_context()
 
@@ -302,7 +338,13 @@ class ProjectCommands(object):
             return 2
 
 
-AccountCommands = ProjectCommands
+class AccountCommands(ProjectCommands):
+    """Class for managing projects."""
+
+    # TODO(stephenfin): Remove this during the Queens cycle
+    description = ('DEPRECATED: The account commands are deprecated since '
+                   'Pike as this information is available over the API. They '
+                   'will be removed in an upcoming release.')
 
 
 class FloatingIpCommands(object):
@@ -576,6 +618,11 @@ class NetworkCommands(object):
 class HostCommands(object):
     """List hosts."""
 
+    # TODO(stephenfin): Remove this during the Queens cycle
+    description = ('DEPRECATED: The host commands are deprecated since '
+                   'Pike as this information is available over the API. They '
+                   'will be removed in an upcoming release.')
+
     def list(self, zone=None):
         """Show a list of all physical hosts. Filter by zone.
         args: [zone]
@@ -620,6 +667,8 @@ class DbCommands(object):
         # NOTE(mriedem): This online migration is going to be backported to
         # Newton also since it's an upgrade issue when upgrading from Mitaka.
         build_request_obj.delete_build_requests_with_no_instance_uuid,
+        # Added in Pike
+        db.service_uuids_online_data_migration,
     )
 
     def __init__(self):
@@ -821,6 +870,11 @@ class ApiDbCommands(object):
 class AgentBuildCommands(object):
     """Class for managing agent builds."""
 
+    # TODO(stephenfin): Remove this during the Queens cycle
+    description = ('DEPRECATED: The agent commands are deprecated since '
+                   'Pike as this information is available over the API. They '
+                   'will be removed in an upcoming release.')
+
     @args('--os', metavar='<os>', help='os')
     @args('--architecture', dest='architecture',
             metavar='<architecture>', help='architecture')
@@ -904,6 +958,11 @@ class AgentBuildCommands(object):
 
 class GetLogCommands(object):
     """Get logging information."""
+
+    # TODO(stephenfin): Remove this during the Queens cycle
+    description = ('DEPRECATED: The log commands are deprecated since '
+                   'Pike as they are not maintained. They will be removed '
+                   'in an upcoming release.')
 
     def errors(self):
         """Get all of the errors from the log files."""
@@ -1564,6 +1623,7 @@ CATEGORIES = {
     'network': NetworkCommands,
     'project': ProjectCommands,
     'shell': ShellCommands,
+    'quota': QuotaCommands,
 }
 
 

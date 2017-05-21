@@ -358,6 +358,8 @@ notification_object_data = {
     'FlavorPayload': '1.3-6335e626893d7df5f96f87e6731fef56',
     'InstanceActionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionPayload': '1.2-b7b2481bcd0e1edcc1970ef7150df5aa',
+    'InstanceActionVolumeNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'InstanceActionVolumePayload': '1.0-20c0dca4cfaf1a68d3e8c45e5aca3907',
     'InstanceActionVolumeSwapNotification':
     '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionVolumeSwapPayload': '1.2-d7925b763e0795f8e5c1aa0e95bd67bd',
@@ -368,7 +370,7 @@ notification_object_data = {
     'IpPayload': '1.0-8ecf567a99e516d4af094439a7632d34',
     'NotificationPublisher': '1.0-bbbc1402fb0e443a3eb227cc52b61545',
     'ServiceStatusNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'ServiceStatusPayload': '1.0-c43a812046139e875ff2dc5590cd8d02',
+    'ServiceStatusPayload': '1.1-7b6856bd879db7f3ecbcd0ca9f35f92f',
 }
 
 

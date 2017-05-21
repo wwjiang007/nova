@@ -1,7 +1,3 @@
-# Copyright 2010 United States Government as represented by the
-# Administrator of the National Aeronautics and Space Administration.
-# All Rights Reserved.
-#
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -13,12 +9,12 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+"""WSGI application entry-point for Nova Metadata API, installed by pbr."""
 
-"""
-:mod:`nova.cloudpipe` -- VPN Server Management
-=====================================================
+from nova.api.openstack import wsgi_app
 
-.. automodule:: nova.cloudpipe
-   :platform: Unix
-   :synopsis: An OpenVPN server for every nova user.
-"""
+NAME = "metadata"
+
+
+def init_application():
+    return wsgi_app.init_application(NAME)

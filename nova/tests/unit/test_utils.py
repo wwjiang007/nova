@@ -38,6 +38,7 @@ import nova
 from nova import context
 from nova import exception
 from nova.objects import base as obj_base
+from nova.objects import instance as instance_obj
 from nova import test
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit import utils as test_utils
@@ -177,17 +178,6 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.assertEqual('&lt;', utils.xhtml_escape('<'))
         self.assertEqual('&lt;foo&gt;', utils.xhtml_escape('<foo>'))
 
-    def test_is_valid_ipv6_cidr(self):
-        self.assertTrue(utils.is_valid_ipv6_cidr("2600::/64"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "abcd:ef01:2345:6789:abcd:ef01:192.168.254.254/48"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "0000:0000:0000:0000:0000:0000:0000:0001/32"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "0000:0000:0000:0000:0000:0000:0000:0001"))
-        self.assertFalse(utils.is_valid_ipv6_cidr("foo"))
-        self.assertFalse(utils.is_valid_ipv6_cidr("127.0.0.1"))
-
     def test_get_shortened_ipv6(self):
         self.assertEqual("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
                          utils.get_shortened_ipv6(
@@ -242,6 +232,14 @@ class GenericUtilsTestCase(test.NoDBTestCase):
             value, utils.get_hash_str(base_str))
         self.assertEqual(
             value, utils.get_hash_str(base_unicode))
+
+    def test_get_obj_repr_unicode(self):
+        instance = instance_obj.Instance()
+        instance.display_name = u'\u00CD\u00F1st\u00E1\u00F1c\u00E9'
+        # should be a bytes string if python2 before conversion
+        self.assertIs(str, type(repr(instance)))
+        self.assertIs(six.text_type,
+                      type(utils.get_obj_repr_unicode(instance)))
 
     def test_use_rootwrap(self):
         self.flags(disable_rootwrap=False, group='workarounds')

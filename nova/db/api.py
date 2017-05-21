@@ -112,6 +112,13 @@ def service_get(context, service_id):
     return IMPL.service_get(context, service_id)
 
 
+def service_get_by_uuid(context, service_uuid):
+    """Get a service by it's uuid or raise ServiceNotFound if it does not
+    exist.
+    """
+    return IMPL.service_get_by_uuid(context, service_uuid)
+
+
 def service_get_minimum_version(context, binary):
     """Get the minimum service version in the database."""
     return IMPL.service_get_minimum_version(context, binary)
@@ -2055,6 +2062,10 @@ def archive_deleted_rows(max_rows=None):
 
 def pcidevice_online_data_migration(context, max_count):
     return IMPL.pcidevice_online_data_migration(context, max_count)
+
+
+def service_uuids_online_data_migration(context, max_count):
+    return IMPL.service_uuids_online_data_migration(context, max_count)
 
 
 ####################

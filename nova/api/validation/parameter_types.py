@@ -42,6 +42,15 @@ def multi_params(schema):
     return {'type': 'array', 'items': schema}
 
 
+# NOTE: We don't check actual values of queries on params
+# which are defined as the following common_param.
+# Please note those are for backward compatible existing
+# query parameters because previously multiple parameters
+# might be input and accepted.
+common_query_param = multi_params({'type': 'string'})
+common_query_regex_param = multi_params({'type': 'string', 'format': 'regex'})
+
+
 class ValidationRegex(object):
     def __init__(self, regex, reason):
         self.regex = regex
@@ -201,15 +210,21 @@ none = {
 
 positive_integer = {
     'type': ['integer', 'string'],
-    'pattern': '^[0-9]*$', 'minimum': 1
+    'pattern': '^[0-9]*$', 'minimum': 1, 'minLength': 1
 }
 
 
 non_negative_integer = {
     'type': ['integer', 'string'],
-    'pattern': '^[0-9]*$', 'minimum': 0
+    'pattern': '^[0-9]*$', 'minimum': 0, 'minLength': 1
 }
 
+# This only be used by nova-network specific APIs. It will be removed when
+# those API removed.
+positive_integer_with_empty_str = {
+    'type': ['integer', 'string'],
+    'pattern': '^[0-9]*$', 'minimum': 1,
+}
 
 hostname = {
     'type': 'string', 'minLength': 1, 'maxLength': 255,

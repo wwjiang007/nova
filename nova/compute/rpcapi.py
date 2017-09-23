@@ -22,7 +22,7 @@ from oslo_serialization import jsonutils
 import nova.conf
 from nova import context
 from nova import exception
-from nova.i18n import _, _LI, _LE
+from nova.i18n import _
 from nova import objects
 from nova.objects import base as objects_base
 from nova.objects import migrate_data as migrate_data_obj
@@ -31,6 +31,7 @@ from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
+RPC_TOPIC = "compute"
 
 LOG = logging.getLogger(__name__)
 LAST_VERSION = None
@@ -319,6 +320,14 @@ class ComputeAPI(object):
         ... Newton and Ocata support messaging version 4.13. So, any changes to
         existing methods in 4.x after that point should be done so that they
         can handle the version_cap being set to 4.13
+
+        * 4.14 - Make get_instance_diagnostics return a diagnostics object
+                 instead of dictionary. Strictly speaking we don't need to bump
+                 the version because this method was unused before. The version
+                 was bumped to signal the availability of the corrected RPC API
+        * 4.15 - Add tag argument to reserve_block_device_name()
+        * 4.16 - Add tag argument to attach_interface()
+        * 4.17 - Add new_attachment_id to swap_volume.
     '''
 
     VERSION_ALIASES = {
@@ -333,7 +342,7 @@ class ComputeAPI(object):
 
     def __init__(self):
         super(ComputeAPI, self).__init__()
-        target = messaging.Target(topic=CONF.compute_topic, version='4.0')
+        target = messaging.Target(topic=RPC_TOPIC, version='4.0')
         upgrade_level = CONF.upgrade_levels.compute
         if upgrade_level == 'auto':
             version_cap = self._determine_version_cap(target)
@@ -365,20 +374,20 @@ class ComputeAPI(object):
         try:
             version_cap = history[service_version]['compute_rpc']
         except IndexError:
-            LOG.error(_LE('Failed to extract compute RPC version from '
-                          'service history because I am too '
-                          'old (minimum version is now %(version)i)'),
+            LOG.error('Failed to extract compute RPC version from '
+                      'service history because I am too '
+                      'old (minimum version is now %(version)i)',
                       {'version': service_version})
             raise exception.ServiceTooOld(thisver=service_obj.SERVICE_VERSION,
                                           minver=service_version)
         except KeyError:
-            LOG.error(_LE('Failed to extract compute RPC version from '
-                          'service history for version %(version)i'),
+            LOG.error('Failed to extract compute RPC version from '
+                      'service history for version %(version)i',
                       {'version': service_version})
             return target.version
         LAST_VERSION = version_cap
-        LOG.info(_LI('Automatically selected compute RPC version %(rpc)s '
-                     'from minimum service version %(service)i'),
+        LOG.info('Automatically selected compute RPC version %(rpc)s '
+                 'from minimum service version %(service)i',
                  {'rpc': version_cap,
                   'service': service_version})
         return version_cap
@@ -414,13 +423,26 @@ class ComputeAPI(object):
                    instance=instance, network_id=network_id)
 
     def attach_interface(self, ctxt, instance, network_id, port_id,
-                         requested_ip):
-        version = '4.0'
-        cctxt = self.router.client(ctxt).prepare(
-                server=_compute_host(None, instance), version=version)
-        return cctxt.call(ctxt, 'attach_interface',
-                          instance=instance, network_id=network_id,
-                          port_id=port_id, requested_ip=requested_ip)
+                         requested_ip, tag=None):
+        kw = {'instance': instance, 'network_id': network_id,
+              'port_id': port_id, 'requested_ip': requested_ip,
+              'tag': tag}
+        version = '4.16'
+
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            if tag:
+                # NOTE(artom) Attach attempted with a device role tag, but
+                # we're pinned to less than 4.16 - ie, not all nodes have
+                # received the Pike code yet.
+                raise exception.TaggedAttachmentNotSupported()
+            else:
+                version = '4.0'
+                kw.pop('tag')
+
+        cctxt = client.prepare(server=_compute_host(None, instance),
+                               version=version)
+        return cctxt.call(ctxt, 'attach_interface', **kw)
 
     def attach_volume(self, ctxt, instance, bdm):
         version = '4.0'
@@ -492,6 +514,8 @@ class ComputeAPI(object):
                           instance=instance,
                           data=data)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def confirm_resize(self, ctxt, instance, migration, host,
             reservations=None, cast=True):
         version = '4.0'
@@ -521,6 +545,8 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'detach_volume',
                    instance=instance, volume_id=volume_id, **extra)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def finish_resize(self, ctxt, instance, migration, image, disk_info,
             host, reservations=None):
         version = '4.0'
@@ -530,6 +556,8 @@ class ComputeAPI(object):
                    instance=instance, migration=migration,
                    image=image, disk_info=disk_info, reservations=reservations)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def finish_revert_resize(self, ctxt, instance, migration, host,
                              reservations=None):
         version = '4.0'
@@ -566,13 +594,17 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'get_diagnostics', instance=instance)
 
     def get_instance_diagnostics(self, ctxt, instance):
-        version = '4.13'
+        version = '4.14'
         client = self.router.client(ctxt)
         if not client.can_send_version(version):
-            version = '4.0'
-            instance = objects_base.obj_to_primitive(instance)
+            # NOTE(snikitin): Since version 4.14 method
+            # get_instance_diagnostics() returns Diagnostics object instead of
+            # dictionary. But this method was unused before version 4.14. That
+            # is why we can raise an exception if RPC API version is too old.
+            raise exception.InstanceDiagnosticsNotSupported()
+
         cctxt = client.prepare(server=_compute_host(None, instance),
-                                    version=version)
+                               version=version)
         return cctxt.call(ctxt, 'get_instance_diagnostics', instance=instance)
 
     def get_vnc_console(self, ctxt, instance, console_type):
@@ -720,6 +752,8 @@ class ComputeAPI(object):
         else:
             return result
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def prep_resize(self, ctxt, instance, image, instance_type, host,
                     reservations=None, request_spec=None,
                     filter_properties=None, node=None,
@@ -829,6 +863,8 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'reset_network', instance=instance)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def resize_instance(self, ctxt, instance, migration, image, instance_type,
                         reservations=None, clean_shutdown=True):
         msg_args = {'instance': instance, 'migration': migration,
@@ -890,13 +926,20 @@ class ComputeAPI(object):
                 server=host, version=version)
         return cctxt.call(ctxt, 'set_host_enabled', enabled=enabled)
 
-    def swap_volume(self, ctxt, instance, old_volume_id, new_volume_id):
-        version = '4.0'
-        cctxt = self.router.client(ctxt).prepare(
-                server=_compute_host(None, instance), version=version)
-        cctxt.cast(ctxt, 'swap_volume',
-                   instance=instance, old_volume_id=old_volume_id,
-                   new_volume_id=new_volume_id)
+    def swap_volume(self, ctxt, instance, old_volume_id, new_volume_id,
+                    new_attachment_id=None):
+        version = '4.17'
+        client = self.router.client(ctxt)
+        kwargs = dict(instance=instance,
+                      old_volume_id=old_volume_id,
+                      new_volume_id=new_volume_id,
+                      new_attachment_id=new_attachment_id)
+        if not client.can_send_version(version):
+            version = '4.0'
+            kwargs.pop('new_attachment_id')
+        cctxt = client.prepare(
+            server=_compute_host(None, instance), version=version)
+        cctxt.cast(ctxt, 'swap_volume', **kwargs)
 
     def get_host_uptime(self, ctxt, host):
         version = '4.0'
@@ -905,14 +948,25 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'get_host_uptime')
 
     def reserve_block_device_name(self, ctxt, instance, device, volume_id,
-                                  disk_bus=None, device_type=None):
+                                  disk_bus=None, device_type=None, tag=None):
         kw = {'instance': instance, 'device': device,
               'volume_id': volume_id, 'disk_bus': disk_bus,
-              'device_type': device_type}
-        version = '4.0'
+              'device_type': device_type, 'tag': tag}
+        version = '4.15'
 
-        cctxt = self.router.client(ctxt).prepare(
-                server=_compute_host(None, instance), version=version)
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            if tag:
+                # NOTE(artom) Reserve attempted with a device role tag, but
+                # we're pinned to less than 4.15 - ie, not all nodes have
+                # received the Pike code yet.
+                raise exception.TaggedAttachmentNotSupported()
+            else:
+                version = '4.0'
+                kw.pop('tag')
+
+        cctxt = client.prepare(server=_compute_host(None, instance),
+                               version=version)
         return cctxt.call(ctxt, 'reserve_block_device_name', **kw)
 
     def backup_instance(self, ctxt, instance, image_id, backup_type,
@@ -955,6 +1009,8 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'suspend_instance', instance=instance)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def terminate_instance(self, ctxt, instance, bdms, reservations=None,
                            delete_type=None):
         # NOTE(rajesht): The `delete_type` parameter is passed because
@@ -979,6 +1035,8 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'unrescue_instance', instance=instance)
 
+    # TODO(melwitt): Remove the reservations parameter in version 5.0 of the
+    # RPC API.
     def soft_delete_instance(self, ctxt, instance, reservations=None):
         version = '4.0'
         cctxt = self.router.client(ctxt).prepare(

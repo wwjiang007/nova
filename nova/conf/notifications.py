@@ -23,7 +23,7 @@ notifications_group = cfg.OptGroup(
 Most of the actions in Nova which manipulate the system state generate
 notifications which are posted to the messaging component (e.g. RabbitMQ) and
 can be consumed by any service outside the Openstack. More technical details
-at http://docs.openstack.org/developer/nova/notifications.html
+at https://docs.openstack.org/nova/latest/reference/notifications.html
 """)
 
 ALL_OPTS = [
@@ -65,20 +65,28 @@ API service.
 
     cfg.StrOpt(
         'default_publisher_id',
-        default='$my_ip',
+        default='$host',
         deprecated_group='DEFAULT',
+        deprecated_for_removal=True,
+        deprecated_since='17.0.0',
+        deprecated_reason="""
+This option is only used when ``monkey_patch=True`` and
+``monkey_patch_modules`` is configured to specify the legacy notify_decorator.
+Since the monkey_patch and monkey_patch_modules options are deprecated, this
+option is also deprecated.
+""",
         help="""
 Default publisher_id for outgoing notifications. If you consider routing
 notifications using different publisher, change this value accordingly.
 
 Possible values:
 
-* Defaults to the IPv4 address of this host, but it can be any valid
+* Defaults to the current hostname of this host, but it can be any valid
   oslo.messaging publisher_id
 
 Related options:
 
-*  my_ip - IP address of this host
+*  host - Hostname, FQDN or IP address of this host.
 """),
     cfg.StrOpt(
         'notification_format',
@@ -100,7 +108,7 @@ Possible values:
   emitted. (Default)
 
 The list of versioned notifications is visible in
-http://docs.openstack.org/developer/nova/notifications.html
+https://docs.openstack.org/nova/latest/reference/notifications.html
 """),
     cfg.ListOpt(
         'versioned_notifications_topics',
@@ -115,8 +123,17 @@ Nova will send a message containing a versioned notification payload to each
 topic queue in this list.
 
 The list of versioned notifications is visible in
-http://docs.openstack.org/developer/nova/notifications.html
+https://docs.openstack.org/nova/latest/reference/notifications.html
 """),
+    cfg.BoolOpt(
+        'bdms_in_notifications',
+        default=False,
+        help="""
+If enabled, include block device information in the versioned notification
+payload. Sending block device information is disabled by default as providing
+that information can incur some overhead on the system since the information
+may need to be loaded from the database.
+""")
 ]
 
 

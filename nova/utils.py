@@ -20,7 +20,6 @@
 import contextlib
 import copy
 import datetime
-import errno
 import functools
 import hashlib
 import inspect
@@ -29,13 +28,9 @@ import pyclbr
 import random
 import re
 import shutil
-import socket
-import struct
 import sys
 import tempfile
-import textwrap
 import time
-from xml.sax import saxutils
 
 import eventlet
 import netaddr
@@ -50,7 +45,6 @@ from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import units
-import prettytable
 import six
 from six.moves import range
 
@@ -66,15 +60,6 @@ profiler = importutils.try_import('osprofiler.profiler')
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-
-# used in limits
-TIME_UNITS = {
-    'SECOND': 1,
-    'MINUTE': 60,
-    'HOUR': 3600,
-    'DAY': 86400
-}
-
 
 _IS_NEUTRON = None
 
@@ -103,71 +88,12 @@ VIM_IMAGE_ATTRIBUTES = (
 _FILE_CACHE = {}
 
 
-def vpn_ping(address, port, timeout=0.05, session_id=None):
-    """Sends a vpn negotiation packet and returns the server session.
-
-    Returns Boolean indicating whether the vpn_server is listening.
-    Basic packet structure is below.
-
-    Client packet (14 bytes)::
-
-         0 1      8 9  13
-        +-+--------+-----+
-        |x| cli_id |?????|
-        +-+--------+-----+
-        x = packet identifier 0x38
-        cli_id = 64 bit identifier
-        ? = unknown, probably flags/padding
-
-    Server packet (26 bytes)::
-
-         0 1      8 9  13 14    21 2225
-        +-+--------+-----+--------+----+
-        |x| srv_id |?????| cli_id |????|
-        +-+--------+-----+--------+----+
-        x = packet identifier 0x40
-        cli_id = 64 bit identifier
-        ? = unknown, probably flags/padding
-        bit 9 was 1 and the rest were 0 in testing
-
-    """
-    # NOTE(tonyb) session_id isn't used for a real VPN connection so using a
-    #             cryptographically weak value is fine.
-    if session_id is None:
-        session_id = random.randint(0, 0xffffffffffffffff)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    data = struct.pack('!BQxxxxx', 0x38, session_id)
-    sock.sendto(data, (address, port))
-    sock.settimeout(timeout)
-    try:
-        received = sock.recv(2048)
-    except socket.timeout:
-        return False
-    finally:
-        sock.close()
-    fmt = '!BQxxxxxQxxxx'
-    if len(received) != struct.calcsize(fmt):
-        LOG.warning(_LW('Expected to receive %(exp)s bytes, '
-                        'but actually %(act)s'),
-                    dict(exp=struct.calcsize(fmt), act=len(received)))
-        return False
-    (identifier, server_sess, client_sess) = struct.unpack(fmt, received)
-    return (identifier == 0x40 and client_sess == session_id)
-
-
 def get_root_helper():
     if CONF.workarounds.disable_rootwrap:
         cmd = 'sudo'
     else:
         cmd = 'sudo nova-rootwrap %s' % CONF.rootwrap_config
     return cmd
-
-
-def _get_rootwrap_helper():
-    if CONF.use_rootwrap_daemon:
-        return RootwrapDaemonHelper(CONF.rootwrap_config)
-    else:
-        return RootwrapProcessHelper()
 
 
 class RootwrapProcessHelper(object):
@@ -330,11 +256,6 @@ DEFAULT_PASSWORD_SYMBOLS = ('23456789',  # Removed: 0,1
                             'abcdefghijkmnopqrstuvwxyz')  # Removed: l
 
 
-# ~5 bits per symbol
-EASIER_PASSWORD_SYMBOLS = ('23456789',  # Removed: 0, 1
-                           'ABCDEFGHJKLMNPQRSTUVWXYZ')  # Removed: I, O
-
-
 def last_completed_audit_period(unit=None, before=None):
     """This method gives you the most recently *completed* audit period.
 
@@ -463,30 +384,7 @@ def generate_password(length=None, symbolgroups=DEFAULT_PASSWORD_SYMBOLS):
     return ''.join(password)
 
 
-def get_my_linklocal(interface):
-    try:
-        if_str = execute('ip', '-f', 'inet6', '-o', 'addr', 'show', interface)
-        condition = '\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
-        links = [re.search(condition, x) for x in if_str[0].split('\n')]
-        address = [w.group(1) for w in links if w is not None]
-        if address[0] is not None:
-            return address[0]
-        else:
-            msg = _('Link Local address is not found.:%s') % if_str
-            raise exception.NovaException(msg)
-    except Exception as ex:
-        msg = _("Couldn't get Link Local IP of %(interface)s"
-                " :%(ex)s") % {'interface': interface, 'ex': ex}
-        raise exception.NovaException(msg)
-
-
-def xhtml_escape(value):
-    """Escapes a string so it is valid within XML or XHTML.
-
-    """
-    return saxutils.escape(value, {'"': '&quot;', "'": '&apos;'})
-
-
+# TODO(sfinucan): Replace this with the equivalent from oslo.utils
 def utf8(value):
     """Try to turn a string into utf-8 if possible.
 
@@ -501,13 +399,6 @@ def utf8(value):
         value = six.text_type(value)
 
     return value.encode('utf-8')
-
-
-def check_isinstance(obj, cls):
-    """Checks that obj is of type cls, and lets PyLint infer types."""
-    if isinstance(obj, cls):
-        return obj
-    raise Exception(_('Expected object of type: %s') % (str(cls)))
 
 
 def parse_server_string(server_str):
@@ -549,17 +440,6 @@ def get_shortened_ipv6_cidr(address):
     return str(net.cidr)
 
 
-def get_ip_version(network):
-    """Returns the IP version of a network (IPv4 or IPv6).
-
-    Raises AddrFormatError if invalid network.
-    """
-    if netaddr.IPNetwork(network).version == 6:
-        return "IPv6"
-    elif netaddr.IPNetwork(network).version == 4:
-        return "IPv4"
-
-
 def safe_ip_format(ip):
     """Transform ip string to "safe" format.
 
@@ -589,8 +469,9 @@ def format_remote_path(host, path):
     return "%s:%s" % (safe_ip_format(host), path)
 
 
+# TODO(mriedem): Remove this in Rocky.
 def monkey_patch():
-    """If the CONF.monkey_patch set as True,
+    """DEPRECATED: If the CONF.monkey_patch set as True,
     this function patches a decorator
     for all functions in specified modules.
     You can set decorators for each modules
@@ -608,6 +489,7 @@ def monkey_patch():
     # If CONF.monkey_patch is not True, this function do nothing.
     if not CONF.monkey_patch:
         return
+    LOG.warning('Monkey patching nova is deprecated for removal.')
     if six.PY2:
         is_method = inspect.ismethod
     else:
@@ -755,15 +637,10 @@ def generate_mac_address():
     return ':'.join(map(lambda x: "%02x" % x, mac))
 
 
-def read_file_as_root(file_path):
-    """Secure helper to read file as root."""
-    try:
-        out, _err = execute('cat', file_path, run_as_root=True)
-        return out
-    except processutils.ProcessExecutionError:
-        raise exception.FileNotFound(file_path=file_path)
-
-
+# NOTE(mikal): I really wanted this code to go away, but I can't find a way
+# to implement what the callers of this method want with privsep. Basically,
+# if we could hand off either a file descriptor or a file like object then
+# we could make this go away.
 @contextlib.contextmanager
 def temporary_chown(path, owner_uid=None):
     """Temporarily chown a path.
@@ -776,12 +653,12 @@ def temporary_chown(path, owner_uid=None):
     orig_uid = os.stat(path).st_uid
 
     if orig_uid != owner_uid:
-        execute('chown', owner_uid, path, run_as_root=True)
+        nova.privsep.path.chown(path, uid=owner_uid)
     try:
         yield
     finally:
         if orig_uid != owner_uid:
-            execute('chown', orig_uid, path, run_as_root=True)
+            nova.privsep.path.chown(path, uid=orig_uid)
 
 
 @contextlib.contextmanager
@@ -862,30 +739,6 @@ def mkfs(fs, path, label=None, run_as_root=False):
         args.extend([label_opt, label])
     args.append(path)
     execute(*args, run_as_root=run_as_root)
-
-
-def last_bytes(file_like_object, num):
-    """Return num bytes from the end of the file, and remaining byte count.
-
-    :param file_like_object: The file to read
-    :param num: The number of bytes to return
-
-    :returns: (data, remaining)
-    """
-
-    try:
-        file_like_object.seek(-num, os.SEEK_END)
-    except IOError as e:
-        # seek() fails with EINVAL when trying to go before the start of the
-        # file. It means that num is larger than the file size, so just
-        # go to the start.
-        if e.errno == errno.EINVAL:
-            file_like_object.seek(0, os.SEEK_SET)
-        else:
-            raise
-
-    remaining = file_like_object.tell()
-    return (file_like_object.read(), remaining)
 
 
 def metadata_to_dict(metadata, include_deleted=False):
@@ -1409,65 +1262,3 @@ def isotime(at=None):
 
 def strtime(at):
     return at.strftime("%Y-%m-%dT%H:%M:%S.%f")
-
-
-def print_dict(dct, dict_property="Property", wrap=0, dict_value='Value'):
-    """Print a `dict` as a table of two columns.
-
-    :param dct: `dict` to print
-    :param dict_property: name of the first column
-    :param wrap: wrapping for the second column
-    :param dict_value: header label for the value (second) column
-    """
-    pt = prettytable.PrettyTable([dict_property, dict_value])
-    pt.align = 'l'
-    for k, v in sorted(dct.items()):
-        # convert dict to str to check length
-        if isinstance(v, dict):
-            v = six.text_type(v)
-        if wrap > 0:
-            v = textwrap.fill(six.text_type(v), wrap)
-        # if value has a newline, add in multiple rows
-        # e.g. fault with stacktrace
-        if v and isinstance(v, six.string_types) and r'\n' in v:
-            lines = v.strip().split(r'\n')
-            col1 = k
-            for line in lines:
-                pt.add_row([col1, line])
-                col1 = ''
-        else:
-            pt.add_row([k, v])
-
-    if six.PY2:
-        print(encodeutils.safe_encode(pt.get_string()))
-    else:
-        print(encodeutils.safe_encode(pt.get_string()).decode())
-
-
-def validate_args(fn, *args, **kwargs):
-    """Check that the supplied args are sufficient for calling a function.
-
-    >>> validate_args(lambda a: None)
-    Traceback (most recent call last):
-        ...
-    MissingArgs: Missing argument(s): a
-    >>> validate_args(lambda a, b, c, d: None, 0, c=1)
-    Traceback (most recent call last):
-        ...
-    MissingArgs: Missing argument(s): b, d
-
-    :param fn: the function to check
-    :param arg: the positional arguments supplied
-    :param kwargs: the keyword arguments supplied
-    """
-    argspec = inspect.getargspec(fn)
-
-    num_defaults = len(argspec.defaults or [])
-    required_args = argspec.args[:len(argspec.args) - num_defaults]
-
-    if six.get_method_self(fn) is not None:
-        required_args.pop(0)
-
-    missing = [arg for arg in required_args if arg not in kwargs]
-    missing = missing[len(args):]
-    return missing

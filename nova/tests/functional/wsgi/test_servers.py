@@ -39,6 +39,7 @@ class ServersPreSchedulingTestCase(test.TestCase):
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NoopConductorFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
@@ -61,15 +62,18 @@ class ServersPreSchedulingTestCase(test.TestCase):
         create_resp = self.api.api_post('servers', body)
         get_resp = self.api.api_get('servers/%s' %
                                     create_resp.body['server']['id'])
+        flavor_get_resp = self.api.api_get('flavors/%s' %
+                                           body['server']['flavorRef'])
 
         server = get_resp.body['server']
         # Validate a few things
         self.assertEqual('foo', server['name'])
         self.assertEqual(image_ref, server['image']['id'])
-        self.assertEqual('1', server['flavor']['id'])
+        self.assertEqual(flavor_get_resp.body['flavor']['name'],
+                         server['flavor']['original_name'])
         self.assertEqual('', server['hostId'])
-        self.assertIsNone(None, server['OS-SRV-USG:launched_at'])
-        self.assertIsNone(None, server['OS-SRV-USG:terminated_at'])
+        self.assertIsNone(server['OS-SRV-USG:launched_at'])
+        self.assertIsNone(server['OS-SRV-USG:terminated_at'])
         self.assertFalse(server['locked'])
         self.assertEqual([], server['tags'])
         self.assertEqual('scheduling', server['OS-EXT-STS:task_state'])
@@ -89,14 +93,17 @@ class ServersPreSchedulingTestCase(test.TestCase):
         create_resp = self.api.api_post('servers', body)
         get_resp = self.api.api_get('servers/%s' %
                                     create_resp.body['server']['id'])
+        flavor_get_resp = self.api.api_get('flavors/%s' %
+                                           body['server']['flavorRef'])
         server = get_resp.body['server']
         # Just validate some basics
         self.assertEqual('foo', server['name'])
         self.assertEqual(image_ref, server['image']['id'])
-        self.assertEqual('1', server['flavor']['id'])
+        self.assertEqual(flavor_get_resp.body['flavor']['name'],
+                         server['flavor']['original_name'])
         self.assertEqual('', server['hostId'])
-        self.assertIsNone(None, server['OS-SRV-USG:launched_at'])
-        self.assertIsNone(None, server['OS-SRV-USG:terminated_at'])
+        self.assertIsNone(server['OS-SRV-USG:launched_at'])
+        self.assertIsNone(server['OS-SRV-USG:terminated_at'])
         self.assertFalse(server['locked'])
         self.assertEqual([], server['tags'])
         self.assertEqual('scheduling', server['OS-EXT-STS:task_state'])
@@ -176,3 +183,57 @@ class ServersPreSchedulingTestCase(test.TestCase):
 
     def test_instance_list_from_buildrequests_old_service(self):
         self._test_instance_list_from_buildrequests()
+
+    def test_instance_list_from_buildrequests_with_tags(self):
+        """Creates two servers with two tags each, where the 2nd tag (tag2)
+        is the only intersection between the tags in both servers. This is
+        used to test the various tags filters working in the BuildRequestList.
+        """
+        self.useFixture(nova_fixtures.AllServicesCurrent())
+        image_ref = fake_image.get_valid_image_id()
+        body = {
+            'server': {
+                'name': 'foo',
+                'imageRef': image_ref,
+                'flavorRef': '1',
+                'networks': 'none',
+                'tags': ['tag1', 'tag2']
+            }
+        }
+        inst1 = self.api.api_post('servers', body)
+        body['server']['name'] = 'bar'
+        body['server']['tags'] = ['tag2', 'tag3']
+        inst2 = self.api.api_post('servers', body)
+
+        # list servers using tags=tag1,tag2
+        list_resp = self.api.api_get(
+            'servers/detail?tags=tag1,tag2')
+        list_resp = list_resp.body['servers']
+        self.assertEqual(1, len(list_resp))
+        self.assertEqual(inst1.body['server']['id'], list_resp[0]['id'])
+        self.assertEqual('foo', list_resp[0]['name'])
+
+        # list servers using tags-any=tag1,tag3
+        list_resp = self.api.api_get(
+            'servers/detail?tags-any=tag1,tag3')
+        list_resp = list_resp.body['servers']
+        self.assertEqual(2, len(list_resp))
+        # Default sort is created_at desc, so last created is first
+        self.assertEqual(inst2.body['server']['id'], list_resp[0]['id'])
+        self.assertEqual('bar', list_resp[0]['name'])
+        self.assertEqual(inst1.body['server']['id'], list_resp[1]['id'])
+        self.assertEqual('foo', list_resp[1]['name'])
+
+        # list servers using not-tags=tag1,tag2
+        list_resp = self.api.api_get(
+            'servers/detail?not-tags=tag1,tag2')
+        list_resp = list_resp.body['servers']
+        self.assertEqual(1, len(list_resp))
+        self.assertEqual(inst2.body['server']['id'], list_resp[0]['id'])
+        self.assertEqual('bar', list_resp[0]['name'])
+
+        # list servers using not-tags-any=tag1,tag3
+        list_resp = self.api.api_get(
+            'servers/detail?not-tags-any=tag1,tag3')
+        list_resp = list_resp.body['servers']
+        self.assertEqual(0, len(list_resp))

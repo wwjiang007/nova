@@ -22,6 +22,7 @@ from cursive import exception as cursive_exception
 import glanceclient.exc
 from glanceclient.v1 import images
 import glanceclient.v2.schemas as schemas
+from keystoneauth1 import loading as ks_loading
 import mock
 import six
 from six.moves import StringIO
@@ -31,6 +32,7 @@ import nova.conf
 from nova import context
 from nova import exception
 from nova.image import glance
+from nova import service_auth
 from nova import test
 from nova.tests import uuidsentinel as uuids
 
@@ -340,50 +342,51 @@ class TestGetImageService(test.NoDBTestCase):
 
 
 class TestCreateGlanceClient(test.NoDBTestCase):
+
+    @mock.patch.object(service_auth, 'get_auth_plugin')
+    @mock.patch.object(ks_loading, 'load_session_from_conf_options')
     @mock.patch('glanceclient.Client')
-    def test_headers_passed_glanceclient(self, init_mock):
-        self.flags(auth_strategy='keystone', group='api')
-        auth_token = 'token'
-        ctx = context.RequestContext('fake', 'fake', auth_token=auth_token)
+    def test_glanceclient_with_ks_session(self, mock_client, mock_load,
+                                          mock_get_auth):
+        session = "fake_session"
+        mock_load.return_value = session
+        auth = "fake_auth"
+        mock_get_auth.return_value = auth
+        ctx = context.RequestContext('fake', 'fake', global_request_id='reqid')
+        endpoint = "fake_endpoint"
+        mock_client.side_effect = ["a", "b"]
 
-        expected_endpoint = 'http://host4:9295'
-        expected_params = {
-            'identity_headers': {
-                'X-Auth-Token': 'token',
-                'X-User-Id': 'fake',
-                'X-Roles': '',
-                'X-Tenant-Id': 'fake',
-                'X-Identity-Status': 'Confirmed'
-            }
+        # Reset the cache, so we know its empty before we start
+        glance._SESSION = None
+
+        result1 = glance._glanceclient_from_endpoint(ctx, endpoint, 2)
+        result2 = glance._glanceclient_from_endpoint(ctx, endpoint, 2)
+
+        # Ensure that session is only loaded once.
+        mock_load.assert_called_once_with(glance.CONF, "glance")
+        self.assertEqual(session, glance._SESSION)
+        # Ensure new client created every time
+        client_call = mock.call(2, auth="fake_auth",
+                endpoint_override=endpoint, session=session,
+                                global_request_id='reqid')
+        mock_client.assert_has_calls([client_call, client_call])
+        self.assertEqual("a", result1)
+        self.assertEqual("b", result2)
+
+    def test_generate_identity_headers(self):
+        ctx = context.RequestContext('user', 'tenant',
+                auth_token='token', roles=["a", "b"])
+
+        result = glance.generate_identity_headers(ctx, 'test')
+
+        expected = {
+            'X-Auth-Token': 'token',
+            'X-User-Id': 'user',
+            'X-Tenant-Id': 'tenant',
+            'X-Roles': 'a,b',
+            'X-Identity-Status': 'test',
         }
-        glance._glanceclient_from_endpoint(ctx, expected_endpoint, 2)
-        init_mock.assert_called_once_with('2', expected_endpoint,
-                                          **expected_params)
-
-        # Test the version is properly passed to glanceclient.
-        init_mock.reset_mock()
-
-        expected_endpoint = 'http://host4:9295'
-        expected_params = {
-            'identity_headers': {
-                'X-Auth-Token': 'token',
-                'X-User-Id': 'fake',
-                'X-Roles': '',
-                'X-Tenant-Id': 'fake',
-                'X-Identity-Status': 'Confirmed'
-            }
-        }
-        glance._glanceclient_from_endpoint(ctx, expected_endpoint, 2)
-        init_mock.assert_called_once_with('2', expected_endpoint,
-                                          **expected_params)
-
-        # Test that the IPv6 bracketization adapts the endpoint properly.
-        init_mock.reset_mock()
-
-        expected_endpoint = 'http://[host4]:9295'
-        glance._glanceclient_from_endpoint(ctx, expected_endpoint, 2)
-        init_mock.assert_called_once_with('2', expected_endpoint,
-                                          **expected_params)
+        self.assertDictEqual(expected, result)
 
 
 class TestGlanceClientWrapperRetries(test.NoDBTestCase):
@@ -503,22 +506,6 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
         create_client_mock.return_value = client_mock
 
 
-class TestGlanceClientWrapper(test.NoDBTestCase):
-
-    @mock.patch('oslo_service.sslutils.is_enabled')
-    @mock.patch('glanceclient.Client')
-    def test_create_glance_client_with_ssl(self, client_mock,
-                                           ssl_enable_mock):
-        self.flags(ca_file='foo.cert', cert_file='bar.cert',
-                   key_file='wut.key', group='ssl')
-        ctxt = mock.sentinel.ctx
-        glance._glanceclient_from_endpoint(ctxt, 'https://host4:9295', 2)
-        client_mock.assert_called_once_with(
-            '2', 'https://host4:9295', insecure=False, ssl_compression=False,
-            cert_file='bar.cert', key_file='wut.key', cacert='foo.cert',
-            identity_headers=mock.ANY)
-
-
 class TestDownloadNoDirectUri(test.NoDBTestCase):
 
     """Tests the download method of the GlanceImageServiceV2 when the
@@ -566,7 +553,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
 
     @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
-    @mock.patch('os.fsync')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_no_data_dest_path_v2(self, fsync_mock, show_mock,
                                            open_mock):
         client = mock.MagicMock()
@@ -582,8 +569,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         client.call.assert_called_once_with(ctx, 2, 'data',
                                             mock.sentinel.image_id)
         open_mock.assert_called_once_with(mock.sentinel.dst_path, 'wb')
-        fsync_mock.assert_called_once_with(
-                writer.fileno.return_value)
+        fsync_mock.assert_called_once_with(writer)
         self.assertIsNone(res)
         writer.write.assert_has_calls(
                 [
@@ -677,7 +663,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._get_transfer_module')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
-    @mock.patch('os.fsync')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_direct_exception_fallback_v2(
             self, fsync_mock, show_mock, get_tran_mock, open_mock):
         # Test that we fall back to downloading to the dst_path
@@ -714,8 +700,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
                                                   mock.sentinel.loc_meta)
         client.call.assert_called_once_with(ctx, 2, 'data',
                                             mock.sentinel.image_id)
-        fsync_mock.assert_called_once_with(
-                open_mock.return_value.fileno.return_value)
+        fsync_mock.assert_called_once_with(writer)
         # NOTE(jaypipes): log messages call open() in part of the
         # download path, so here, we just check that the last open()
         # call was done for the dst_path file descriptor.
@@ -732,7 +717,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._get_transfer_module')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
-    @mock.patch('os.fsync')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_direct_no_mod_fallback(
             self, fsync_mock, show_mock, get_tran_mock, open_mock):
         # Test that we fall back to downloading to the dst_path
@@ -764,8 +749,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         get_tran_mock.assert_called_once_with('file')
         client.call.assert_called_once_with(ctx, 2, 'data',
                                             mock.sentinel.image_id)
-        fsync_mock.assert_called_once_with(
-                open_mock.return_value.fileno.return_value)
+        fsync_mock.assert_called_once_with(writer)
         # NOTE(jaypipes): log messages call open() in part of the
         # download path, so here, we just check that the last open()
         # call was done for the dst_path file descriptor.
@@ -840,7 +824,7 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
     @mock.patch('nova.image.glance.LOG')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
     @mock.patch('cursive.signature_utils.get_verifier')
-    @mock.patch('os.fsync')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_dst_path_signature_verification_v2(self,
                                                          mock_fsync,
                                                          mock_get_verifier,
@@ -865,8 +849,7 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
         mock_log.info.assert_called_once_with(mock.ANY, mock.ANY)
         self.assertEqual(len(self.fake_img_data), mock_dest.write.call_count)
         self.assertTrue(mock_dest.close.called)
-        mock_fsync.assert_called_once_with(
-                mock_dest.fileno.return_value)
+        mock_fsync.assert_called_once_with(mock_dest)
 
     @mock.patch('nova.image.glance.LOG')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
@@ -921,7 +904,7 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
     @mock.patch('cursive.signature_utils.get_verifier')
     @mock.patch('nova.image.glance.LOG')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
-    @mock.patch('os.fsync')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_dst_path_signature_fail_v2(self, mock_fsync,
                                                  mock_show, mock_log,
                                                  mock_get_verifier,
@@ -938,8 +921,7 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
                           data=None, dst_path=fake_path)
         mock_log.error.assert_called_once_with(mock.ANY, mock.ANY)
         mock_open.assert_called_once_with(fake_path, 'wb')
-        mock_fsync.assert_called_once_with(
-                mock_open.return_value.fileno.return_value)
+        mock_fsync.assert_called_once_with(mock_dest)
         mock_dest.truncate.assert_called_once_with(0)
         self.assertTrue(mock_dest.close.called)
 
@@ -1722,3 +1704,43 @@ class TestTranslateToGlance(test.NoDBTestCase):
         nova_image_dict = self.fixture
         image_v2_dict = glance._translate_to_glance(nova_image_dict)
         self.assertEqual(expected_v2_image, image_v2_dict)
+
+
+@mock.patch('stat.S_ISSOCK')
+@mock.patch('stat.S_ISFIFO')
+@mock.patch('os.fsync')
+@mock.patch('os.fstat')
+class TestSafeFSync(test.NoDBTestCase):
+    """Validate _safe_fsync."""
+    @staticmethod
+    def common(mock_isfifo, isfifo, mock_issock, issock, mock_fstat):
+        """Execution & assertions common to all test cases."""
+        fh = mock.Mock()
+        mock_isfifo.return_value = isfifo
+        mock_issock.return_value = issock
+        glance.GlanceImageServiceV2._safe_fsync(fh)
+        fh.fileno.assert_called_once_with()
+        mock_fstat.assert_called_once_with(fh.fileno.return_value)
+        mock_isfifo.assert_called_once_with(mock_fstat.return_value.st_mode)
+        # Condition short-circuits, so S_ISSOCK is only called if !S_ISFIFO
+        if isfifo:
+            mock_issock.assert_not_called()
+        else:
+            mock_issock.assert_called_once_with(
+                mock_fstat.return_value.st_mode)
+        return fh
+
+    def test_fsync(self, mock_fstat, mock_fsync, mock_isfifo, mock_issock):
+        """Validate path where fsync is called."""
+        fh = self.common(mock_isfifo, False, mock_issock, False, mock_fstat)
+        mock_fsync.assert_called_once_with(fh.fileno.return_value)
+
+    def test_fifo(self, mock_fstat, mock_fsync, mock_isfifo, mock_issock):
+        """Validate fsync not called for pipe/fifo."""
+        self.common(mock_isfifo, True, mock_issock, False, mock_fstat)
+        mock_fsync.assert_not_called()
+
+    def test_sock(self, mock_fstat, mock_fsync, mock_isfifo, mock_issock):
+        """Validate fsync not called for socket."""
+        self.common(mock_isfifo, False, mock_issock, True, mock_fstat)
+        mock_fsync.assert_not_called()

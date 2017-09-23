@@ -27,6 +27,7 @@ from nova import rpc
 
 
 CONF = nova.conf.CONF
+RPC_TOPIC = 'network'
 
 
 @profiler.trace_cls("rpc")
@@ -128,7 +129,7 @@ class NetworkAPI(object):
 
     def __init__(self, topic=None):
         super(NetworkAPI, self).__init__()
-        topic = topic or CONF.network_topic
+        topic = topic or RPC_TOPIC
         target = messaging.Target(topic=topic, version='1.0')
         version_cap = self.VERSION_ALIASES.get(CONF.upgrade_levels.network,
                                                CONF.upgrade_levels.network)
@@ -148,6 +149,7 @@ class NetworkAPI(object):
     def allocate_for_instance(self, ctxt, instance_id, project_id, host,
                               rxtx_factor, vpn, requested_networks, macs=None,
                               dhcp_options=None):
+        # NOTE(mriedem): dhcp_options should be removed in version 2.0
         version = '1.13'
         if not self.client.can_send_version(version):
             version = '1.9'

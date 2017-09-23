@@ -136,15 +136,11 @@ class _FakeDriverBackendTestCase(object):
             pass
 
         def fake_detach_device_with_retry(_self, get_device_conf_func, device,
-                                          persistent, live,
-                                          max_retry_count=7,
-                                          inc_sleep_time=2,
-                                          max_sleep_time=30):
+                                          live, *args, **kwargs):
             # Still calling detach, but instead of returning function
             # that actually checks if device is gone from XML, just continue
             # because XML never gets updated in these tests
             _self.detach_device(get_device_conf_func(device),
-                                persistent=persistent,
                                 live=live)
             return fake_wait
 
@@ -340,12 +336,14 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                image_meta, '')
 
     @catch_notimplementederror
-    def test_unrescue_unrescued_instance(self):
+    @mock.patch('os.unlink')
+    def test_unrescue_unrescued_instance(self, mock_unlink):
         instance_ref, network_info = self._get_running_instance()
         self.connection.unrescue(instance_ref, network_info)
 
     @catch_notimplementederror
-    def test_unrescue_rescued_instance(self):
+    @mock.patch('os.unlink')
+    def test_unrescue_rescued_instance(self, mock_unlink):
         image_meta = objects.ImageMeta.from_dict({})
         instance_ref, network_info = self._get_running_instance()
         self.connection.rescue(self.ctxt, instance_ref, network_info,

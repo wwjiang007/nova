@@ -15,8 +15,6 @@
 
 QOS_QUEUE = 'QoS Queue'
 NET_EXTERNAL = 'router:external'
-PORTBINDING_EXT = 'Port Binding'
 VNIC_INDEX_EXT = 'VNIC Index'
 DNS_INTEGRATION = 'DNS Integration'
-AUTO_ALLOCATE_TOPO_EXT = 'Auto Allocated Topology Services'
 MULTI_NET_EXT = 'Multi Provider Network'

@@ -16,10 +16,13 @@
 """Tests for common notifications."""
 
 import copy
+import datetime
 
 import mock
+from oslo_config import cfg
 from oslo_context import context as o_context
 from oslo_context import fixture as o_fixture
+from oslo_utils import timeutils
 
 from nova.compute import flavors
 from nova.compute import task_states
@@ -33,6 +36,8 @@ from nova import test
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
 from nova.tests import uuidsentinel as uuids
+
+CONF = cfg.CONF
 
 
 class NotificationsTestCase(test.TestCase):
@@ -65,6 +70,9 @@ class NotificationsTestCase(test.TestCase):
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
+
+        self.fake_time = datetime.datetime(2017, 2, 2, 16, 45, 0)
+        timeutils.set_time_override(self.fake_time)
 
         self.instance = self._wrapped_create()
 
@@ -339,6 +347,11 @@ class NotificationsTestCase(test.TestCase):
         self.assertEqual(payload["display_name"], display_name)
         self.assertEqual(payload["hostname"], hostname)
         self.assertEqual(payload["node"], node)
+        self.assertEqual("2017-02-01T00:00:00.000000",
+                         payload["audit_period_beginning"])
+        self.assertEqual("2017-02-02T16:45:00.000000",
+                         payload["audit_period_ending"])
+
         payload = fake_notifier.VERSIONED_NOTIFICATIONS[0][
             'payload']['nova_object.data']
         state_update = payload['state_update']['nova_object.data']
@@ -407,16 +420,16 @@ class NotificationsTestCase(test.TestCase):
     def test_update_with_service_name(self):
         notifications.send_update_with_states(self.context, self.instance,
                 vm_states.BUILDING, vm_states.BUILDING, task_states.SPAWNING,
-                None, service="testservice")
+                None, service="nova-compute")
         self.assertEqual(1, len(fake_notifier.NOTIFICATIONS))
         self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
 
         # service name should default to 'compute'
         notif = fake_notifier.NOTIFICATIONS[0]
-        self.assertEqual('testservice.testhost', notif.publisher_id)
+        self.assertEqual('nova-compute.testhost', notif.publisher_id)
 
         notif = fake_notifier.VERSIONED_NOTIFICATIONS[0]
-        self.assertEqual('testservice:testhost', notif['publisher_id'])
+        self.assertEqual('nova-compute:testhost', notif['publisher_id'])
 
     def test_update_with_host_name(self):
         notifications.send_update_with_states(self.context, self.instance,
@@ -491,6 +504,20 @@ class NotificationsTestCase(test.TestCase):
         self.assertEqual(40, info['ephemeral_gb'])
         self.assertEqual(60, info['disk_gb'])
 
+    def test_payload_has_timestamp_fields(self):
+        time = datetime.datetime(2017, 2, 2, 16, 45, 0)
+        # do not define deleted_at to test that missing value is handled
+        # properly
+        self.instance.terminated_at = time
+        self.instance.launched_at = time
+
+        info = notifications.info_from_instance(self.context, self.instance,
+                                                self.net_info, None)
+
+        self.assertEqual('2017-02-02T16:45:00.000000', info['terminated_at'])
+        self.assertEqual('2017-02-02T16:45:00.000000', info['launched_at'])
+        self.assertEqual('', info['deleted_at'])
+
     def test_send_access_ip_update(self):
         notifications.send_update(self.context, self.instance, self.instance)
         self.assertEqual(1, len(fake_notifier.NOTIFICATIONS))
@@ -522,11 +549,11 @@ class NotificationsTestCase(test.TestCase):
 
     def test_send_versioned_tags_update(self):
         objects.TagList.create(self.context,
-                               self.instance.uuid, ['tag1', 'tag2'])
+                               self.instance.uuid, [u'tag1', u'tag2'])
         notifications.send_update(self.context, self.instance, self.instance)
         self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
 
-        self.assertEqual(['tag1', 'tag2'],
+        self.assertEqual([u'tag1', u'tag2'],
                          fake_notifier.VERSIONED_NOTIFICATIONS[0]
                          ['payload']['nova_object.data']['tags'])
 
@@ -536,7 +563,7 @@ class NotificationsTestCase(test.TestCase):
         def sending_no_state_change(context, instance, **kwargs):
             called[0] = True
         self.stub_out('nova.notifications.base.'
-                      '_send_instance_update_notification',
+                      'send_instance_update_notification',
                        sending_no_state_change)
         notifications.send_update(self.context, self.instance, self.instance)
         self.assertTrue(called[0])
@@ -545,7 +572,7 @@ class NotificationsTestCase(test.TestCase):
         def fail_sending(context, instance, **kwargs):
             raise Exception('failed to notify')
         self.stub_out('nova.notifications.base.'
-                      '_send_instance_update_notification',
+                      'send_instance_update_notification',
                        fail_sending)
 
         notifications.send_update(self.context, self.instance, self.instance)
@@ -557,7 +584,7 @@ class NotificationsTestCase(test.TestCase):
         # not logged as an error.
         notfound = exception.InstanceNotFound(instance_id=self.instance.uuid)
         with mock.patch.object(notifications,
-                               '_send_instance_update_notification',
+                               'send_instance_update_notification',
                                side_effect=notfound):
             notifications.send_update(
                 self.context, self.instance, self.instance)
@@ -571,7 +598,7 @@ class NotificationsTestCase(test.TestCase):
         # not logged as an error.
         notfound = exception.InstanceNotFound(instance_id=self.instance.uuid)
         with mock.patch.object(notifications,
-                               '_send_instance_update_notification',
+                               'send_instance_update_notification',
                                side_effect=notfound):
             notifications.send_update_with_states(
                 self.context, self.instance,
@@ -601,6 +628,7 @@ class NotificationsTestCase(test.TestCase):
         self.assertEqual(n.event_type, func_name)
         self.assertEqual(n.context, ctxt)
         self.assertTrue(self.decorated_function_called)
+        self.assertEqual(CONF.host, n.publisher_id)
 
 
 class NotificationsFormatTestCase(test.NoDBTestCase):

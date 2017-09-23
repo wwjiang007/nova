@@ -29,7 +29,6 @@ import six
 import nova.conf
 import nova.context
 from nova import exception
-from nova.i18n import _LE
 from nova.image import glance
 from nova import network
 from nova.network import model as network_model
@@ -47,6 +46,8 @@ LOG = log.getLogger(__name__)
 CONF = nova.conf.CONF
 
 
+# TODO(mriedem): Remove this when CONF.monkey_patch, CONF.monkey_patch_modules
+# and CONF.default_publisher_id are removed in Rocky.
 def notify_decorator(name, fn):
     """Decorator for notify which is used from utils.monkey_patch().
 
@@ -134,7 +135,7 @@ def send_update(context, old_instance, new_instance, service="compute",
             old_display_name = None
             if new_instance["display_name"] != old_instance["display_name"]:
                 old_display_name = old_instance["display_name"]
-            _send_instance_update_notification(context, new_instance,
+            send_instance_update_notification(context, new_instance,
                     service=service, host=host,
                     old_display_name=old_display_name)
         except exception.InstanceNotFound:
@@ -142,8 +143,8 @@ def send_update(context, old_instance, new_instance, service="compute",
                       'instance could not be found and was most likely '
                       'deleted.', instance=new_instance)
         except Exception:
-            LOG.exception(_LE("Failed to send state update notification"),
-                    instance=new_instance)
+            LOG.exception("Failed to send state update notification",
+                          instance=new_instance)
 
 
 def send_update_with_states(context, instance, old_vm_state, new_vm_state,
@@ -176,7 +177,7 @@ def send_update_with_states(context, instance, old_vm_state, new_vm_state,
     if fire_update:
         # send either a state change or a regular notification
         try:
-            _send_instance_update_notification(context, instance,
+            send_instance_update_notification(context, instance,
                     old_vm_state=old_vm_state, old_task_state=old_task_state,
                     new_vm_state=new_vm_state, new_task_state=new_task_state,
                     service=service, host=host)
@@ -185,8 +186,8 @@ def send_update_with_states(context, instance, old_vm_state, new_vm_state,
                       'instance could not be found and was most likely '
                       'deleted.', instance=instance)
         except Exception:
-            LOG.exception(_LE("Failed to send state update notification"),
-                    instance=instance)
+            LOG.exception("Failed to send state update notification",
+                          instance=instance)
 
 
 def _compute_states_payload(instance, old_vm_state=None,
@@ -217,7 +218,8 @@ def _compute_states_payload(instance, old_vm_state=None,
     return states_payload
 
 
-def _send_instance_update_notification(context, instance, old_vm_state=None,
+@rpc.if_notifications_enabled
+def send_instance_update_notification(context, instance, old_vm_state=None,
             old_task_state=None, new_vm_state=None, new_task_state=None,
             service="compute", host=None, old_display_name=None):
     """Send 'compute.instance.update' notification to inform observers
@@ -234,8 +236,8 @@ def _send_instance_update_notification(context, instance, old_vm_state=None,
 
     # add audit fields:
     (audit_start, audit_end) = audit_period_bounds(current_period=True)
-    payload["audit_period_beginning"] = audit_start
-    payload["audit_period_ending"] = audit_end
+    payload["audit_period_beginning"] = null_safe_isotime(audit_start)
+    payload["audit_period_ending"] = null_safe_isotime(audit_end)
 
     # add bw usage info:
     bw = bandwidth_usage(instance, audit_start)
@@ -251,18 +253,14 @@ def _send_instance_update_notification(context, instance, old_vm_state=None,
     _send_versioned_instance_update(context, instance, payload, host, service)
 
 
-def _map_service_to_binary(service):
-    if service == 'api':
-        binary = 'nova-api'
-    elif service == 'compute':
-        binary = 'nova-compute'
-    else:
-        binary = service
-    return binary
-
-
 @rpc.if_notifications_enabled
 def _send_versioned_instance_update(context, instance, payload, host, service):
+
+    def _map_legacy_service_to_source(legacy_service):
+        if not legacy_service.startswith('nova-'):
+            return 'nova-' + service
+        else:
+            return service
 
     state_update = instance_notification.InstanceStateUpdatePayload(
         old_state=payload.get('old_state'),
@@ -294,7 +292,7 @@ def _send_versioned_instance_update(context, instance, payload, host, service):
             action=fields.NotificationAction.UPDATE),
         publisher=notification_base.NotificationPublisher(
                 host=host or CONF.host,
-                binary=_map_service_to_binary(service)),
+                source=_map_legacy_service_to_source(service)),
         payload=versioned_payload)
     notification.emit(context)
 
@@ -339,7 +337,7 @@ def bandwidth_usage(instance_ref, audit_start,
         except Exception:
             try:
                 with excutils.save_and_reraise_exception():
-                    LOG.exception(_LE('Failed to get nw_info'),
+                    LOG.exception('Failed to get nw_info',
                                   instance=instance_ref)
             except Exception:
                 if ignore_missing_network_data:
@@ -386,6 +384,17 @@ def image_meta(system_metadata):
     return image_meta
 
 
+def null_safe_str(s):
+    return str(s) if s else ''
+
+
+def null_safe_isotime(s):
+    if isinstance(s, datetime.datetime):
+        return utils.strtime(s)
+    else:
+        return str(s) if s else ''
+
+
 def info_from_instance(context, instance, network_info,
                 system_metadata, **kw):
     """Get detailed instance information for an instance which is common to all
@@ -402,19 +411,6 @@ def info_from_instance(context, instance, network_info,
         modifications.
 
     """
-
-    def null_safe_str(s):
-        return str(s) if s else ''
-
-    def null_safe_int(s):
-        return int(s) if s else ''
-
-    def null_safe_isotime(s):
-        if isinstance(s, datetime.datetime):
-            return utils.strtime(s)
-        else:
-            return str(s) if s else ''
-
     image_ref_url = glance.generate_image_url(instance.image_ref)
 
     instance_type = instance.get_flavor()
@@ -472,7 +468,11 @@ def info_from_instance(context, instance, network_info,
         # Status properties
         state=instance.vm_state,
         state_description=null_safe_str(instance.task_state),
-        progress=null_safe_int(instance.progress),
+        # NOTE(gibi): It might seems wrong to default the progress to an empty
+        # string but this is how legacy work and this code only used by the
+        # legacy notification so try to keep the compatibility here but also
+        # keep it contained.
+        progress=int(instance.progress) if instance.progress else '',
 
         # accessIPs
         access_ip_v4=instance.access_ip_v4,

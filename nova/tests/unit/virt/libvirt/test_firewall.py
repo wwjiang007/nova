@@ -14,13 +14,13 @@
 #    under the License.
 
 import re
-import uuid
 from xml.dom import minidom
 
 from eventlet import greenthread
 from lxml import etree
 import mock
 from oslo_concurrency.fixture import lockutils as lock_fixture
+from oslo_utils import uuidutils
 
 from nova import exception
 from nova.network import linux_net
@@ -65,7 +65,7 @@ class NWFilterFakes(object):
         name = tree.get('name')
         u = tree.find('uuid')
         if u is None:
-            u = uuid.uuid4().hex
+            u = uuidutils.generate_uuid(dashed=False)
         else:
             u = u.text
         if name not in self.filters:
@@ -249,7 +249,7 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
 
         linux_net.iptables_manager.execute = fake_iptables_execute
 
-        self.stub_out('nova.compute.utils.get_nw_info_for_instance',
+        self.stub_out('nova.objects.Instance.get_network_info',
                       lambda instance: network_model)
 
         self.fw.prepare_instance_filter(instance_ref, network_model)

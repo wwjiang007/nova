@@ -35,7 +35,6 @@ from nova.virt import netutils
 
 
 LOG = logging.getLogger(__name__)
-ALIAS = 'os-security-groups'
 ATTRIBUTE_NAME = 'security_groups'
 
 
@@ -68,7 +67,9 @@ class SecurityGroupControllerBase(object):
         sg_rule['to_port'] = rule['to_port']
         sg_rule['group'] = {}
         sg_rule['ip_range'] = {}
-        if rule['group_id']:
+        if group_rule_data:
+            sg_rule['group'] = group_rule_data
+        elif rule['group_id']:
             try:
                 source_group = self.security_group_api.get(
                     context, id=rule['group_id'])
@@ -85,8 +86,6 @@ class SecurityGroupControllerBase(object):
                 return
             sg_rule['group'] = {'name': source_group.get('name'),
                                 'tenant_id': source_group.get('project_id')}
-        elif group_rule_data:
-            sg_rule['group'] = group_rule_data
         else:
             sg_rule['ip_range'] = {'cidr': rule['cidr']}
         return sg_rule
@@ -243,6 +242,8 @@ class SecurityGroupRulesController(SecurityGroupControllerBase,
         context = _authorize_context(req)
 
         sg_rule = self._from_body(body, 'security_group_rule')
+        group_id = sg_rule.get('group_id')
+        source_group = {}
 
         try:
             parent_group_id = self.security_group_api.validate_id(
@@ -250,12 +251,17 @@ class SecurityGroupRulesController(SecurityGroupControllerBase,
             security_group = self.security_group_api.get(context, None,
                                                          parent_group_id,
                                                          map_exception=True)
+            if group_id is not None:
+                group_id = self.security_group_api.validate_id(group_id)
+
+                source_group = self.security_group_api.get(
+                    context, id=group_id)
             new_rule = self._rule_args_to_dict(context,
                               to_port=sg_rule.get('to_port'),
                               from_port=sg_rule.get('from_port'),
                               ip_protocol=sg_rule.get('ip_protocol'),
                               cidr=sg_rule.get('cidr'),
-                              group_id=sg_rule.get('group_id'))
+                              group_id=group_id)
         except (exception.Invalid, exception.InvalidCidr) as exp:
             raise exc.HTTPBadRequest(explanation=exp.format_message())
         except exception.SecurityGroupNotFound as exp:
@@ -275,9 +281,7 @@ class SecurityGroupRulesController(SecurityGroupControllerBase,
 
         group_rule_data = None
         try:
-            if sg_rule.get('group_id'):
-                source_group = self.security_group_api.get(
-                            context, id=sg_rule['group_id'])
+            if group_id:
                 group_rule_data = {'name': source_group.get('name'),
                                    'tenant_id': source_group.get('project_id')}
 
@@ -300,10 +304,6 @@ class SecurityGroupRulesController(SecurityGroupControllerBase,
                            ip_protocol=None, cidr=None, group_id=None):
 
         if group_id is not None:
-            group_id = self.security_group_api.validate_id(group_id)
-
-            # check if groupId exists
-            self.security_group_api.get(context, id=group_id)
             return self.security_group_api.new_group_ingress_rule(
                                     group_id, ip_protocol, from_port, to_port)
         else:
@@ -494,28 +494,6 @@ class SecurityGroupsOutputController(wsgi.Controller):
     @wsgi.extends
     def detail(self, req, resp_obj):
         self._extend_servers(req, list(resp_obj.obj['servers']))
-
-
-class SecurityGroups(extensions.V21APIExtensionBase):
-    """Security group support."""
-    name = "SecurityGroups"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        return []
-
-    def get_resources(self):
-        secgrp_ext = extensions.ResourceExtension(ALIAS,
-                                                  SecurityGroupController())
-        server_secgrp_ext = extensions.ResourceExtension(
-            ALIAS,
-            controller=ServerSecurityGroupController(),
-            parent=dict(member_name='server', collection_name='servers'))
-        secgrp_rules_ext = extensions.ResourceExtension(
-            'os-security-group-rules',
-            controller=SecurityGroupRulesController())
-        return [secgrp_ext, server_secgrp_ext, secgrp_rules_ext]
 
 
 # NOTE(gmann): This function is not supposed to use 'body_deprecated_param'

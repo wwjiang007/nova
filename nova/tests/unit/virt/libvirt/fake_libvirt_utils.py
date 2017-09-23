@@ -82,14 +82,6 @@ def write_to_file(path, contents, umask=None):
     pass
 
 
-def chown(path, owner):
-    pass
-
-
-def update_mtime(path):
-    pass
-
-
 def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
     files[out_path] = b''
 
@@ -134,10 +126,6 @@ def load_file(path):
 
 def logical_volume_info(path):
     return {}
-
-
-def file_delete(path):
-    return True
 
 
 def get_fs_info(path):

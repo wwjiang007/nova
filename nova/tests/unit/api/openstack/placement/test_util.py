@@ -19,7 +19,7 @@ import webob
 
 from nova.api.openstack.placement import microversion
 from nova.api.openstack.placement import util
-from nova import objects
+from nova.objects import resource_provider as rp_obj
 from nova import test
 from nova.tests import uuidsentinel
 
@@ -261,10 +261,10 @@ class TestPlacementURLs(test.NoDBTestCase):
 
     def setUp(self):
         super(TestPlacementURLs, self).setUp()
-        self.resource_provider = objects.ResourceProvider(
+        self.resource_provider = rp_obj.ResourceProvider(
             name=uuidsentinel.rp_name,
             uuid=uuidsentinel.rp_uuid)
-        self.resource_class = objects.ResourceClass(
+        self.resource_class = rp_obj.ResourceClass(
             name='CUSTOM_BAREMETAL_GOLD',
             id=1000)
 
@@ -311,3 +311,55 @@ class TestPlacementURLs(test.NoDBTestCase):
         expected_url = '/placement/resource_classes/CUSTOM_BAREMETAL_GOLD'
         self.assertEqual(expected_url, util.resource_class_url(
             environ, self.resource_class))
+
+
+class TestNormalizeResourceQsParam(test.NoDBTestCase):
+
+    def test_success(self):
+        qs = "VCPU:1"
+        resources = util.normalize_resources_qs_param(qs)
+        expected = {
+            'VCPU': 1,
+        }
+        self.assertEqual(expected, resources)
+
+        qs = "VCPU:1,MEMORY_MB:1024,DISK_GB:100"
+        resources = util.normalize_resources_qs_param(qs)
+        expected = {
+            'VCPU': 1,
+            'MEMORY_MB': 1024,
+            'DISK_GB': 100,
+        }
+        self.assertEqual(expected, resources)
+
+    def test_400_empty_string(self):
+        qs = ""
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_bad_int(self):
+        qs = "VCPU:foo"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_no_amount(self):
+        qs = "VCPU"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_zero_amount(self):
+        qs = "VCPU:0"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )

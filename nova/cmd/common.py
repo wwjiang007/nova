@@ -20,6 +20,7 @@
 from __future__ import print_function
 
 import argparse
+import inspect
 import traceback
 
 from oslo_log import log as logging
@@ -28,8 +29,7 @@ import six
 import nova.conf
 import nova.db.api
 from nova import exception
-from nova.i18n import _, _LE
-from nova import utils
+from nova.i18n import _
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -44,12 +44,41 @@ def block_db_access(service_name):
 
         def __call__(self, *args, **kwargs):
             stacktrace = "".join(traceback.format_stack())
-            LOG.error(_LE('No db access allowed in %(service_name)s: '
-                          '%(stacktrace)s'),
+            LOG.error('No db access allowed in %(service_name)s: '
+                      '%(stacktrace)s',
                       dict(service_name=service_name, stacktrace=stacktrace))
             raise exception.DBNotAllowed(service_name)
 
     nova.db.api.IMPL = NoDB()
+
+
+def validate_args(fn, *args, **kwargs):
+    """Check that the supplied args are sufficient for calling a function.
+
+    >>> validate_args(lambda a: None)
+    Traceback (most recent call last):
+        ...
+    MissingArgs: Missing argument(s): a
+    >>> validate_args(lambda a, b, c, d: None, 0, c=1)
+    Traceback (most recent call last):
+        ...
+    MissingArgs: Missing argument(s): b, d
+
+    :param fn: the function to check
+    :param arg: the positional arguments supplied
+    :param kwargs: the keyword arguments supplied
+    """
+    argspec = inspect.getargspec(fn)
+
+    num_defaults = len(argspec.defaults or [])
+    required_args = argspec.args[:len(argspec.args) - num_defaults]
+
+    if six.get_method_self(fn) is not None:
+        required_args.pop(0)
+
+    missing = [arg for arg in required_args if arg not in kwargs]
+    missing = missing[len(args):]
+    return missing
 
 
 # Decorators for actions
@@ -102,14 +131,20 @@ def add_command_parsers(subparsers, categories):
 
             action_kwargs = []
             for args, kwargs in getattr(action_fn, 'args', []):
-                # FIXME(markmc): hack to assume dest is the arg name without
-                # the leading hyphens if no dest is supplied
-                kwargs.setdefault('dest', args[0][2:])
-                if kwargs['dest'].startswith('action_kwarg_'):
-                    action_kwargs.append(kwargs['dest'][len('action_kwarg_'):])
+                # we must handle positional parameters (ARG) separately from
+                # positional parameters (--opt). Detect this by checking for
+                # the presence of leading '--'
+                if args[0] != args[0].lstrip('-'):
+                    kwargs.setdefault('dest', args[0].lstrip('-'))
+                    if kwargs['dest'].startswith('action_kwarg_'):
+                        action_kwargs.append(
+                            kwargs['dest'][len('action_kwarg_'):])
+                    else:
+                        action_kwargs.append(kwargs['dest'])
+                        kwargs['dest'] = 'action_kwarg_' + kwargs['dest']
                 else:
-                    action_kwargs.append(kwargs['dest'])
-                    kwargs['dest'] = 'action_kwarg_' + kwargs['dest']
+                    action_kwargs.append(args[0])
+                    args = ['action_kwarg_' + arg for arg in args]
 
                 parser.add_argument(*args, **kwargs)
 
@@ -149,7 +184,7 @@ def get_action_fn():
 
     # call the action with the remaining arguments
     # check arguments
-    missing = utils.validate_args(fn, *fn_args, **fn_kwargs)
+    missing = validate_args(fn, *fn_args, **fn_kwargs)
     if missing:
         # NOTE(mikal): this isn't the most helpful error message ever. It is
         # long, and tells you a lot of things you probably don't want to know

@@ -19,6 +19,8 @@
 #    under the License.
 #
 
+import os
+
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import units
@@ -27,8 +29,7 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
-from nova.virt.libvirt import utils
+from nova import utils
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -62,11 +63,11 @@ def create_volume(vg, lv, size, sparse=False):
         preallocated_space = 64 * units.Mi
         check_size(vg, lv, preallocated_space)
         if free_space < size:
-            LOG.warning(_LW('Volume group %(vg)s will not be able'
-                         ' to hold sparse volume %(lv)s.'
-                         ' Virtual volume size is %(size)d bytes,'
-                         ' but free space on volume group is'
-                         ' only %(free_space)db.'),
+            LOG.warning('Volume group %(vg)s will not be able'
+                        ' to hold sparse volume %(lv)s.'
+                        ' Virtual volume size is %(size)d bytes,'
+                        ' but free space on volume group is'
+                        ' only %(free_space)db.',
                         {'vg': vg,
                          'free_space': free_space,
                          'size': size,
@@ -157,42 +158,11 @@ def get_volume_size(path):
         out, _err = utils.execute('blockdev', '--getsize64', path,
                                   run_as_root=True)
     except processutils.ProcessExecutionError:
-        if not utils.path_exists(path):
+        if not os.path.exists(path):
             raise exception.VolumeBDMPathNotFound(path=path)
         else:
             raise
     return int(out)
-
-
-def _zero_volume(path, volume_size):
-    """Write zeros over the specified path
-
-    :param path: logical volume path
-    :param size: number of zeros to write
-    """
-    bs = units.Mi
-    direct_flags = ('oflag=direct',)
-    sync_flags = ()
-    remaining_bytes = volume_size
-
-    # The loop efficiently writes zeros using dd,
-    # and caters for versions of dd that don't have
-    # the easier to use iflag=count_bytes option.
-    while remaining_bytes:
-        zero_blocks = remaining_bytes // bs
-        seek_blocks = (volume_size - remaining_bytes) // bs
-        zero_cmd = ('dd', 'bs=%s' % bs,
-                    'if=/dev/zero', 'of=%s' % path,
-                    'seek=%s' % seek_blocks, 'count=%s' % zero_blocks)
-        zero_cmd += direct_flags
-        zero_cmd += sync_flags
-        if zero_blocks:
-            utils.execute(*zero_cmd, run_as_root=True)
-        remaining_bytes %= bs
-        bs //= units.Ki  # Limit to 3 iterations
-        # Use O_DIRECT with initial block size and fdatasync otherwise
-        direct_flags = ()
-        sync_flags = ('conv=fdatasync',)
 
 
 def clear_volume(path):
@@ -210,20 +180,19 @@ def clear_volume(path):
     try:
         volume_size = get_volume_size(path)
     except exception.VolumeBDMPathNotFound:
-        LOG.warning(_LW('ignoring missing logical volume %(path)s'),
-                 {'path': path})
+        LOG.warning('ignoring missing logical volume %(path)s', {'path': path})
         return
 
     if volume_clear_size != 0 and volume_clear_size < volume_size:
         volume_size = volume_clear_size
 
+    cmd = ['shred']
     if volume_clear == 'zero':
-        # NOTE(p-draigbrady): we could use shred to do the zeroing
-        # with -n0 -z, however only versions >= 8.22 perform as well as dd
-        _zero_volume(path, volume_size)
-    elif volume_clear == 'shred':
-        utils.execute('shred', '-n3', '-s%d' % volume_size, path,
-                      run_as_root=True)
+        cmd.extend(['-n0', '-z'])
+    else:
+        cmd.extend(['-n3'])
+    cmd.extend(['-s%d' % volume_size, path])
+    utils.execute(*cmd, run_as_root=True)
 
 
 def remove_volumes(paths):

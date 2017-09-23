@@ -13,6 +13,7 @@
 import mock
 import six
 
+import nova
 from nova import context
 from nova import exception
 from nova import objects
@@ -70,21 +71,21 @@ def _fake_ensure_cache(ctxt):
 class TestResourceProviderNoDB(test_objects._LocalTest):
     USES_DB = False
 
-    @mock.patch('nova.objects.ResourceProvider._get_by_uuid_from_db',
-                return_value=_RESOURCE_PROVIDER_DB)
+    @mock.patch('nova.objects.resource_provider.ResourceProvider.'
+                '_get_by_uuid_from_db', return_value=_RESOURCE_PROVIDER_DB)
     def test_object_get_by_uuid(self, mock_db_get):
-        resource_provider_object = objects.ResourceProvider.get_by_uuid(
-            mock.sentinel.ctx, _RESOURCE_PROVIDER_UUID)
+        resource_provider_object = resource_provider.ResourceProvider.\
+            get_by_uuid(mock.sentinel.ctx, _RESOURCE_PROVIDER_UUID)
         self.assertEqual(_RESOURCE_PROVIDER_ID, resource_provider_object.id)
         self.assertEqual(_RESOURCE_PROVIDER_UUID,
                          resource_provider_object.uuid)
 
-    @mock.patch('nova.objects.ResourceProvider._create_in_db',
-                return_value=_RESOURCE_PROVIDER_DB)
+    @mock.patch('nova.objects.resource_provider.ResourceProvider.'
+                '_create_in_db', return_value=_RESOURCE_PROVIDER_DB)
     def test_create(self, mock_db_create):
-        obj = objects.ResourceProvider(context=self.context,
-                                       uuid=_RESOURCE_PROVIDER_UUID,
-                                       name=_RESOURCE_PROVIDER_NAME)
+        obj = resource_provider.ResourceProvider(context=self.context,
+                                                 uuid=_RESOURCE_PROVIDER_UUID,
+                                                 name=_RESOURCE_PROVIDER_NAME)
         obj.create()
         self.assertEqual(_RESOURCE_PROVIDER_UUID, obj.uuid)
         self.assertIsInstance(obj.id, int)
@@ -93,14 +94,14 @@ class TestResourceProviderNoDB(test_objects._LocalTest):
                            'name': _RESOURCE_PROVIDER_NAME})
 
     def test_create_id_fail(self):
-        obj = objects.ResourceProvider(context=self.context,
-                                       uuid=_RESOURCE_PROVIDER_UUID,
-                                       id=_RESOURCE_PROVIDER_ID)
+        obj = resource_provider.ResourceProvider(context=self.context,
+                                                 uuid=_RESOURCE_PROVIDER_UUID,
+                                                 id=_RESOURCE_PROVIDER_ID)
         self.assertRaises(exception.ObjectActionError,
                           obj.create)
 
     def test_create_no_uuid_fail(self):
-        obj = objects.ResourceProvider(context=self.context)
+        obj = resource_provider.ResourceProvider(context=self.context)
         self.assertRaises(exception.ObjectActionError,
                           obj.create)
 
@@ -110,7 +111,7 @@ class TestResourceProvider(test_objects._LocalTest):
     def test_create_in_db(self):
         updates = {'uuid': _RESOURCE_PROVIDER_UUID,
                    'name': _RESOURCE_PROVIDER_NAME}
-        db_rp = objects.ResourceProvider._create_in_db(
+        db_rp = resource_provider.ResourceProvider._create_in_db(
             self.context, updates)
         self.assertIsInstance(db_rp.id, int)
         self.assertEqual(_RESOURCE_PROVIDER_UUID, db_rp.uuid)
@@ -120,23 +121,23 @@ class TestResourceProvider(test_objects._LocalTest):
         fields = {'id': 1, 'uuid': _RESOURCE_PROVIDER_UUID,
                   'generation': 1}
         for field in fields:
-            rp = objects.ResourceProvider(context=self.context)
+            rp = resource_provider.ResourceProvider(context=self.context)
             setattr(rp, field, fields[field])
             self.assertRaises(exception.ObjectActionError, rp.save)
 
     def test_get_by_uuid_from_db(self):
-        rp = objects.ResourceProvider(context=self.context,
-                                      uuid=_RESOURCE_PROVIDER_UUID,
-                                      name=_RESOURCE_PROVIDER_NAME)
+        rp = resource_provider.ResourceProvider(context=self.context,
+                                                uuid=_RESOURCE_PROVIDER_UUID,
+                                                name=_RESOURCE_PROVIDER_NAME)
         rp.create()
-        retrieved_rp = objects.ResourceProvider._get_by_uuid_from_db(
+        retrieved_rp = resource_provider.ResourceProvider._get_by_uuid_from_db(
             self.context, _RESOURCE_PROVIDER_UUID)
         self.assertEqual(rp.uuid, retrieved_rp.uuid)
         self.assertEqual(rp.name, retrieved_rp.name)
 
     def test_get_by_uuid_from_db_missing(self):
         self.assertRaises(exception.NotFound,
-                          objects.ResourceProvider.get_by_uuid,
+                          resource_provider.ResourceProvider.get_by_uuid,
                           self.context, uuids.missing)
 
 
@@ -145,20 +146,20 @@ class TestInventoryNoDB(test_objects._LocalTest):
 
     @mock.patch('nova.objects.resource_provider._ensure_rc_cache',
             side_effect=_fake_ensure_cache)
-    @mock.patch('nova.objects.Inventory._create_in_db',
+    @mock.patch('nova.objects.resource_provider.Inventory._create_in_db',
                 return_value=_INVENTORY_DB)
     def test_create(self, mock_db_create, mock_ensure_cache):
-        rp = objects.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
-                                      uuid=_RESOURCE_PROVIDER_UUID)
-        obj = objects.Inventory(context=self.context,
-                                resource_provider=rp,
-                                resource_class=_RESOURCE_CLASS_NAME,
-                                total=16,
-                                reserved=2,
-                                min_unit=1,
-                                max_unit=8,
-                                step_size=1,
-                                allocation_ratio=1.0)
+        rp = resource_provider.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
+                                                uuid=_RESOURCE_PROVIDER_UUID)
+        obj = resource_provider.Inventory(context=self.context,
+                                          resource_provider=rp,
+                                          resource_class=_RESOURCE_CLASS_NAME,
+                                          total=16,
+                                          reserved=2,
+                                          min_unit=1,
+                                          max_unit=8,
+                                          step_size=1,
+                                          allocation_ratio=1.0)
         obj.create()
         self.assertEqual(_INVENTORY_ID, obj.id)
         expected = dict(_INVENTORY_DB)
@@ -167,12 +168,12 @@ class TestInventoryNoDB(test_objects._LocalTest):
 
     @mock.patch('nova.objects.resource_provider._ensure_rc_cache',
             side_effect=_fake_ensure_cache)
-    @mock.patch('nova.objects.Inventory._update_in_db',
+    @mock.patch('nova.objects.resource_provider.Inventory._update_in_db',
                 return_value=_INVENTORY_DB)
     def test_save(self, mock_db_save, mock_ensure_cache):
-        obj = objects.Inventory(context=self.context,
-                                id=_INVENTORY_ID,
-                                reserved=4)
+        obj = resource_provider.Inventory(context=self.context,
+                                          id=_INVENTORY_ID,
+                                          reserved=4)
         obj.save()
         mock_db_save.assert_called_once_with(self.context,
                                              _INVENTORY_ID,
@@ -180,7 +181,8 @@ class TestInventoryNoDB(test_objects._LocalTest):
 
     @mock.patch('nova.objects.resource_provider._ensure_rc_cache',
             side_effect=_fake_ensure_cache)
-    @mock.patch('nova.objects.InventoryList._get_all_by_resource_provider')
+    @mock.patch('nova.objects.resource_provider.InventoryList.'
+                '_get_all_by_resource_provider')
     def test_get_all_by_resource_provider(self, mock_get, mock_ensure_cache):
         expected = [dict(_INVENTORY_DB,
                          resource_provider=dict(_RESOURCE_PROVIDER_DB)),
@@ -188,7 +190,8 @@ class TestInventoryNoDB(test_objects._LocalTest):
                          id=_INVENTORY_DB['id'] + 1,
                          resource_provider=dict(_RESOURCE_PROVIDER_DB))]
         mock_get.return_value = expected
-        objs = objects.InventoryList.get_all_by_resource_provider_uuid(
+        rp_inv_list = resource_provider.InventoryList
+        objs = rp_inv_list.get_all_by_resource_provider_uuid(
             self.context, _RESOURCE_PROVIDER_DB['uuid'])
         self.assertEqual(2, len(objs))
         self.assertEqual(_INVENTORY_DB['id'], objs[0].id)
@@ -197,8 +200,8 @@ class TestInventoryNoDB(test_objects._LocalTest):
     def test_non_negative_handling(self):
         # NOTE(cdent): Just checking, useless to be actually
         # comprehensive here.
-        rp = objects.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
-                                      uuid=_RESOURCE_PROVIDER_UUID)
+        rp = resource_provider.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
+                                                uuid=_RESOURCE_PROVIDER_UUID)
         kwargs = dict(resource_provider=rp,
                       resource_class=_RESOURCE_CLASS_NAME,
                       total=16,
@@ -207,16 +210,16 @@ class TestInventoryNoDB(test_objects._LocalTest):
                       max_unit=-8,
                       step_size=1,
                       allocation_ratio=1.0)
-        self.assertRaises(ValueError, objects.Inventory,
+        self.assertRaises(ValueError, resource_provider.Inventory,
                           **kwargs)
 
     def test_set_defaults(self):
-        rp = objects.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
-                                      uuid=_RESOURCE_PROVIDER_UUID)
+        rp = resource_provider.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
+                                                uuid=_RESOURCE_PROVIDER_UUID)
         kwargs = dict(resource_provider=rp,
                       resource_class=_RESOURCE_CLASS_NAME,
                       total=16)
-        inv = objects.Inventory(self.context, **kwargs)
+        inv = resource_provider.Inventory(self.context, **kwargs)
 
         inv.obj_set_defaults()
         self.assertEqual(0, inv.reserved)
@@ -226,13 +229,13 @@ class TestInventoryNoDB(test_objects._LocalTest):
         self.assertEqual(1.0, inv.allocation_ratio)
 
     def test_capacity(self):
-        rp = objects.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
-                                      uuid=_RESOURCE_PROVIDER_UUID)
+        rp = resource_provider.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
+                                                uuid=_RESOURCE_PROVIDER_UUID)
         kwargs = dict(resource_provider=rp,
                       resource_class=_RESOURCE_CLASS_NAME,
                       total=16,
                       reserved=16)
-        inv = objects.Inventory(self.context, **kwargs)
+        inv = resource_provider.Inventory(self.context, **kwargs)
         inv.obj_set_defaults()
 
         self.assertEqual(0, inv.capacity)
@@ -247,7 +250,7 @@ class TestInventory(test_objects._LocalTest):
     def _make_inventory(self, rp_uuid=None):
         uuid = rp_uuid or uuids.inventory_resource_provider
         name = uuid
-        db_rp = objects.ResourceProvider(
+        db_rp = resource_provider.ResourceProvider(
             context=self.context, uuid=uuid, name=name)
         db_rp.create()
         db_inventory = self._create_inventory_in_db(db_rp.id)
@@ -258,36 +261,36 @@ class TestInventory(test_objects._LocalTest):
                        resource_provider_id=rp_id)
         updates.pop('id')
         updates.update(records)
-        return objects.Inventory._create_in_db(
+        return resource_provider.Inventory._create_in_db(
             self.context, updates)
 
     def test_create_in_db(self):
         updates = dict(_INVENTORY_DB)
         updates.pop('id')
-        db_inventory = objects.Inventory._create_in_db(
+        db_inventory = resource_provider.Inventory._create_in_db(
             self.context, updates)
         self.assertEqual(_INVENTORY_DB['total'], db_inventory.total)
 
     def test_update_in_db(self):
         db_rp, db_inventory = self._make_inventory()
-        objects.Inventory._update_in_db(self.context,
-                                        db_inventory.id,
-                                        {'total': 32})
-        inventories = objects.InventoryList.\
+        resource_provider.Inventory._update_in_db(self.context,
+                                                  db_inventory.id,
+                                                  {'total': 32})
+        inventories = resource_provider.InventoryList.\
             get_all_by_resource_provider_uuid(self.context, db_rp.uuid)
         self.assertEqual(32, inventories[0].total)
 
     def test_update_in_db_fails_bad_id(self):
         db_rp, db_inventory = self._make_inventory()
         self.assertRaises(exception.NotFound,
-                          objects.Inventory._update_in_db,
+                          resource_provider.Inventory._update_in_db,
                           self.context, 99, {'total': 32})
 
     def test_get_all_by_resource_provider_uuid(self):
         db_rp, db_inventory = self._make_inventory()
 
         retrieved_inventories = (
-            objects.InventoryList._get_all_by_resource_provider(
+            resource_provider.InventoryList._get_all_by_resource_provider(
                 self.context, db_rp.uuid)
         )
 
@@ -296,7 +299,7 @@ class TestInventory(test_objects._LocalTest):
         self.assertEqual(db_inventory.total, retrieved_inventories[0].total)
 
         retrieved_inventories = (
-            objects.InventoryList._get_all_by_resource_provider(
+            resource_provider.InventoryList._get_all_by_resource_provider(
                 self.context, uuids.bad_rp_uuid)
         )
         self.assertEqual(0, len(retrieved_inventories))
@@ -309,9 +312,9 @@ class TestInventory(test_objects._LocalTest):
         db_rp1, db_inv1 = self._make_inventory(uuids.fake_1)
         db_rp2, db_inv2 = self._make_inventory(uuids.fake_2)
 
-        objects.Inventory._update_in_db(self.context,
-                                        db_inv2.id,
-                                        {'total': 32})
+        resource_provider.Inventory._update_in_db(self.context,
+                                                  db_inv2.id,
+                                                  {'total': 32})
 
         # Create IPV4_ADDRESS resources for each provider.
         self._create_inventory_in_db(db_rp1.id,
@@ -334,7 +337,7 @@ class TestInventory(test_objects._LocalTest):
         # that the inventory records for that resource provider uuid
         # and match expected total value.
         retrieved_inv = (
-            objects.InventoryList._get_all_by_resource_provider(
+            resource_provider.InventoryList._get_all_by_resource_provider(
                 self.context, db_rp1.uuid)
         )
         for inv in retrieved_inv:
@@ -343,7 +346,7 @@ class TestInventory(test_objects._LocalTest):
                              inv.total)
 
         retrieved_inv = (
-            objects.InventoryList._get_all_by_resource_provider(
+            resource_provider.InventoryList._get_all_by_resource_provider(
                 self.context, db_rp2.uuid)
         )
 
@@ -358,28 +361,28 @@ class TestInventory(test_objects._LocalTest):
         inventory_dict.pop('resource_provider_id')
         inventory_dict.pop('resource_class_id')
         inventory_dict['resource_class'] = _RESOURCE_CLASS_NAME
-        inventory = objects.Inventory(context=self.context,
-                                      **inventory_dict)
+        inventory = resource_provider.Inventory(context=self.context,
+                                                **inventory_dict)
         error = self.assertRaises(exception.ObjectActionError,
                                   inventory.create)
         self.assertIn('resource_provider required', str(error))
 
     def test_create_requires_created_resource_provider(self):
-        rp = objects.ResourceProvider(
+        rp = resource_provider.ResourceProvider(
             context=self.context, uuid=uuids.inventory_resource_provider)
         inventory_dict = dict(_INVENTORY_DB)
         inventory_dict.pop('id')
         inventory_dict.pop('resource_provider_id')
         inventory_dict.pop('resource_class_id')
         inventory_dict['resource_provider'] = rp
-        inventory = objects.Inventory(context=self.context,
-                                      **inventory_dict)
+        inventory = resource_provider.Inventory(context=self.context,
+                                                **inventory_dict)
         error = self.assertRaises(exception.ObjectActionError,
                                   inventory.create)
         self.assertIn('resource_provider required', str(error))
 
     def test_create_requires_resource_class(self):
-        rp = objects.ResourceProvider(
+        rp = resource_provider.ResourceProvider(
             context=self.context, uuid=uuids.inventory_resource_provider,
             name=_RESOURCE_PROVIDER_NAME)
         rp.create()
@@ -388,30 +391,30 @@ class TestInventory(test_objects._LocalTest):
         inventory_dict.pop('resource_provider_id')
         inventory_dict.pop('resource_class_id')
         inventory_dict['resource_provider'] = rp
-        inventory = objects.Inventory(context=self.context,
-                                      **inventory_dict)
+        inventory = resource_provider.Inventory(context=self.context,
+                                                **inventory_dict)
         error = self.assertRaises(exception.ObjectActionError,
                                   inventory.create)
         self.assertIn('resource_class required', str(error))
 
     def test_create_id_fails(self):
-        inventory = objects.Inventory(self.context, **_INVENTORY_DB)
+        inventory = resource_provider.Inventory(self.context, **_INVENTORY_DB)
         self.assertRaises(exception.ObjectActionError, inventory.create)
 
     def test_save_without_id_fails(self):
         inventory_dict = dict(_INVENTORY_DB)
         inventory_dict.pop('id')
-        inventory = objects.Inventory(self.context, **inventory_dict)
+        inventory = resource_provider.Inventory(self.context, **inventory_dict)
         self.assertRaises(exception.ObjectActionError, inventory.save)
 
     def test_find(self):
-        rp = objects.ResourceProvider(uuid=uuids.rp_uuid)
-        inv_list = objects.InventoryList(objects=[
-                objects.Inventory(
+        rp = resource_provider.ResourceProvider(uuid=uuids.rp_uuid)
+        inv_list = resource_provider.InventoryList(objects=[
+                resource_provider.Inventory(
                     resource_provider=rp,
                     resource_class=fields.ResourceClass.VCPU,
                     total=24),
-                objects.Inventory(
+                resource_provider.Inventory(
                     resource_provider=rp,
                     resource_class=fields.ResourceClass.MEMORY_MB,
                     total=10240),
@@ -434,28 +437,6 @@ class TestInventory(test_objects._LocalTest):
         # Use an invalid string...
         self.assertIsNone(inv_list.find('HOUSE'))
 
-    def test_custom_resource_raises(self):
-        """Ensure that if we send an inventory object to a backversioned 1.0
-        receiver, that we raise ValueError if the inventory record contains a
-        custom (non-standardized) resource class.
-        """
-        values = {
-            # NOTE(danms): We don't include an actual resource provider
-            # here because chained backporting of that is handled by
-            # the infrastructure and requires us to have a manifest
-            'resource_class': 'custom_resource',
-            'total': 1,
-            'reserved': 0,
-            'min_unit': 1,
-            'max_unit': 1,
-            'step_size': 1,
-            'allocation_ratio': 1.0,
-        }
-        bdm = objects.Inventory(context=self.context, **values)
-        self.assertRaises(ValueError,
-                          bdm.obj_to_primitive,
-                          target_version='1.0')
-
 
 class TestAllocation(test_objects._LocalTest):
     USES_DB = True
@@ -463,36 +444,37 @@ class TestAllocation(test_objects._LocalTest):
     @mock.patch('nova.objects.resource_provider._ensure_rc_cache',
             side_effect=_fake_ensure_cache)
     def test_create(self, mock_ensure_cache):
-        rp = objects.ResourceProvider(context=self.context,
-                                      uuid=_RESOURCE_PROVIDER_UUID,
-                                      name=_RESOURCE_PROVIDER_NAME)
+        rp = resource_provider.ResourceProvider(context=self.context,
+                                                uuid=_RESOURCE_PROVIDER_UUID,
+                                                name=_RESOURCE_PROVIDER_NAME)
         rp.create()
-        inv = objects.Inventory(context=self.context,
-                                resource_provider=rp,
-                                resource_class=_RESOURCE_CLASS_NAME,
-                                total=16,
-                                reserved=2,
-                                min_unit=1,
-                                max_unit=8,
-                                step_size=1,
-                                allocation_ratio=1.0)
+        inv = resource_provider.Inventory(context=self.context,
+                                          resource_provider=rp,
+                                          resource_class=_RESOURCE_CLASS_NAME,
+                                          total=16,
+                                          reserved=2,
+                                          min_unit=1,
+                                          max_unit=8,
+                                          step_size=1,
+                                          allocation_ratio=1.0)
         inv.create()
-        obj = objects.Allocation(context=self.context,
-                                 resource_provider=rp,
-                                 resource_class=_RESOURCE_CLASS_NAME,
-                                 consumer_id=uuids.fake_instance,
-                                 used=8)
-        alloc_list = objects.AllocationList(self.context, objects=[obj])
+        obj = resource_provider.Allocation(context=self.context,
+                                           resource_provider=rp,
+                                           resource_class=_RESOURCE_CLASS_NAME,
+                                           consumer_id=uuids.fake_instance,
+                                           used=8)
+        alloc_list = resource_provider.AllocationList(self.context,
+                                                      objects=[obj])
         self.assertNotIn("id", obj)
         alloc_list.create_all()
         self.assertIn("id", obj)
 
     def test_create_with_id_fails(self):
-        rp = objects.ResourceProvider(context=self.context,
-                                      uuid=_RESOURCE_PROVIDER_UUID,
-                                      name=_RESOURCE_PROVIDER_NAME)
+        rp = resource_provider.ResourceProvider(context=self.context,
+                                                uuid=_RESOURCE_PROVIDER_UUID,
+                                                name=_RESOURCE_PROVIDER_NAME)
         rp.create()
-        inv = objects.Inventory(context=self.context,
+        inv = resource_provider.Inventory(context=self.context,
                                 resource_provider=rp,
                                 resource_class=_RESOURCE_CLASS_NAME,
                                 total=16,
@@ -502,36 +484,15 @@ class TestAllocation(test_objects._LocalTest):
                                 step_size=1,
                                 allocation_ratio=1.0)
         inv.create()
-        obj = objects.Allocation(context=self.context,
-                                 id=99,
-                                 resource_provider=rp,
-                                 resource_class=_RESOURCE_CLASS_NAME,
-                                 consumer_id=uuids.fake_instance,
-                                 used=8)
-        alloc_list = objects.AllocationList(self.context, objects=[obj])
+        obj = resource_provider.Allocation(context=self.context,
+                                           id=99,
+                                           resource_provider=rp,
+                                           resource_class=_RESOURCE_CLASS_NAME,
+                                           consumer_id=uuids.fake_instance,
+                                           used=8)
+        alloc_list = resource_provider.AllocationList(self.context,
+                                                      objects=[obj])
         self.assertRaises(exception.ObjectActionError, alloc_list.create_all)
-
-
-class TestAllocationNoDB(test_objects._LocalTest):
-    USES_DB = False
-
-    def test_custom_resource_raises(self):
-        """Ensure that if we send an inventory object to a backversioned 1.0
-        receiver, that we raise ValueError if the inventory record contains a
-        custom (non-standardized) resource class.
-        """
-        values = {
-            # NOTE(danms): We don't include an actual resource provider
-            # here because chained backporting of that is handled by
-            # the infrastructure and requires us to have a manifest
-            'resource_class': 'custom_resource',
-            'consumer_id': uuids.consumer_id,
-            'used': 1,
-        }
-        bdm = objects.Allocation(context=self.context, **values)
-        self.assertRaises(ValueError,
-                          bdm.obj_to_primitive,
-                          target_version='1.0')
 
 
 class TestAllocationListNoDB(test_objects._LocalTest):
@@ -539,29 +500,20 @@ class TestAllocationListNoDB(test_objects._LocalTest):
 
     @mock.patch('nova.objects.resource_provider._ensure_rc_cache',
             side_effect=_fake_ensure_cache)
-    @mock.patch('nova.objects.AllocationList._get_allocations_from_db',
-                return_value=[_ALLOCATION_DB])
+    @mock.patch('nova.objects.resource_provider.AllocationList.'
+                '_get_allocations_from_db', return_value=[_ALLOCATION_DB])
     def test_get_allocations(self, mock_get_allocations_from_db,
             mock_ensure_cache):
-        rp = objects.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
-                                      uuid=uuids.resource_provider)
-        allocations = objects.AllocationList.get_all_by_resource_provider_uuid(
+        rp = resource_provider.ResourceProvider(id=_RESOURCE_PROVIDER_ID,
+                                                uuid=uuids.resource_provider)
+        rp_alloc_list = resource_provider.AllocationList
+        allocations = rp_alloc_list.get_all_by_resource_provider_uuid(
             self.context, rp.uuid)
 
         self.assertEqual(1, len(allocations))
         mock_get_allocations_from_db.assert_called_once_with(
             self.context, resource_provider_uuid=uuids.resource_provider)
         self.assertEqual(_ALLOCATION_DB['used'], allocations[0].used)
-
-
-class TestUsageNoDB(test_objects._LocalTest):
-    USES_DB = False
-
-    def test_v1_1_resource_class(self):
-        usage = objects.Usage(resource_class='foo')
-        self.assertRaises(ValueError,
-                          usage.obj_to_primitive,
-                          target_version='1.0')
 
 
 class TestResourceClass(test.NoDBTestCase):
@@ -573,11 +525,23 @@ class TestResourceClass(test.NoDBTestCase):
         self.context = context.RequestContext(self.user_id, self.project_id)
 
     def test_cannot_create_with_id(self):
-        rc = objects.ResourceClass(self.context, id=1, name='CUSTOM_IRON_NFV')
+        rc = resource_provider.ResourceClass(self.context, id=1,
+                                             name='CUSTOM_IRON_NFV')
         exc = self.assertRaises(exception.ObjectActionError, rc.create)
         self.assertIn('already created', str(exc))
 
     def test_cannot_create_requires_name(self):
-        rc = objects.ResourceClass(self.context)
+        rc = resource_provider.ResourceClass(self.context)
         exc = self.assertRaises(exception.ObjectActionError, rc.create)
         self.assertIn('name is required', str(exc))
+
+
+class TestTraitSync(test_objects._LocalTest):
+    @mock.patch("nova.objects.resource_provider._trait_sync")
+    def test_sync_flag(self, mock_sync):
+        synced = nova.objects.resource_provider._TRAITS_SYNCED
+        self.assertFalse(synced)
+        # Sync the traits
+        nova.objects.resource_provider._ensure_trait_sync(self.context)
+        synced = nova.objects.resource_provider._TRAITS_SYNCED
+        self.assertTrue(synced)

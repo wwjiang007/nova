@@ -22,7 +22,6 @@ import six
 from nova import exception
 from nova.i18n import _
 from nova.network import model as network_model
-from nova import objects
 
 
 # Import field errors from oslo.versionedobjects
@@ -66,12 +65,14 @@ AutoTypedField = fields.AutoTypedField
 BaseEnumField = fields.BaseEnumField
 MACAddressField = fields.MACAddressField
 ListOfIntegersField = fields.ListOfIntegersField
+PCIAddressField = fields.PCIAddressField
 
 
 # NOTE(danms): These are things we need to import for some of our
 # own implementations below, our tests, or other transitional
 # bits of code. These should be removable after we finish our
-# conversion
+# conversion. So do not use these nova fields directly in any new code;
+# instead, use the oslo.versionedobjects fields.
 Enum = fields.Enum
 Field = fields.Field
 FieldType = fields.FieldType
@@ -461,6 +462,9 @@ class OSType(BaseNovaEnum):
 class ResourceClass(StringField):
     """Classes of resources provided to consumers."""
 
+    CUSTOM_NAMESPACE = 'CUSTOM_'
+    """All non-standard resource classes must begin with this string."""
+
     VCPU = 'VCPU'
     MEMORY_MB = 'MEMORY_MB'
     DISK_GB = 'DISK_GB'
@@ -484,12 +488,12 @@ class ResourceClass(StringField):
     V1_0 = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF, NUMA_SOCKET,
             NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB, IPV4_ADDRESS)
 
-    @staticmethod
-    def normalize_name(rc_name):
+    @classmethod
+    def normalize_name(cls, rc_name):
         if rc_name is None:
             return None
         norm_name = rc_name.upper()
-        cust_prefix = objects.ResourceClass.CUSTOM_NAMESPACE
+        cust_prefix = cls.CUSTOM_NAMESPACE
         norm_name = cust_prefix + norm_name
         # Replace some punctuation characters with underscores
         norm_name = re.sub('[^0-9A-Z]+', '_', norm_name)
@@ -742,6 +746,16 @@ class DiskFormat(BaseNovaEnum):
     ALL = (RBD, LVM, QCOW2, RAW, PLOOP, VHD, VMDK, VDI, ISO)
 
 
+class HypervisorDriver(BaseNovaEnum):
+    LIBVIRT = "libvirt"
+    XENAPI = "xenapi"
+    VMWAREAPI = "vmwareapi"
+    IRONIC = "ironic"
+    HYPERV = "hyperv"
+
+    ALL = (LIBVIRT, XENAPI, VMWAREAPI, IRONIC, HYPERV)
+
+
 class PointerModelType(BaseNovaEnum):
 
     USBTABLET = "usbtablet"
@@ -767,6 +781,25 @@ class NotificationPhase(BaseNovaEnum):
     ERROR = 'error'
 
     ALL = (START, END, ERROR)
+
+
+class NotificationSource(BaseNovaEnum):
+    """Represents possible nova binary service names in notification envelope.
+
+    The publisher_id field of the nova notifications consists of the name of
+    the host and the name of the service binary that emits the notification.
+    The below values are the ones that is used in every notification. Please
+    note that on the REST API the nova-api service binary is called
+    nova-osapi_compute. This is not reflected here as notifications always used
+    the name nova-api instead.
+    """
+
+    COMPUTE = 'nova-compute'
+    API = 'nova-api'
+    CONDUCTOR = 'nova-conductor'
+    SCHEDULER = 'nova-scheduler'
+
+    ALL = (API, COMPUTE, CONDUCTOR, SCHEDULER)
 
 
 class NotificationAction(BaseNovaEnum):
@@ -990,14 +1023,6 @@ class AddressBase(FieldType):
         return {'type': ['string'], 'pattern': self.PATTERN}
 
 
-class PCIAddress(AddressBase):
-    PATTERN = '[a-f0-9]{4}:[a-f0-9]{2}:[a-f0-9]{2}.[a-f0-9]'
-
-    @staticmethod
-    def coerce(obj, attr, value):
-        return AddressBase.coerce(PCIAddress, attr, value)
-
-
 class USBAddress(AddressBase):
     PATTERN = '[a-f0-9]+:[a-f0-9]+'
 
@@ -1022,8 +1047,12 @@ class IDEAddress(AddressBase):
         return AddressBase.coerce(IDEAddress, attr, value)
 
 
-class PCIAddressField(AutoTypedField):
-    AUTO_TYPE = PCIAddress()
+class XenAddress(AddressBase):
+    PATTERN = '(00[0-9]{2}00)|[1-9][0-9]+'
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        return AddressBase.coerce(XenAddress, attr, value)
 
 
 class USBAddressField(AutoTypedField):
@@ -1036,6 +1065,10 @@ class SCSIAddressField(AutoTypedField):
 
 class IDEAddressField(AutoTypedField):
     AUTO_TYPE = IDEAddress()
+
+
+class XenAddressField(AutoTypedField):
+    AUTO_TYPE = XenAddress()
 
 
 class ArchitectureField(BaseEnumField):
@@ -1158,6 +1191,10 @@ class DiskFormatField(BaseEnumField):
     AUTO_TYPE = DiskFormat()
 
 
+class HypervisorDriverField(BaseEnumField):
+    AUTO_TYPE = HypervisorDriver()
+
+
 class PointerModelField(BaseEnumField):
     AUTO_TYPE = PointerModelType()
 
@@ -1172,6 +1209,10 @@ class NotificationPhaseField(BaseEnumField):
 
 class NotificationActionField(BaseEnumField):
     AUTO_TYPE = NotificationAction()
+
+
+class NotificationSourceField(BaseEnumField):
+    AUTO_TYPE = NotificationSource()
 
 
 class InstanceStateField(BaseEnumField):

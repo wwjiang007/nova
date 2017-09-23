@@ -752,6 +752,7 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
         Index('migrations_by_host_nodes_and_status_idx', 'deleted',
               'source_compute', 'dest_compute', 'source_node', 'dest_node',
               'status'),
+        Index('migrations_uuid', 'uuid', unique=True),
     )
     id = Column(Integer, primary_key=True, nullable=False)
     # NOTE(tr3buchet): the ____compute variables are instance['host']
@@ -765,6 +766,7 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
     old_instance_type_id = Column(Integer())
     new_instance_type_id = Column(Integer())
     instance_uuid = Column(String(36), ForeignKey('instances.uuid'))
+    uuid = Column(String(36), nullable=True)
     # TODO(_cerberus_): enum
     status = Column(String(255))
     migration_type = Column(Enum('migration', 'resize', 'live-migration',
@@ -1424,7 +1426,7 @@ class PciDevice(BASE, NovaBase, models.SoftDeleteMixin):
             name="uniq_pci_devices0compute_node_id0address0deleted")
     )
     id = Column(Integer, primary_key=True)
-
+    uuid = Column(String(36))
     compute_node_id = Column(Integer, ForeignKey('compute_nodes.id'),
                              nullable=False)
 
@@ -1453,10 +1455,10 @@ class PciDevice(BASE, NovaBase, models.SoftDeleteMixin):
 
     parent_addr = Column(String(12), nullable=True)
     instance = orm.relationship(Instance, backref="pci_devices",
-                            foreign_keys=instance_uuid,
-                            primaryjoin='and_('
-                            'PciDevice.instance_uuid == Instance.uuid,'
-                            'PciDevice.deleted == 0)')
+                                foreign_keys=instance_uuid,
+                                primaryjoin='and_('
+                                'PciDevice.instance_uuid == Instance.uuid,'
+                                'PciDevice.deleted == 0)')
 
 
 class Tag(BASE, models.ModelBase):

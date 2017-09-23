@@ -20,6 +20,8 @@
 from contextlib import contextmanager
 import copy
 
+import eventlet.queue
+import eventlet.timeout
 from keystoneauth1.access import service_catalog as ksa_service_catalog
 from keystoneauth1 import plugin
 from oslo_context import context
@@ -30,6 +32,7 @@ import six
 
 from nova import exception
 from nova.i18n import _
+from nova import objects
 from nova import policy
 from nova import utils
 
@@ -38,6 +41,16 @@ LOG = logging.getLogger(__name__)
 # SIGHUP and periodically based on an expiration time. Currently, none of the
 # cell caches are purged, so neither is this one, for now.
 CELL_CACHE = {}
+# NOTE(melwitt): Used for the scatter-gather utility to indicate we timed out
+# waiting for a result from a cell.
+did_not_respond_sentinel = object()
+# NOTE(melwitt): Used for the scatter-gather utility to indicate an exception
+# was raised gathering a result from a cell.
+raised_exception_sentinel = object()
+# FIXME(danms): Keep a global cache of the cells we find the
+# first time we look. This needs to be refreshed on a timer or
+# trigger.
+CELLS = []
 
 
 class _ContextAuthPlugin(plugin.BaseAuthPlugin):
@@ -75,9 +88,8 @@ class RequestContext(context.RequestContext):
 
     def __init__(self, user_id=None, project_id=None, is_admin=None,
                  read_deleted="no", remote_address=None, timestamp=None,
-                 quota_class=None, user_name=None, project_name=None,
-                 service_catalog=None, instance_lock_checked=False,
-                 user_auth_plugin=None, **kwargs):
+                 quota_class=None, service_catalog=None,
+                 instance_lock_checked=False, user_auth_plugin=None, **kwargs):
         """:param read_deleted: 'no' indicates deleted records are hidden,
                 'yes' indicates deleted records are visible,
                 'only' indicates that *only* deleted records are visible.
@@ -118,8 +130,6 @@ class RequestContext(context.RequestContext):
         # rs_limits turnstile pre-processor.
         # See https://lists.launchpad.net/openstack/msg12200.html
         self.quota_class = quota_class
-        self.user_name = user_name
-        self.project_name = project_name
 
         # NOTE(dheeraj): The following attributes are used by cellsv2 to store
         # connection information for connecting to the target cell.
@@ -153,25 +163,6 @@ class RequestContext(context.RequestContext):
     read_deleted = property(_get_read_deleted, _set_read_deleted,
                             _del_read_deleted)
 
-    # FIXME(dims): user_id and project_id duplicate information that is
-    # already present in the oslo_context's RequestContext. We need to
-    # get rid of them.
-    @property
-    def project_id(self):
-        return self.tenant
-
-    @project_id.setter
-    def project_id(self, value):
-        self.tenant = value
-
-    @property
-    def user_id(self):
-        return self.user
-
-    @user_id.setter
-    def user_id(self, value):
-        self.user = value
-
     def to_dict(self):
         values = super(RequestContext, self).to_dict()
         # FIXME(dims): defensive hasattr() checks need to be
@@ -204,37 +195,20 @@ class RequestContext(context.RequestContext):
 
     @classmethod
     def from_dict(cls, values):
-        return cls(
+        return super(RequestContext, cls).from_dict(
+            values,
             user_id=values.get('user_id'),
-            user=values.get('user'),
             project_id=values.get('project_id'),
-            tenant=values.get('tenant'),
-            is_admin=values.get('is_admin'),
+            # TODO(sdague): oslo.context has show_deleted, if
+            # possible, we should migrate to that in the future so we
+            # don't need to be different here.
             read_deleted=values.get('read_deleted', 'no'),
-            roles=values.get('roles'),
             remote_address=values.get('remote_address'),
             timestamp=values.get('timestamp'),
-            request_id=values.get('request_id'),
-            auth_token=values.get('auth_token'),
             quota_class=values.get('quota_class'),
-            user_name=values.get('user_name'),
-            project_name=values.get('project_name'),
             service_catalog=values.get('service_catalog'),
             instance_lock_checked=values.get('instance_lock_checked', False),
         )
-
-    @classmethod
-    def from_environ(cls, environ, **kwargs):
-        ctx = super(RequestContext, cls).from_environ(environ, **kwargs)
-
-        # the base oslo.context sets its user param and tenant param but not
-        # our user_id and project_id param so fix those up.
-        if ctx.user and not ctx.user_id:
-            ctx.user_id = ctx.user
-        if ctx.tenant and not ctx.project_id:
-            ctx.project_id = ctx.tenant
-
-        return ctx
 
     def elevated(self, read_deleted=None):
         """Return a version of this context with admin flag set."""
@@ -406,22 +380,136 @@ def set_target_cell(context, cell_mapping):
 
 @contextmanager
 def target_cell(context, cell_mapping):
-    """Temporarily adds database connection information to the context
-    for communicating with the given target cell.
+    """Yields a new context with connection information for a specific cell.
 
-    This context manager makes a temporary change to the context
-    and restores it when complete.
+    This function yields a copy of the provided context, which is targeted to
+    the referenced cell for MQ and DB connections.
 
-    Passing None for cell_mapping will untarget the context temporarily.
+    Passing None for cell_mapping will yield an untargetd copy of the context.
 
     :param context: The RequestContext to add connection information
     :param cell_mapping: An objects.CellMapping object or None
     """
-    original_db_connection = context.db_connection
-    original_mq_connection = context.mq_connection
-    set_target_cell(context, cell_mapping)
-    try:
-        yield context
-    finally:
-        context.db_connection = original_db_connection
-        context.mq_connection = original_mq_connection
+    cctxt = copy.copy(context)
+    set_target_cell(cctxt, cell_mapping)
+    yield cctxt
+
+
+def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
+    """Target cells in parallel and return their results.
+
+    The first parameter in the signature of the function to call for each cell
+    should be of type RequestContext.
+
+    :param context: The RequestContext for querying cells
+    :param cell_mappings: The CellMappings to target in parallel
+    :param timeout: The total time in seconds to wait for all the results to be
+                    gathered
+    :param fn: The function to call for each cell
+    :param args: The args for the function to call for each cell, not including
+                 the RequestContext
+    :param kwargs: The kwargs for the function to call for each cell
+    :returns: A dict {cell_uuid: result} containing the joined results. The
+              did_not_respond_sentinel will be returned if a cell did not
+              respond within the timeout. The raised_exception_sentinel will
+              be returned if the call to a cell raised an exception. The
+              exception will be logged.
+    """
+    greenthreads = []
+    queue = eventlet.queue.LightQueue()
+    results = {}
+
+    def gather_result(cell_uuid, fn, *args, **kwargs):
+        try:
+            result = fn(*args, **kwargs)
+        except Exception:
+            LOG.exception('Error gathering result from cell %s', cell_uuid)
+            result = raised_exception_sentinel
+        # The queue is already synchronized.
+        queue.put((cell_uuid, result))
+
+    for cell_mapping in cell_mappings:
+        with target_cell(context, cell_mapping) as cctxt:
+            greenthreads.append((cell_mapping.uuid,
+                                 utils.spawn(gather_result, cell_mapping.uuid,
+                                             fn, cctxt, *args, **kwargs)))
+
+    with eventlet.timeout.Timeout(timeout, exception.CellTimeout):
+        try:
+            while len(results) != len(greenthreads):
+                cell_uuid, result = queue.get()
+                results[cell_uuid] = result
+        except exception.CellTimeout:
+            # NOTE(melwitt): We'll fill in did_not_respond_sentinels at the
+            # same time we kill/wait for the green threads.
+            pass
+
+    # Kill the green threads still pending and wait on those we know are done.
+    for cell_uuid, greenthread in greenthreads:
+        if cell_uuid not in results:
+            greenthread.kill()
+            results[cell_uuid] = did_not_respond_sentinel
+            LOG.warning('Timed out waiting for response from cell %s',
+                        cell_uuid)
+        else:
+            greenthread.wait()
+
+    return results
+
+
+def load_cells():
+    global CELLS
+    if not CELLS:
+        CELLS = objects.CellMappingList.get_all(get_admin_context())
+        LOG.debug('Found %(count)i cells: %(cells)s',
+                  dict(count=len(CELLS),
+                       cells=','.join([c.identity for c in CELLS])))
+
+    if not CELLS:
+        LOG.error('No cells are configured, unable to continue')
+
+
+def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
+    """Target all cells except cell0 in parallel and return their results.
+
+    The first parameter in the signature of the function to call for each cell
+    should be of type RequestContext. There is a 60 second timeout for waiting
+    on all results to be gathered.
+
+    :param context: The RequestContext for querying cells
+    :param fn: The function to call for each cell
+    :param args: The args for the function to call for each cell, not including
+                 the RequestContext
+    :param kwargs: The kwargs for the function to call for each cell
+    :returns: A dict {cell_uuid: result} containing the joined results. The
+              did_not_respond_sentinel will be returned if a cell did not
+              respond within the timeout. The raised_exception_sentinel will
+              be returned if the call to a cell raised an exception. The
+              exception will be logged.
+    """
+    load_cells()
+    cell_mappings = [cell for cell in CELLS if not cell.is_cell0()]
+    return scatter_gather_cells(context, cell_mappings, 60, fn, *args,
+                                **kwargs)
+
+
+def scatter_gather_all_cells(context, fn, *args, **kwargs):
+    """Target all cells in parallel and return their results.
+
+    The first parameter in the signature of the function to call for each cell
+    should be of type RequestContext. There is a 60 second timeout for waiting
+    on all results to be gathered.
+
+    :param context: The RequestContext for querying cells
+    :param fn: The function to call for each cell
+    :param args: The args for the function to call for each cell, not including
+                 the RequestContext
+    :param kwargs: The kwargs for the function to call for each cell
+    :returns: A dict {cell_uuid: result} containing the joined results. The
+              did_not_respond_sentinel will be returned if a cell did not
+              respond within the timeout. The raised_exception_sentinel will
+              be returned if the call to a cell raised an exception. The
+              exception will be logged.
+    """
+    load_cells()
+    return scatter_gather_cells(context, CELLS, 60, fn, *args, **kwargs)

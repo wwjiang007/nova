@@ -22,9 +22,27 @@ BASE_POLICY_NAME = 'os_compute_api:os-networks-associate'
 
 
 networks_associate_policies = [
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_API),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_API,
+        """Associate or disassociate a network from a host or project.
+
+These APIs are only available with nova-network which is deprecated.""",
+        [
+            {
+                'method': 'POST',
+                'path': '/os-networks/{network_id}/action (disassociate_host)'
+            },
+            {
+                'method': 'POST',
+                'path': '/os-networks/{network_id}/action'
+                        ' (disassociate_project)'
+            },
+            {
+                'method': 'POST',
+                'path': '/os-networks/{network_id}/action (associate_host)'
+            }
+        ]),
 ]
 
 

@@ -155,8 +155,9 @@ def get_injected_network_template(network_info, template=None,
         return
 
     tmpl_path, tmpl_file = os.path.split(template)
-    env = jinja2.Environment(loader=jinja2.FileSystemLoader(tmpl_path),
-                             trim_blocks=True)
+    env = jinja2.Environment(  # nosec
+        loader=jinja2.FileSystemLoader(tmpl_path),  # nosec
+        trim_blocks=True)
     template = env.get_template(tmpl_file)
     return template.render({'interfaces': nets,
                             'use_ipv6': ipv6_is_available,
@@ -299,6 +300,8 @@ def _get_nets(vif, subnet, version, net_num, link_id):
             'gateway': route['gateway']['address']
         }
         net_info['routes'].append(new_route)
+
+    net_info['services'] = _get_dns_services(subnet)
 
     return net_info
 

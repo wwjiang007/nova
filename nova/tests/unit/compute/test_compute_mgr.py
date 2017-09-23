@@ -12,12 +12,14 @@
 
 """Unit tests for ComputeManager()."""
 
+import contextlib
 import copy
 import datetime
 import time
 
 from cinderclient import exceptions as cinder_exception
 from cursive import exception as cursive_exception
+import ddt
 from eventlet import event as eventlet_event
 import mock
 import netaddr
@@ -25,6 +27,8 @@ import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+import six
+import testtools
 
 import nova
 from nova.compute import build_results
@@ -154,7 +158,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         specd_compute._delete_instance(specd_compute,
                                        self.context,
                                        mock_inst,
-                                       mock.Mock(),
                                        mock.Mock())
 
         methods_called = [n for n, a, k in call_tracker.mock_calls]
@@ -277,7 +280,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 vm_state=vm_states.ERROR,
                 host=self.compute.host,
                 expected_attrs=['system_metadata'])
-        quotas = mock.create_autospec(objects.Quotas, spec_set=True)
 
         with test.nested(
             mock.patch.object(self.compute, '_notify_about_instance_usage'),
@@ -290,7 +292,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             instance_obj_load_attr, instance_save, instance_destroy
         ):
             instance.info_cache = None
-            self.compute._delete_instance(self.context, instance, [], quotas)
+            self.compute._delete_instance(self.context, instance, [])
 
         mock_notify.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -379,6 +381,32 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                              supports_device_tagging=True):
             self.compute._check_device_tagging(net_req_list, bdms)
 
+    @mock.patch.object(objects.BlockDeviceMapping, 'create')
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid',
+                       return_value=objects.BlockDeviceMappingList())
+    def test_reserve_block_device_name_with_tag(self, mock_get, mock_create):
+        instance = fake_instance.fake_instance_obj(self.context)
+        with test.nested(
+                mock.patch.object(self.compute,
+                                  '_get_device_name_for_instance',
+                                  return_value='/dev/vda'),
+                mock.patch.dict(self.compute.driver.capabilities,
+                                supports_tagged_attach_volume=True)):
+            bdm = self.compute.reserve_block_device_name(
+                    self.context, instance, None, None, None, None, tag='foo')
+            self.assertEqual('foo', bdm.tag)
+
+    @mock.patch.object(compute_utils, 'add_instance_fault_from_exc')
+    def test_reserve_block_device_name_raises(self, _):
+        with mock.patch.dict(self.compute.driver.capabilities,
+                             supports_tagged_attach_volume=False):
+            self.assertRaises(exception.VolumeTaggedAttachNotSupported,
+                              self.compute.reserve_block_device_name,
+                              self.context,
+                              fake_instance.fake_instance_obj(self.context),
+                              'fake_device', 'fake_volume_id', 'fake_disk_bus',
+                              'fake_device_type', tag='foo')
+
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(time, 'sleep')
     def test_allocate_network_succeeds_after_retries(
@@ -394,7 +422,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         macs = 'fake-macs'
         sec_groups = 'fake-sec-groups'
         final_result = 'meow'
-        dhcp_options = None
 
         expected_sleep_times = [1, 2, 4, 8, 16, 30, 30, 30]
 
@@ -405,8 +432,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                                        req_networks,
                                                        macs,
                                                        sec_groups,
-                                                       is_vpn,
-                                                       dhcp_options)
+                                                       is_vpn)
 
         mock_sleep.has_calls(expected_sleep_times)
         self.assertEqual(final_result, res)
@@ -424,7 +450,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             objects=[objects.NetworkRequest(network_id='fake')])
         macs = 'fake-macs'
         sec_groups = 'fake-sec-groups'
-        dhcp_options = None
 
         with mock.patch.object(
                 self.compute.network_api, 'allocate_for_instance',
@@ -432,13 +457,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.assertRaises(test.TestingException,
                               self.compute._allocate_network_async,
                               self.context, instance, req_networks, macs,
-                              sec_groups, is_vpn, dhcp_options)
+                              sec_groups, is_vpn)
 
         mock_allocate.assert_called_once_with(
             self.context, instance, vpn=is_vpn,
             requested_networks=req_networks, macs=macs,
             security_groups=sec_groups,
-            dhcp_options=dhcp_options,
             bind_host_id=instance.get('host'))
 
     @mock.patch.object(manager.ComputeManager, '_instance_update')
@@ -454,7 +478,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             objects=[objects.NetworkRequest(network_id='fake')])
         macs = 'fake-macs'
         sec_groups = 'fake-sec-groups'
-        dhcp_options = None
         final_result = 'zhangtralon'
 
         with mock.patch.object(self.compute.network_api,
@@ -465,8 +488,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                                        req_networks,
                                                        macs,
                                                        sec_groups,
-                                                       is_vpn,
-                                                       dhcp_options)
+                                                       is_vpn)
         self.assertEqual(final_result, res)
         self.assertEqual(1, sleep.call_count)
 
@@ -477,7 +499,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             objects=[objects.NetworkRequest(network_id='none')])
         nwinfo = self.compute._allocate_network_async(
             self.context, mock.sentinel.instance, req_networks, macs=None,
-            security_groups=['default'], is_vpn=False, dhcp_options=None)
+            security_groups=['default'], is_vpn=False)
         self.assertEqual(0, len(nwinfo))
 
     @mock.patch('nova.compute.manager.ComputeManager.'
@@ -546,7 +568,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         @mock.patch.object(manager.ComputeManager,
                            '_destroy_evacuated_instances')
         @mock.patch.object(manager.ComputeManager, '_init_instance')
-        def _do_mock_calls(mock_inst_init,
+        @mock.patch.object(self.compute, '_update_scheduler_instance_info')
+        def _do_mock_calls(mock_update_scheduler, mock_inst_init,
                            mock_destroy, mock_admin_ctxt, mock_host_get,
                            mock_filter_off, mock_filter_on, mock_init_host,
                            defer_iptables_apply):
@@ -570,6 +593,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             mock_host_get.assert_called_once_with(self.context, our_host,
                                     expected_attrs=['info_cache', 'metadata'])
 
+            mock_update_scheduler.assert_called_once_with(
+                self.context, inst_list)
+
         # Test with defer_iptables_apply
         self.flags(defer_iptables_apply=True)
         _do_mock_calls(defer_iptables_apply=True)
@@ -577,6 +603,22 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         # Test without defer_iptables_apply
         self.flags(defer_iptables_apply=False)
         _do_mock_calls(defer_iptables_apply=False)
+
+    @mock.patch('nova.objects.InstanceList.get_by_host',
+                return_value=objects.InstanceList())
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_destroy_evacuated_instances')
+    @mock.patch('nova.compute.manager.ComputeManager._init_instance',
+                mock.NonCallableMock())
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_update_scheduler_instance_info', mock.NonCallableMock())
+    def test_init_host_no_instances(self, mock_destroy_evac_instances,
+                                    mock_get_by_host):
+        """Tests the case that init_host runs and there are no instances
+        on this host yet (it's brand new). Uses NonCallableMock for the
+        methods we assert should not be called.
+        """
+        self.compute.init_host()
 
     @mock.patch('nova.objects.InstanceList')
     @mock.patch('nova.objects.MigrationList.get_by_filters')
@@ -606,23 +648,27 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.compute.init_virt_events()
         self.assertFalse(mock_register.called)
 
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                'delete_allocation_for_evacuated_instance')
     @mock.patch.object(manager.ComputeManager, '_get_instances_on_driver')
     @mock.patch.object(manager.ComputeManager, 'init_virt_events')
     @mock.patch.object(context, 'get_admin_context')
     @mock.patch.object(objects.InstanceList, 'get_by_host')
     @mock.patch.object(fake_driver.FakeDriver, 'destroy')
     @mock.patch.object(fake_driver.FakeDriver, 'init_host')
+    @mock.patch('nova.utils.temporary_mutation')
     @mock.patch('nova.objects.MigrationList.get_by_filters')
     @mock.patch('nova.objects.Migration.save')
     def test_init_host_with_evacuated_instance(self, mock_save, mock_mig_get,
-            mock_init_host, mock_destroy, mock_host_get, mock_admin_ctxt,
-            mock_init_virt, mock_get_inst):
+            mock_temp_mut, mock_init_host, mock_destroy, mock_host_get,
+            mock_admin_ctxt, mock_init_virt, mock_get_inst, mock_delete_alloc):
         our_host = self.compute.host
         not_our_host = 'not-' + our_host
 
         deleted_instance = fake_instance.fake_instance_obj(
                 self.context, host=not_our_host, uuid=uuids.deleted_instance)
         migration = objects.Migration(instance_uuid=deleted_instance.uuid)
+        migration.source_node = 'fake-node'
         mock_mig_get.return_value = [migration]
         mock_admin_ctxt.return_value = self.context
         mock_host_get.return_value = objects.InstanceList()
@@ -639,7 +685,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         mock_host_get.assert_called_once_with(self.context, our_host,
                                 expected_attrs=['info_cache', 'metadata'])
         mock_init_virt.assert_called_once_with()
-        mock_get_inst.assert_called_once_with(self.context, {'deleted': False})
+        mock_temp_mut.assert_called_once_with(self.context, read_deleted='yes')
+        mock_get_inst.assert_called_once_with(self.context)
         mock_get_net.assert_called_once_with(self.context, deleted_instance)
 
         # ensure driver.destroy is called so that driver may
@@ -647,6 +694,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         mock_destroy.assert_called_once_with(self.context, deleted_instance,
                                              mock.ANY, mock.ANY, mock.ANY)
         mock_save.assert_called_once_with()
+        mock_delete_alloc.assert_called_once_with(
+            deleted_instance, migration.source_node)
 
     def test_init_instance_with_binding_failed_vif_type(self):
         # this instance will plug a 'binding_failed' vif
@@ -663,7 +712,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         with test.nested(
             mock.patch.object(context, 'get_admin_context',
                 return_value=self.context),
-            mock.patch.object(compute_utils, 'get_nw_info_for_instance',
+            mock.patch.object(objects.Instance, 'get_network_info',
                 return_value=network_model.NetworkInfo()),
             mock.patch.object(self.compute.driver, 'plug_vifs',
                 side_effect=exception.VirtualInterfacePlugException(
@@ -731,11 +780,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     @mock.patch.object(objects.Instance, 'destroy')
     @mock.patch.object(objects.Instance, 'obj_load_attr')
-    @mock.patch.object(objects.quotas.Quotas, 'commit')
-    @mock.patch.object(objects.quotas.Quotas, 'reserve')
     @mock.patch.object(objects.quotas, 'ids_from_instance')
     def test_init_instance_complete_partial_deletion(
-            self, mock_ids_from_instance, mock_reserve, mock_commit,
+            self, mock_ids_from_instance,
             mock_inst_destroy, mock_obj_load_attr, mock_get_by_instance_uuid,
             mock_bdm_destroy):
         """Test to complete deletion for instances in DELETED status but not
@@ -762,10 +809,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         self.assertEqual(vm_states.DELETED, instance.vm_state)
         self.assertFalse(instance.deleted)
 
-        deltas = {'instances': -1,
-                  'cores': -instance.flavor.vcpus,
-                  'ram': -instance.flavor.memory_mb}
-
         def fake_inst_destroy():
             instance.deleted = True
             instance.deleted_at = timeutils.utcnow()
@@ -778,12 +821,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
         # Make sure that instance.destroy method was called and
         # instance was deleted from db.
-        self.assertTrue(mock_reserve.called)
-        self.assertTrue(mock_commit.called)
         self.assertNotEqual(0, instance.deleted)
-        mock_reserve.assert_called_once_with(project_id=instance.project_id,
-                                             user_id=instance.user_id,
-                                             **deltas)
 
     @mock.patch('nova.compute.manager.LOG')
     def test_init_instance_complete_partial_deletion_raises_exception(
@@ -824,24 +862,18 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 task_state=task_states.DELETING)
 
         bdms = []
-        quotas = objects.quotas.Quotas(self.context)
 
         with test.nested(
                 mock.patch.object(objects.BlockDeviceMappingList,
                                   'get_by_instance_uuid',
                                   return_value=bdms),
                 mock.patch.object(self.compute, '_delete_instance'),
-                mock.patch.object(instance, 'obj_load_attr'),
-                mock.patch.object(self.compute, '_create_reservations',
-                                  return_value=quotas)
-        ) as (mock_get, mock_delete, mock_load, mock_create):
+                mock.patch.object(instance, 'obj_load_attr')
+        ) as (mock_get, mock_delete, mock_load):
             self.compute._init_instance(self.context, instance)
             mock_get.assert_called_once_with(self.context, instance.uuid)
-            mock_create.assert_called_once_with(self.context, instance,
-                                                instance.project_id,
-                                                instance.user_id)
             mock_delete.assert_called_once_with(self.context, instance,
-                                                bdms, mock.ANY)
+                                                bdms)
 
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -862,7 +894,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             expected_attrs=['metadata', 'system_metadata'])
 
         bdms = []
-        reservations = ['fake-resv']
 
         def _create_patch(name, attr):
             patcher = mock.patch.object(name, attr)
@@ -873,10 +904,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         mock_delete_instance = _create_patch(self.compute, '_delete_instance')
         mock_set_instance_error_state = _create_patch(
             self.compute, '_set_instance_obj_error_state')
-        mock_create_reservations = _create_patch(self.compute,
-                                                 '_create_reservations')
-
-        mock_create_reservations.return_value = reservations
         mock_get_by_instance_uuid.return_value = bdms
         mock_get_by_uuid.return_value = instance
         mock_delete_instance.side_effect = test.TestingException('test')
@@ -902,7 +929,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 expected_attrs=['system_metadata'])
 
         with test.nested(
-            mock.patch.object(compute_utils, 'get_nw_info_for_instance',
+            mock.patch.object(objects.Instance, 'get_network_info',
                               return_value=network_model.NetworkInfo()),
             mock.patch.object(self.compute.driver, 'plug_vifs'),
             mock.patch.object(self.compute.driver, 'finish_revert_migration'),
@@ -922,7 +949,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
             mock_retry.assert_called_once_with(self.context, instance,
                 power_state.SHUTDOWN)
-            mock_get_nw.assert_called_once_with(instance)
+            mock_get_nw.assert_called_once_with()
             mock_plug.assert_called_once_with(instance, [])
             mock_get_inst.assert_called_once_with(self.context, instance)
             mock_finish.assert_called_once_with(self.context, instance,
@@ -952,12 +979,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 task_state=task_states.MIGRATING)
         with test.nested(
             mock.patch.object(instance, 'save'),
-            mock.patch('nova.compute.utils.get_nw_info_for_instance',
+            mock.patch('nova.objects.Instance.get_network_info',
                        return_value=network_model.NetworkInfo())
         ) as (save, get_nw_info):
             self.compute._init_instance(self.context, instance)
             save.assert_called_once_with(expected_task_state=['migrating'])
-            get_nw_info.assert_called_once_with(instance)
+            get_nw_info.assert_called_once_with()
         self.assertIsNone(instance.task_state)
         self.assertEqual(vm_states.ACTIVE, instance.vm_state)
 
@@ -1125,28 +1152,18 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 host=self.compute.host,
                 task_state=task_states.DELETING)
         bdms = []
-        quotas = objects.quotas.Quotas(self.context)
 
         with test.nested(
                 mock.patch.object(objects.BlockDeviceMappingList,
                                   'get_by_instance_uuid',
                                   return_value=bdms),
                 mock.patch.object(self.compute, '_delete_instance'),
-                mock.patch.object(instance, 'obj_load_attr'),
-                mock.patch.object(self.compute, '_create_reservations',
-                                  return_value=quotas),
-                mock.patch.object(objects.quotas, 'ids_from_instance',
-                                  return_value=(instance.project_id,
-                                                instance.user_id))
-        ) as (mock_get, mock_delete, mock_load, mock_create, mock_ids):
+                mock.patch.object(instance, 'obj_load_attr')
+        ) as (mock_get, mock_delete, mock_load):
             self.compute._init_instance(self.context, instance)
             mock_get.assert_called_once_with(self.context, instance.uuid)
-            mock_create.assert_called_once_with(self.context, instance,
-                                                instance.project_id,
-                                                instance.user_id)
             mock_delete.assert_called_once_with(self.context, instance,
-                                                bdms, mock.ANY)
-            mock_ids.assert_called_once_with(self.context, instance)
+                                                bdms)
 
     def test_init_instance_resize_prep(self):
         instance = fake_instance.fake_instance_obj(
@@ -1160,7 +1177,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         with test.nested(
             mock.patch.object(self.compute, '_get_power_state',
                               return_value=power_state.RUNNING),
-            mock.patch.object(compute_utils, 'get_nw_info_for_instance'),
+            mock.patch.object(objects.Instance, 'get_network_info'),
             mock.patch.object(instance, 'save', autospec=True)
         ) as (mock_get_power_state, mock_nw_info, mock_instance_save):
             self.compute._init_instance(self.context, instance)
@@ -1168,7 +1185,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.assertIsNone(instance.task_state)
 
     @mock.patch('nova.context.RequestContext.elevated')
-    @mock.patch('nova.compute.utils.get_nw_info_for_instance')
+    @mock.patch('nova.objects.Instance.get_network_info')
     @mock.patch(
         'nova.compute.manager.ComputeManager._get_instance_block_device_info')
     @mock.patch('nova.virt.driver.ComputeDriver.destroy')
@@ -1195,7 +1212,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                       action='shutdown', phase='end')])
 
     @mock.patch('nova.context.RequestContext.elevated')
-    @mock.patch('nova.compute.utils.get_nw_info_for_instance')
+    @mock.patch('nova.objects.Instance.get_network_info')
     @mock.patch(
         'nova.compute.manager.ComputeManager._get_instance_block_device_info')
     @mock.patch('nova.virt.driver.ComputeDriver.destroy')
@@ -1241,11 +1258,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             mock.patch.object(self.compute, '_get_power_state',
                                return_value=return_power_state),
             mock.patch.object(self.compute, 'reboot_instance'),
-            mock.patch.object(compute_utils, 'get_nw_info_for_instance')
+            mock.patch.object(objects.Instance, 'get_network_info')
           ) as (
             _get_power_state,
             reboot_instance,
-            get_nw_info_for_instance
+            get_network_info
           ):
             self.compute._init_instance(self.context, instance)
             call = mock.call(self.context, instance, block_device_info=None,
@@ -1313,11 +1330,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             mock.patch.object(self.compute, '_get_power_state',
                                return_value=power_state.RUNNING),
             mock.patch.object(instance, 'save', autospec=True),
-            mock.patch.object(compute_utils, 'get_nw_info_for_instance')
+            mock.patch.object(objects.Instance, 'get_network_info')
           ) as (
             _get_power_state,
             instance_save,
-            get_nw_info_for_instance
+            get_network_info
           ):
             self.compute._init_instance(self.context, instance)
             instance_save.assert_called_once_with()
@@ -1412,6 +1429,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
         self.assertEqual([x['uuid'] for x in driver_instances],
                          [x['uuid'] for x in result])
+        expected_filters = {'uuid': driver_uuids}
+        mock_instance_list.assert_called_with(self.context, expected_filters,
+                                              use_slave=True)
 
     @mock.patch('nova.objects.InstanceList.get_by_filters')
     def test_get_instances_on_driver_empty(self, mock_instance_list):
@@ -1430,7 +1450,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         # Test getting instances when driver doesn't support
         # 'list_instance_uuids'
         self.compute.host = 'host'
-        filters = {'host': self.compute.host}
+        filters = {}
 
         self.flags(instance_name_template='inst-%i')
 
@@ -1464,6 +1484,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
         self.assertEqual([x['uuid'] for x in driver_instances],
                          [x['uuid'] for x in result])
+        expected_filters = {'host': self.compute.host}
+        mock_instance_list.assert_called_with(self.context, expected_filters,
+                                              use_slave=True)
 
     def test_instance_usage_audit(self):
         instances = [objects.Instance(uuid=uuids.instance)]
@@ -1822,7 +1845,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                    {'device_name': '/dev/vdb', 'source_type': 'volume',
                     'destination_type': 'volume',
                     'instance_uuid': uuids.instance,
-                    'connection_info': '{"foo": "bar"}'})
+                    'connection_info': '{"foo": "bar"}',
+                    'volume_id': uuids.old_volume,
+                    'attachment_id': None})
 
         def fake_vol_api_roll_detaching(context, volume_id):
             self.assertTrue(uuidutils.is_uuid_like(volume_id))
@@ -1966,7 +1991,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                     'destination_type': 'volume',
                     'instance_uuid': uuids.instance,
                     'delete_on_termination': True,
-                    'connection_info': '{"foo": "bar"}'})
+                    'connection_info': '{"foo": "bar"}',
+                    'attachment_id': None})
         comp_ret = {'save_volume_id': old_volume_id}
         new_info = {"foo": "bar", "serial": old_volume_id}
         swap_volume_mock.return_value = (comp_ret, new_info)
@@ -1985,6 +2011,265 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                          'destination_type': u'volume'}
         update_bdm_mock.assert_called_once_with(mock.ANY, mock.ANY,
                                                 update_values, legacy=False)
+
+    @mock.patch.object(compute_utils, 'notify_about_volume_swap')
+    @mock.patch.object(objects.BlockDeviceMapping,
+                       'get_by_volume_and_instance')
+    @mock.patch('nova.volume.cinder.API.get')
+    @mock.patch('nova.volume.cinder.API.attachment_update')
+    @mock.patch('nova.volume.cinder.API.attachment_delete')
+    @mock.patch('nova.volume.cinder.API.migrate_volume_completion',
+                return_value={'save_volume_id': uuids.old_volume_id})
+    def test_swap_volume_with_new_attachment_id_cinder_migrate_true(
+            self, migrate_volume_completion, attachment_delete,
+            attachment_update, get_volume, get_bdm, notify_about_volume_swap):
+        """Tests a swap volume operation with a new style volume attachment
+        passed in from the compute API, and the case that Cinder initiated
+        the swap volume because of a volume retype situation. This is a happy
+        path test. Since it is a retype there is no volume size change.
+        """
+        bdm = objects.BlockDeviceMapping(
+            volume_id=uuids.old_volume_id, device_name='/dev/vda',
+            attachment_id=uuids.old_attachment_id,
+            connection_info='{"data": {}}', volume_size=1)
+        old_volume = {
+            'id': uuids.old_volume_id, 'size': 1, 'status': 'retyping'
+        }
+        new_volume = {
+            'id': uuids.new_volume_id, 'size': 1, 'status': 'reserved'
+        }
+        attachment_update.return_value = {"connection_info": {"data": {}}}
+        get_bdm.return_value = bdm
+        get_volume.side_effect = (old_volume, new_volume)
+        instance = fake_instance.fake_instance_obj(self.context)
+        with test.nested(
+            mock.patch.object(self.context, 'elevated',
+                              return_value=self.context),
+            mock.patch.object(self.compute.driver, 'get_volume_connector',
+                              return_value=mock.sentinel.connector),
+            mock.patch.object(bdm, 'save')
+        ) as (
+            mock_elevated, mock_get_volume_connector, mock_save
+        ):
+            self.compute.swap_volume(
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                instance, uuids.new_attachment_id)
+            # Assert the expected calls.
+            get_bdm.assert_called_once_with(
+                self.context, uuids.old_volume_id, instance.uuid)
+            # We updated the new attachment with the host connector.
+            attachment_update.assert_called_once_with(
+                self.context, uuids.new_attachment_id, mock.sentinel.connector)
+            # After a successful swap volume, we deleted the old attachment.
+            attachment_delete.assert_called_once_with(
+                self.context, uuids.old_attachment_id)
+            # After a successful swap volume, we tell Cinder so it can complete
+            # the retype operation.
+            migrate_volume_completion.assert_called_once_with(
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                error=False)
+            # The BDM should have been updated. Since it's a retype, the old
+            # volume ID is returned from Cinder so that's what goes into the
+            # BDM but the new attachment ID is saved.
+            mock_save.assert_called_once_with()
+            self.assertEqual(uuids.old_volume_id, bdm.volume_id)
+            self.assertEqual(uuids.new_attachment_id, bdm.attachment_id)
+            self.assertEqual(1, bdm.volume_size)
+            self.assertEqual(uuids.old_volume_id,
+                             jsonutils.loads(bdm.connection_info)['serial'])
+
+    @mock.patch.object(compute_utils, 'notify_about_volume_swap')
+    @mock.patch.object(objects.BlockDeviceMapping,
+                       'get_by_volume_and_instance')
+    @mock.patch('nova.volume.cinder.API.get')
+    @mock.patch('nova.volume.cinder.API.attachment_update')
+    @mock.patch('nova.volume.cinder.API.attachment_delete')
+    @mock.patch('nova.volume.cinder.API.migrate_volume_completion')
+    def test_swap_volume_with_new_attachment_id_cinder_migrate_false(
+            self, migrate_volume_completion, attachment_delete,
+            attachment_update, get_volume, get_bdm, notify_about_volume_swap):
+        """Tests a swap volume operation with a new style volume attachment
+        passed in from the compute API, and the case that Cinder did not
+        initiate the swap volume. This is a happy path test. Since it is not a
+        retype we also change the size.
+        """
+        bdm = objects.BlockDeviceMapping(
+            volume_id=uuids.old_volume_id, device_name='/dev/vda',
+            attachment_id=uuids.old_attachment_id,
+            connection_info='{"data": {}}')
+        old_volume = {
+            'id': uuids.old_volume_id, 'size': 1, 'status': 'detaching'
+        }
+        new_volume = {
+            'id': uuids.new_volume_id, 'size': 2, 'status': 'reserved'
+        }
+        attachment_update.return_value = {"connection_info": {"data": {}}}
+        get_bdm.return_value = bdm
+        get_volume.side_effect = (old_volume, new_volume)
+        instance = fake_instance.fake_instance_obj(self.context)
+        with test.nested(
+            mock.patch.object(self.context, 'elevated',
+                              return_value=self.context),
+            mock.patch.object(self.compute.driver, 'get_volume_connector',
+                              return_value=mock.sentinel.connector),
+            mock.patch.object(bdm, 'save')
+        ) as (
+            mock_elevated, mock_get_volume_connector, mock_save
+        ):
+            self.compute.swap_volume(
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                instance, uuids.new_attachment_id)
+            # Assert the expected calls.
+            get_bdm.assert_called_once_with(
+                self.context, uuids.old_volume_id, instance.uuid)
+            # We updated the new attachment with the host connector.
+            attachment_update.assert_called_once_with(
+                self.context, uuids.new_attachment_id, mock.sentinel.connector)
+            # After a successful swap volume, we deleted the old attachment.
+            attachment_delete.assert_called_once_with(
+                self.context, uuids.old_attachment_id)
+            # After a successful swap volume, since it was not a
+            # Cinder-initiated call, we don't call migrate_volume_completion.
+            migrate_volume_completion.assert_not_called()
+            # The BDM should have been updated. Since it's a not a retype, the
+            # volume_id is now the new volume ID.
+            mock_save.assert_called_once_with()
+            self.assertEqual(uuids.new_volume_id, bdm.volume_id)
+            self.assertEqual(uuids.new_attachment_id, bdm.attachment_id)
+            self.assertEqual(2, bdm.volume_size)
+            self.assertEqual(uuids.new_volume_id,
+                             jsonutils.loads(bdm.connection_info)['serial'])
+
+    @mock.patch.object(compute_utils, 'add_instance_fault_from_exc')
+    @mock.patch.object(compute_utils, 'notify_about_volume_swap')
+    @mock.patch.object(objects.BlockDeviceMapping,
+                       'get_by_volume_and_instance')
+    @mock.patch('nova.volume.cinder.API.get')
+    @mock.patch('nova.volume.cinder.API.attachment_update',
+                side_effect=exception.VolumeAttachmentNotFound(
+                    attachment_id=uuids.new_attachment_id))
+    @mock.patch('nova.volume.cinder.API.roll_detaching')
+    @mock.patch('nova.volume.cinder.API.attachment_delete')
+    @mock.patch('nova.volume.cinder.API.migrate_volume_completion')
+    def test_swap_volume_with_new_attachment_id_attachment_update_fails(
+            self, migrate_volume_completion, attachment_delete, roll_detaching,
+            attachment_update, get_volume, get_bdm, notify_about_volume_swap,
+            add_instance_fault_from_exc):
+        """Tests a swap volume operation with a new style volume attachment
+        passed in from the compute API, and the case that Cinder initiated
+        the swap volume because of a volume migrate situation. This is a
+        negative test where attachment_update fails.
+        """
+        bdm = objects.BlockDeviceMapping(
+            volume_id=uuids.old_volume_id, device_name='/dev/vda',
+            attachment_id=uuids.old_attachment_id,
+            connection_info='{"data": {}}')
+        old_volume = {
+            'id': uuids.old_volume_id, 'size': 1, 'status': 'migrating'
+        }
+        new_volume = {
+            'id': uuids.new_volume_id, 'size': 1, 'status': 'reserved'
+        }
+        get_bdm.return_value = bdm
+        get_volume.side_effect = (old_volume, new_volume)
+        instance = fake_instance.fake_instance_obj(self.context)
+        with test.nested(
+            mock.patch.object(self.context, 'elevated',
+                              return_value=self.context),
+            mock.patch.object(self.compute.driver, 'get_volume_connector',
+                              return_value=mock.sentinel.connector)
+        ) as (
+            mock_elevated, mock_get_volume_connector
+        ):
+            self.assertRaises(
+                exception.VolumeAttachmentNotFound, self.compute.swap_volume,
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                instance, uuids.new_attachment_id)
+            # Assert the expected calls.
+            get_bdm.assert_called_once_with(
+                self.context, uuids.old_volume_id, instance.uuid)
+            # We tried to update the new attachment with the host connector.
+            attachment_update.assert_called_once_with(
+                self.context, uuids.new_attachment_id, mock.sentinel.connector)
+            # After a failure, we rollback the detaching status of the old
+            # volume.
+            roll_detaching.assert_called_once_with(
+                self.context, uuids.old_volume_id)
+            # After a failure, we deleted the new attachment.
+            attachment_delete.assert_called_once_with(
+                self.context, uuids.new_attachment_id)
+            # After a failure for a Cinder-initiated swap volume, we called
+            # migrate_volume_completion to let Cinder know things blew up.
+            migrate_volume_completion.assert_called_once_with(
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                error=True)
+
+    @mock.patch.object(compute_utils, 'add_instance_fault_from_exc')
+    @mock.patch.object(compute_utils, 'notify_about_volume_swap')
+    @mock.patch.object(objects.BlockDeviceMapping,
+                       'get_by_volume_and_instance')
+    @mock.patch('nova.volume.cinder.API.get')
+    @mock.patch('nova.volume.cinder.API.attachment_update')
+    @mock.patch('nova.volume.cinder.API.roll_detaching')
+    @mock.patch('nova.volume.cinder.API.attachment_delete')
+    @mock.patch('nova.volume.cinder.API.migrate_volume_completion')
+    def test_swap_volume_with_new_attachment_id_driver_swap_fails(
+            self, migrate_volume_completion, attachment_delete, roll_detaching,
+            attachment_update, get_volume, get_bdm, notify_about_volume_swap,
+            add_instance_fault_from_exc):
+        """Tests a swap volume operation with a new style volume attachment
+        passed in from the compute API, and the case that Cinder did not
+        initiate the swap volume. This is a negative test where the compute
+        driver swap_volume method fails.
+        """
+        bdm = objects.BlockDeviceMapping(
+            volume_id=uuids.old_volume_id, device_name='/dev/vda',
+            attachment_id=uuids.old_attachment_id,
+            connection_info='{"data": {}}')
+        old_volume = {
+            'id': uuids.old_volume_id, 'size': 1, 'status': 'detaching'
+        }
+        new_volume = {
+            'id': uuids.new_volume_id, 'size': 2, 'status': 'reserved'
+        }
+        attachment_update.return_value = {"connection_info": {"data": {}}}
+        get_bdm.return_value = bdm
+        get_volume.side_effect = (old_volume, new_volume)
+        instance = fake_instance.fake_instance_obj(self.context)
+        with test.nested(
+            mock.patch.object(self.context, 'elevated',
+                              return_value=self.context),
+            mock.patch.object(self.compute.driver, 'get_volume_connector',
+                              return_value=mock.sentinel.connector),
+            mock.patch.object(self.compute.driver, 'swap_volume',
+                              side_effect=test.TestingException('yikes'))
+        ) as (
+            mock_elevated, mock_get_volume_connector, mock_driver_swap
+        ):
+            self.assertRaises(
+                test.TestingException, self.compute.swap_volume,
+                self.context, uuids.old_volume_id, uuids.new_volume_id,
+                instance, uuids.new_attachment_id)
+            # Assert the expected calls.
+            # The new connection_info has the new_volume_id as the serial.
+            new_cinfo = mock_driver_swap.call_args[0][1]
+            self.assertIn('serial', new_cinfo)
+            self.assertEqual(uuids.new_volume_id, new_cinfo['serial'])
+            get_bdm.assert_called_once_with(
+                self.context, uuids.old_volume_id, instance.uuid)
+            # We updated the new attachment with the host connector.
+            attachment_update.assert_called_once_with(
+                self.context, uuids.new_attachment_id, mock.sentinel.connector)
+            # After a failure, we rollback the detaching status of the old
+            # volume.
+            roll_detaching.assert_called_once_with(
+                self.context, uuids.old_volume_id)
+            # After a failed swap volume, we deleted the new attachment.
+            attachment_delete.assert_called_once_with(
+                self.context, uuids.new_attachment_id)
+            # After a failed swap volume, since it was not a
+            # Cinder-initiated call, we don't call migrate_volume_completion.
+            migrate_volume_completion.assert_not_called()
 
     @mock.patch.object(fake_driver.FakeDriver,
                        'check_can_live_migrate_source')
@@ -2163,6 +2448,45 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         self.assertEqual(event_obj, event.wait())
         self.assertEqual({}, self.compute.instance_events._events)
 
+    @mock.patch('nova.compute.manager.LOG')
+    def test_process_instance_event_deleting(self, mock_log):
+        """Tests that we don't log a warning when we get a
+        network-vif-unplugged event for an instance that's being deleted.
+        """
+        inst_obj = objects.Instance(uuid=uuids.instance,
+                                    vm_state=vm_states.ACTIVE,
+                                    task_state=task_states.DELETING)
+        event_obj = objects.InstanceExternalEvent(name='network-vif-unplugged',
+                                                  tag=uuids.port_id)
+        with mock.patch.object(self.compute.instance_events,
+                               'pop_instance_event', return_value=None):
+            self.compute._process_instance_event(inst_obj, event_obj)
+        # assert we logged at debug level
+        mock_log.debug.assert_called()
+        self.assertThat(mock_log.debug.call_args[0][0],
+                        testtools.matchers.MatchesRegex(
+                            'Received event .* for instance which is being '
+                            'deleted.'))
+
+    @mock.patch('nova.compute.manager.LOG')
+    def test_process_instance_event_unexpected_warning(self, mock_log):
+        """Tests that we log a warning when we get an unexpected event."""
+        inst_obj = objects.Instance(uuid=uuids.instance,
+                                    vm_state=vm_states.ACTIVE,
+                                    task_state=None)
+        event_obj = objects.InstanceExternalEvent(name='network-vif-unplugged',
+                                                  tag=uuids.port_id)
+        with mock.patch.object(self.compute.instance_events,
+                               'pop_instance_event', return_value=None):
+            self.compute._process_instance_event(inst_obj, event_obj)
+        # assert we logged at warning level
+        mock_log.warning.assert_called()
+        self.assertThat(mock_log.warning.call_args[0][0],
+                        testtools.matchers.MatchesRegex(
+                            'Received unexpected event .* for '
+                            'instance with vm_state .* and '
+                            'task_state .*.'))
+
     def test_process_instance_vif_deleted_event(self):
         vif1 = fake_network_cache_model.new_vif()
         vif1['id'] = '1'
@@ -2215,11 +2539,92 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
         do_test()
 
+    def test_extend_volume(self):
+        inst_obj = objects.Instance(id=3, uuid=uuids.instance)
+        connection_info = {'foo': 'bar'}
+        bdm = objects.BlockDeviceMapping(
+            source_type='volume',
+            destination_type='volume',
+            volume_id=uuids.volume_id,
+            volume_size=10,
+            instance_uuid=uuids.instance,
+            device_name='/dev/vda',
+            connection_info=jsonutils.dumps(connection_info))
+
+        @mock.patch.object(self.compute, 'volume_api')
+        @mock.patch.object(self.compute.driver, 'extend_volume')
+        @mock.patch.object(objects.BlockDeviceMapping,
+                           'get_by_volume_and_instance')
+        @mock.patch.object(objects.BlockDeviceMapping, 'save')
+        def do_test(bdm_save, bdm_get_by_vol_and_inst, extend_volume,
+                    volume_api):
+            bdm_get_by_vol_and_inst.return_value = bdm
+            volume_api.get.return_value = {'size': 20}
+
+            self.compute.extend_volume(
+                self.context, inst_obj, uuids.volume_id)
+            bdm_save.assert_called_once_with()
+            extend_volume.assert_called_once_with(
+                connection_info, inst_obj)
+
+        do_test()
+
+    def test_extend_volume_not_implemented_error(self):
+        """Tests the case where driver.extend_volume raises
+        NotImplementedError.
+        """
+        inst_obj = objects.Instance(id=3, uuid=uuids.instance)
+        connection_info = {'foo': 'bar'}
+        bdm = objects.BlockDeviceMapping(
+            source_type='volume',
+            destination_type='volume',
+            volume_id=uuids.volume_id,
+            volume_size=10,
+            instance_uuid=uuids.instance,
+            device_name='/dev/vda',
+            connection_info=jsonutils.dumps(connection_info))
+
+        @mock.patch.object(self.compute, 'volume_api')
+        @mock.patch.object(objects.BlockDeviceMapping,
+                           'get_by_volume_and_instance')
+        @mock.patch.object(objects.BlockDeviceMapping, 'save')
+        @mock.patch.object(compute_utils, 'add_instance_fault_from_exc')
+        def do_test(add_fault_mock, bdm_save, bdm_get_by_vol_and_inst,
+                    volume_api):
+            bdm_get_by_vol_and_inst.return_value = bdm
+            volume_api.get.return_value = {'size': 20}
+            self.assertRaises(
+                exception.ExtendVolumeNotSupported,
+                self.compute.extend_volume,
+                self.context, inst_obj, uuids.volume_id)
+            add_fault_mock.assert_called_once_with(
+                self.context, inst_obj, mock.ANY, mock.ANY)
+
+        with mock.patch.dict(self.compute.driver.capabilities,
+                             supports_extend_volume=False):
+            do_test()
+
+    def test_extend_volume_volume_not_found(self):
+        """Tests the case where driver.extend_volume tries to extend
+        a volume not attached to the specified instance.
+        """
+        inst_obj = objects.Instance(id=3, uuid=uuids.instance)
+
+        @mock.patch.object(objects.BlockDeviceMapping,
+                           'get_by_volume_and_instance',
+                           side_effect=exception.NotFound())
+        def do_test(bdm_get_by_vol_and_inst):
+            self.compute.extend_volume(
+                self.context, inst_obj, uuids.volume_id)
+
+        do_test()
+
     def test_external_instance_event(self):
         instances = [
             objects.Instance(id=1, uuid=uuids.instance_1),
             objects.Instance(id=2, uuid=uuids.instance_2),
-            objects.Instance(id=3, uuid=uuids.instance_3)]
+            objects.Instance(id=3, uuid=uuids.instance_3),
+            objects.Instance(id=4, uuid=uuids.instance_4)]
         events = [
             objects.InstanceExternalEvent(name='network-changed',
                                           tag='tag1',
@@ -2229,13 +2634,18 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                           tag='tag2'),
             objects.InstanceExternalEvent(name='network-vif-deleted',
                                           instance_uuid=uuids.instance_3,
-                                          tag='tag3')]
+                                          tag='tag3'),
+            objects.InstanceExternalEvent(name='volume-extended',
+                                          instance_uuid=uuids.instance_4,
+                                          tag='tag4')]
 
+        @mock.patch.object(self.compute,
+                           'extend_volume')
         @mock.patch.object(self.compute, '_process_instance_vif_deleted_event')
         @mock.patch.object(self.compute.network_api, 'get_instance_nw_info')
         @mock.patch.object(self.compute, '_process_instance_event')
         def do_test(_process_instance_event, get_instance_nw_info,
-                    _process_instance_vif_deleted_event):
+                    _process_instance_vif_deleted_event, extend_volume):
             self.compute.external_instance_event(self.context,
                                                  instances, events)
             get_instance_nw_info.assert_called_once_with(self.context,
@@ -2244,6 +2654,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                                             events[1])
             _process_instance_vif_deleted_event.assert_called_once_with(
                 self.context, instances[2], events[2].tag)
+            extend_volume.assert_called_once_with(
+                self.context, instances[3], events[3].tag)
         do_test()
 
     def test_external_instance_event_with_exception(self):
@@ -2261,7 +2673,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             objects.Instance(id=3, uuid=uuids.instance_3),
             # instance_4 doesn't have info_cache set so it will be lazy-loaded
             # and blow up with an InstanceNotFound error.
-            objects.Instance(id=4, uuid=uuids.instance_4)]
+            objects.Instance(id=4, uuid=uuids.instance_4),
+            objects.Instance(id=5, uuid=uuids.instance_5),
+        ]
         events = [
             objects.InstanceExternalEvent(name='network-changed',
                                           tag='tag1',
@@ -2275,10 +2689,17 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             objects.InstanceExternalEvent(name='network-vif-deleted',
                                           instance_uuid=uuids.instance_4,
                                           tag='tag4'),
+            objects.InstanceExternalEvent(name='volume-extended',
+                                          instance_uuid=uuids.instance_5,
+                                          tag='tag5'),
         ]
 
         # Make sure all the four events are handled despite the exceptions in
-        # processing events 1, 2, and 4.
+        # processing events 1, 2, 4 and 5.
+        @mock.patch.object(objects.BlockDeviceMapping,
+                           'get_by_volume_and_instance',
+                           side_effect=exception.InstanceNotFound(
+                               instance_id=uuids.instance_5))
         @mock.patch.object(instances[3], 'obj_load_attr',
                            side_effect=exception.InstanceNotFound(
                                instance_id=uuids.instance_4))
@@ -2292,7 +2713,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         @mock.patch.object(self.compute, '_process_instance_event')
         def do_test(_process_instance_event, get_instance_nw_info,
                     detach_interface, update_instance_cache_with_nw_info,
-                    obj_load_attr):
+                    obj_load_attr, bdm_get_by_vol_and_inst):
             self.compute.external_instance_event(self.context,
                                                  instances, events)
             get_instance_nw_info.assert_called_once_with(self.context,
@@ -2307,6 +2728,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             _process_instance_event.assert_called_once_with(instances[2],
                                                             events[2])
             obj_load_attr.assert_called_once_with('info_cache')
+            bdm_get_by_vol_and_inst.assert_called_once_with(
+                self.context, 'tag5', instances[4].uuid)
         do_test()
 
     def test_cancel_all_events(self):
@@ -2428,6 +2851,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             mock.patch.object(driver_bdm_volume, 'driver_detach'),
         ) as (mock_volume_api, mock_virt_driver, mock_driver_detach):
             connector = mock.Mock()
+
+            def fake_driver_detach(context, instance, volume_api, virt_driver):
+                # This is just here to validate the function signature.
+                pass
+
+            # There should be an easier way to do this with autospec...
+            mock_driver_detach.side_effect = fake_driver_detach
             mock_virt_driver.get_volume_connector.return_value = connector
             self.compute.remove_volume_connection(self.context,
                                                   uuids.volume_id, inst)
@@ -2435,9 +2865,32 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             bdm_get.assert_called_once_with(self.context, uuids.volume_id,
                                             uuids.instance_uuid)
             mock_driver_detach.assert_called_once_with(self.context, inst,
-                    connector, mock_volume_api, mock_virt_driver)
+                                                       mock_volume_api,
+                                                       mock_virt_driver)
             mock_volume_api.terminate_connection.assert_called_once_with(
                     self.context, uuids.volume_id, connector)
+
+    def test_delete_disk_metadata(self):
+        bdm = objects.BlockDeviceMapping(volume_id=uuids.volume_id, tag='foo')
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.device_metadata = objects.InstanceDeviceMetadata(
+                devices=[objects.DiskMetadata(serial=uuids.volume_id,
+                                              tag='foo')])
+        instance.save = mock.Mock()
+        self.compute._delete_disk_metadata(instance, bdm)
+        self.assertEqual(0, len(instance.device_metadata.devices))
+        instance.save.assert_called_once_with()
+
+    def test_delete_disk_metadata_no_serial(self):
+        bdm = objects.BlockDeviceMapping(tag='foo')
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.device_metadata = objects.InstanceDeviceMetadata(
+                devices=[objects.DiskMetadata(tag='foo')])
+        self.compute._delete_disk_metadata(instance, bdm)
+        # NOTE(artom) This looks weird because we haven't deleted anything, but
+        # it's normal behaviour for when DiskMetadata doesn't have serial set
+        # and we can't find it based on BlockDeviceMapping's volume_id.
+        self.assertEqual(1, len(instance.device_metadata.devices))
 
     def test_detach_volume(self):
         # TODO(lyarwood): Test DriverVolumeBlockDevice.detach in
@@ -2449,13 +2902,49 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         # ../virt/test_block_device.py
         self._test_detach_volume(destroy_bdm=False)
 
-    @mock.patch('nova.objects.BlockDeviceMapping.get_by_volume_and_instance')
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_notify_about_instance_usage')
+    @mock.patch.object(driver_bdm_volume, 'detach')
+    @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
+    @mock.patch('nova.compute.manager.ComputeManager._delete_disk_metadata')
+    def test_detach_untagged_volume_metadata_not_deleted(
+            self, mock_delete_metadata, _, __, ___):
+        inst_obj = mock.Mock()
+        fake_bdm = fake_block_device.FakeDbBlockDeviceDict(
+                {'source_type': 'volume', 'destination_type': 'volume',
+                 'volume_id': uuids.volume, 'device_name': '/dev/vdb',
+                 'connection_info': '{"test": "test"}'})
+        bdm = objects.BlockDeviceMapping(context=self.context, **fake_bdm)
+
+        self.compute._detach_volume(self.context, bdm, inst_obj,
+                                    destroy_bdm=False,
+                                    attachment_id=uuids.attachment)
+        self.assertFalse(mock_delete_metadata.called)
+
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_notify_about_instance_usage')
+    @mock.patch.object(driver_bdm_volume, 'detach')
+    @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
+    @mock.patch('nova.compute.manager.ComputeManager._delete_disk_metadata')
+    def test_detach_tagged_volume(self, mock_delete_metadata, _, __, ___):
+        inst_obj = mock.Mock()
+        fake_bdm = fake_block_device.FakeDbBlockDeviceDict(
+                {'source_type': 'volume', 'destination_type': 'volume',
+                 'volume_id': uuids.volume, 'device_name': '/dev/vdb',
+                 'connection_info': '{"test": "test"}', 'tag': 'foo'})
+        bdm = objects.BlockDeviceMapping(context=self.context, **fake_bdm)
+
+        self.compute._detach_volume(self.context, bdm, inst_obj,
+                                    destroy_bdm=False,
+                                    attachment_id=uuids.attachment)
+        mock_delete_metadata.assert_called_once_with(inst_obj, bdm)
+
     @mock.patch.object(driver_bdm_volume, 'detach')
     @mock.patch('nova.compute.manager.ComputeManager.'
                 '_notify_about_instance_usage')
     @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
     def _test_detach_volume(self, mock_notify_attach_detach, notify_inst_usage,
-                            detach, bdm_get, destroy_bdm=True):
+                            detach, destroy_bdm=True):
         # TODO(lyarwood): Test DriverVolumeBlockDevice.detach in
         # ../virt/test_block_device.py
         volume_id = uuids.volume
@@ -2469,14 +2958,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                  'volume_id': volume_id, 'device_name': '/dev/vdb',
                  'connection_info': '{"test": "test"}'})
         bdm = objects.BlockDeviceMapping(context=self.context, **fake_bdm)
-        bdm_get.return_value = bdm
 
         with test.nested(
             mock.patch.object(self.compute, 'volume_api'),
             mock.patch.object(self.compute, 'driver'),
             mock.patch.object(bdm, 'destroy'),
         ) as (volume_api, driver, bdm_destroy):
-            self.compute._detach_volume(self.context, volume_id, inst_obj,
+            self.compute._detach_volume(self.context, bdm, inst_obj,
                                         destroy_bdm=destroy_bdm,
                                         attachment_id=attachment_id)
             detach.assert_called_once_with(self.context, inst_obj,
@@ -2535,13 +3023,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         conn_info_str = '{"connector": {"host": "other-host"}}'
         self._test_detach_volume_evacuate(conn_info_str)
 
-    @mock.patch('nova.objects.BlockDeviceMapping.get_by_volume_and_instance')
     @mock.patch('nova.compute.manager.ComputeManager.'
                 '_notify_about_instance_usage')
     @mock.patch('nova.compute.utils.notify_about_volume_attach_detach')
     def _test_detach_volume_evacuate(self, conn_info_str,
                                      mock_notify_attach_detach,
-                                     notify_inst_usage, bdm_get,
+                                     notify_inst_usage,
                                      expected=None):
         """Re-usable code for detach volume evacuate test cases.
 
@@ -2561,7 +3048,6 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
          'connection_info': '{"test": "test"}'})
         bdm = objects.BlockDeviceMapping(context=self.context, **fake_bdm)
         bdm.connection_info = conn_info_str
-        bdm_get.return_value = bdm
 
         local_connector = {'host': 'local-connector-host'}
         expected_connector = local_connector if not expected else expected
@@ -2574,7 +3060,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             driver.get_volume_connector.return_value = local_connector
 
             self.compute._detach_volume(self.context,
-                                        volume_id,
+                                        bdm,
                                         instance,
                                         destroy_bdm=False)
 
@@ -2860,6 +3346,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         migration = objects.Migration(instance_uuid=instance_2.uuid)
         # Consider the migration successful
         migration.status = 'done'
+        migration.source_node = 'fake-node'
 
         with test.nested(
             mock.patch.object(self.compute, '_get_instances_on_driver',
@@ -2873,16 +3360,20 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                return_value=False),
             mock.patch.object(self.compute.driver, 'destroy'),
             mock.patch('nova.objects.MigrationList.get_by_filters'),
-            mock.patch('nova.objects.Migration.save')
+            mock.patch('nova.objects.Migration.save'),
+            mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                       'delete_allocation_for_evacuated_instance')
         ) as (_get_instances_on_driver, get_instance_nw_info,
               _get_instance_block_device_info, _is_instance_storage_shared,
-              destroy, migration_list, migration_save):
+              destroy, migration_list, migration_save, remove_allocation):
             migration_list.return_value = [migration]
             self.compute._destroy_evacuated_instances(self.context)
             # Only instance 2 should be deleted. Instance 1 is still running
             # here, but no migration from our host exists, so ignore it
             destroy.assert_called_once_with(self.context, instance_2, None,
                                             {}, True)
+            remove_allocation.assert_called_once_with(
+                instance_2, migration.source_node)
 
     @mock.patch('nova.compute.manager.ComputeManager.'
                 '_destroy_evacuated_instances')
@@ -2957,16 +3448,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
     def test_error_out_instance_on_exception_unknown_with_quotas(self,
                                                                  set_error):
         instance = fake_instance.fake_instance_obj(self.context)
-        quotas = mock.create_autospec(objects.Quotas, spec_set=True)
 
         def do_test():
             with self.compute._error_out_instance_on_exception(
-                    self.context, instance, quotas):
+                    self.context, instance):
                 raise test.TestingException('test')
 
         self.assertRaises(test.TestingException, do_test)
-        self.assertEqual(1, len(quotas.method_calls))
-        self.assertEqual(mock.call.rollback(), quotas.method_calls[0])
         set_error.assert_called_once_with(self.context, instance)
 
     def test_cleanup_volumes(self):
@@ -3138,17 +3626,19 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                                                    node=dead_node)
         instance.migration_context = None
         with test.nested(
+            mock.patch.object(self.compute, '_get_resource_tracker'),
             mock.patch.object(self.compute, '_get_compute_info'),
             mock.patch.object(self.compute, '_do_rebuild_instance_with_claim'),
             mock.patch.object(objects.Instance, 'save'),
             mock.patch.object(self.compute, '_set_migration_status')
-        ) as (mock_get, mock_rebuild, mock_save, mock_set):
+        ) as (mock_rt, mock_get, mock_rebuild, mock_save, mock_set):
             mock_get.return_value.hypervisor_hostname = 'new-node'
             self.compute.rebuild_instance(self.context, instance, None, None,
                                           None, None, None, None, True)
             mock_get.assert_called_once_with(mock.ANY, self.compute.host)
             self.assertEqual('new-node', instance.node)
             mock_set.assert_called_once_with(None, 'done')
+            mock_rt.assert_called_once_with()
 
     def test_rebuild_default_impl(self):
         def _detach(context, bdms):
@@ -3401,7 +3891,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         mock_bdm_get_by_inst.assert_called_once_with(
             self.context, instance.uuid)
         mock_delete_instance.assert_called_once_with(
-            self.context, instance, bdms, mock.ANY)
+            self.context, instance, bdms)
 
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_notify_about_instance_usage')
@@ -3461,6 +3951,62 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.context, image_id)
         # make sure nothing was logged at exception level
         mock_log.assert_not_called()
+
+    @mock.patch('nova.volume.cinder.API.attachment_delete')
+    @mock.patch('nova.volume.cinder.API.terminate_connection')
+    def test_terminate_volume_connections(self, mock_term_conn,
+                                          mock_attach_delete):
+        """Tests _terminate_volume_connections with cinder v2 style,
+        cinder v3.44 style, and non-volume BDMs.
+        """
+        bdms = objects.BlockDeviceMappingList(
+            objects=[
+                # We use two old-style BDMs to make sure we only build the
+                # connector object once.
+                objects.BlockDeviceMapping(volume_id=uuids.v2_volume_id_1,
+                                           destination_type='volume',
+                                           attachment_id=None),
+                objects.BlockDeviceMapping(volume_id=uuids.v2_volume_id_2,
+                                           destination_type='volume',
+                                           attachment_id=None),
+                objects.BlockDeviceMapping(volume_id=uuids.v3_volume_id,
+                                           destination_type='volume',
+                                           attachment_id=uuids.attach_id),
+                objects.BlockDeviceMapping(volume_id=None,
+                                           destination_type='local')
+            ])
+        fake_connector = mock.sentinel.fake_connector
+        with mock.patch.object(self.compute.driver, 'get_volume_connector',
+                               return_value=fake_connector) as connector_mock:
+            self.compute._terminate_volume_connections(
+                self.context, mock.sentinel.instance, bdms)
+        # assert we called terminate_connection twice (once per old volume bdm)
+        mock_term_conn.assert_has_calls([
+            mock.call(self.context, uuids.v2_volume_id_1, fake_connector),
+            mock.call(self.context, uuids.v2_volume_id_2, fake_connector)
+        ])
+        # assert we only build the connector once
+        connector_mock.assert_called_once_with(mock.sentinel.instance)
+        # assert we called delete_attachment once for the single new volume bdm
+        mock_attach_delete.assert_called_once_with(
+            self.context, uuids.attach_id)
+
+    def test_instance_soft_delete_notification(self):
+        inst_obj = fake_instance.fake_instance_obj(self.context,
+            vm_state=vm_states.ACTIVE)
+        with test.nested(
+            mock.patch.object(nova.compute.utils,
+                              'notify_about_instance_action'),
+            mock.patch.object(self.compute, '_notify_about_instance_usage'),
+            mock.patch.object(objects.Instance, 'save'),
+            mock.patch.object(self.compute.driver, 'soft_delete')
+        ) as (fake_notify, fake_notify_usage, fake_save, fake_soft_delete):
+            self.compute.soft_delete_instance(self.context, inst_obj, [])
+            fake_notify.assert_has_calls([
+                mock.call(self.context, inst_obj, 'fake-mini',
+                          action='soft_delete', phase='start'),
+                mock.call(self.context, inst_obj, 'fake-mini',
+                          action='soft_delete', phase='end')])
 
 
 class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
@@ -3868,6 +4414,9 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 self.block_device_mapping, self.node, self.limits, {})
         mock_clean_net.assert_called_once_with(self.context, self.instance,
                 self.requested_networks)
+        mock_clean_vol.assert_called_once_with(self.context,
+                self.instance.uuid, self.block_device_mapping,
+                raise_exc=False)
         mock_add.assert_called_once_with(self.context, self.instance,
                 mock.ANY, mock.ANY, fault_message=mock.ANY)
         mock_nil.assert_called_once_with(self.instance)
@@ -4141,13 +4690,21 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
     @mock.patch.object(fake_driver.FakeDriver, 'spawn')
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(manager.ComputeManager, '_notify_about_instance_usage')
-    def test_instance_not_found(self, mock_notify, mock_save, mock_spawn,
-                                mock_build, mock_shutdown):
-        exc = exception.InstanceNotFound(instance_id=1)
+    def _test_instance_exception(self, exc, raised_exc,
+                                 mock_notify, mock_save, mock_spawn,
+                                 mock_build, mock_shutdown):
+        """This method test the instance related InstanceNotFound
+            and reschedule on exception errors. The test cases get from
+            arguments.
+
+            :param exc: Injected exception into the code under test
+            :param exception: Raised exception in test case
+            :param result: At end the excepted state
+        """
         mock_build.return_value = self.network_info
         mock_spawn.side_effect = exc
 
-        self.assertRaises(exception.InstanceNotFound,
+        self.assertRaises(raised_exc,
                           self.compute._build_and_run_instance,
                           self.context, self.instance, self.image,
                           self.injected_files, self.admin_pass,
@@ -4161,56 +4718,28 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             mock.call(expected_task_state='block_device_mapping')])
         mock_notify.assert_has_calls([
             mock.call(self.context, self.instance, 'create.start',
-                extra_usage_info={'image_name': self.image.get('name')}),
+                      extra_usage_info={'image_name': self.image.get('name')}),
             mock.call(self.context, self.instance, 'create.error',
-                fault=exc)])
-        mock_build.assert_called_once_with(self.context, self.instance,
-            self.requested_networks, self.security_groups)
-        mock_shutdown.assert_called_once_with(self.context, self.instance,
-            self.block_device_mapping, self.requested_networks,
-            try_deallocate_networks=False)
-        mock_spawn.assert_called_once_with(self.context, self.instance,
-            test.MatchType(objects.ImageMeta), self.injected_files,
-            self.admin_pass, network_info=self.network_info,
+                      fault=exc)])
+        mock_build.assert_called_once_with(
+            self.context, self.instance, self.requested_networks,
+            self.security_groups)
+        mock_shutdown.assert_called_once_with(
+            self.context, self.instance, self.block_device_mapping,
+            self.requested_networks, try_deallocate_networks=False)
+        mock_spawn.assert_called_once_with(
+            self.context, self.instance, test.MatchType(objects.ImageMeta),
+            self.injected_files, self.admin_pass,
+            network_info=self.network_info,
             block_device_info=self.block_device_info)
 
-    @mock.patch.object(manager.ComputeManager, '_shutdown_instance')
-    @mock.patch.object(manager.ComputeManager, '_build_networks_for_instance')
-    @mock.patch.object(fake_driver.FakeDriver, 'spawn')
-    @mock.patch.object(objects.Instance, 'save')
-    @mock.patch.object(manager.ComputeManager, '_notify_about_instance_usage')
-    def test_reschedule_on_exception(self, mock_notify, mock_save,
-                                     mock_spawn, mock_build, mock_shutdown):
-        exc = test.TestingException()
-        mock_build.return_value = self.network_info
-        mock_spawn.side_effect = exc
+    def test_instance_not_found(self):
+        got_exc = exception.InstanceNotFound(instance_id=1)
+        self._test_instance_exception(got_exc, exception.InstanceNotFound)
 
-        self.assertRaises(exception.RescheduledException,
-                          self.compute._build_and_run_instance,
-                          self.context, self.instance, self.image,
-                          self.injected_files, self.admin_pass,
-                          self.requested_networks, self.security_groups,
-                          self.block_device_mapping, self.node,
-                          self.limits, self.filter_properties)
-
-        mock_save.assert_has_calls([
-            mock.call(),
-            mock.call(),
-            mock.call(expected_task_state='block_device_mapping')])
-        mock_notify.assert_has_calls([
-            mock.call(self.context, self.instance, 'create.start',
-                extra_usage_info={'image_name': self.image.get('name')}),
-            mock.call(self.context, self.instance, 'create.error',
-                fault=exc)])
-        mock_build.assert_called_once_with(self.context, self.instance,
-            self.requested_networks, self.security_groups)
-        mock_shutdown.assert_called_once_with(self.context, self.instance,
-            self.block_device_mapping, self.requested_networks,
-            try_deallocate_networks=False)
-        mock_spawn.assert_called_once_with(self.context, self.instance,
-            test.MatchType(objects.ImageMeta), self.injected_files,
-            self.admin_pass, network_info=self.network_info,
-            block_device_info=self.block_device_info)
+    def test_reschedule_on_exception(self):
+        got_exc = test.TestingException()
+        self._test_instance_exception(got_exc, exception.RescheduledException)
 
     def test_spawn_network_alloc_failure(self):
         # Because network allocation is asynchronous, failures may not present
@@ -4291,7 +4820,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                     '_shutdown_instance'),
                 mock.patch.object(self.compute,
                     '_validate_instance_group_policy'),
-                mock.patch('nova.compute.utils.notify_about_instance_action')
+                mock.patch('nova.compute.utils.notify_about_instance_create')
         ) as (spawn, save,
                 _build_networks_for_instance, _notify_about_instance_usage,
                 _shutdown_instance, _validate_instance_group_policy,
@@ -4318,9 +4847,9 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
 
             mock_notify.assert_has_calls([
                 mock.call(self.context, self.instance, 'fake-mini',
-                          action='create', phase='start'),
+                          phase='start'),
                 mock.call(self.context, self.instance, 'fake-mini',
-                          action='create', phase='error', exception=exc)])
+                          phase='error', exception=exc)])
 
             save.assert_has_calls([
                 mock.call(),
@@ -4346,13 +4875,13 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
     @mock.patch.object(manager.ComputeManager,
                        '_nil_out_instance_obj_host_and_node')
     @mock.patch.object(conductor_api.ComputeTaskAPI, 'build_instances')
-    @mock.patch.object(manager.ComputeManager, '_get_resource_tracker')
-    def test_reschedule_on_resources_unavailable(self, mock_get_resource,
+    @mock.patch.object(resource_tracker.ResourceTracker, 'instance_claim')
+    def test_reschedule_on_resources_unavailable(self, mock_claim,
                 mock_build, mock_nil, mock_save, mock_start,
                 mock_finish, mock_notify):
         reason = 'resource unavailable'
         exc = exception.ComputeResourcesUnavailable(reason=reason)
-        mock_get_resource.side_effect = exc
+        mock_claim.side_effect = exc
         self._do_build_instance_update(mock_save, reschedule_update=True)
 
         with mock.patch.object(
@@ -4370,7 +4899,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
 
         self._instance_action_events(mock_start, mock_finish)
         self._assert_build_instance_update(mock_save, reschedule_update=True)
-        mock_get_resource.assert_called_once_with()
+        mock_claim.assert_called_once_with(self.context, self.instance,
+            self.node, self.limits)
         mock_notify.assert_has_calls([
             mock.call(self.context, self.instance, 'create.start',
                 extra_usage_info= {'image_name': self.image.get('name')}),
@@ -4432,6 +4962,28 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 self.requested_networks, self.security_groups)
         mock_prep.assert_called_once_with(self.context, self.instance,
                 self.block_device_mapping)
+
+    @mock.patch('nova.virt.block_device.attach_block_devices',
+                side_effect=exception.VolumeNotCreated('oops!'))
+    def test_prep_block_device_maintain_original_error_message(self,
+                                                               mock_attach):
+        """Tests that when attach_block_devices raises an Exception, the
+        re-raised InvalidBDM has the original error message which contains
+        the actual details of the failure.
+        """
+        bdms = objects.BlockDeviceMappingList(
+            objects=[fake_block_device.fake_bdm_object(
+                self.context,
+                dict(source_type='image',
+                     destination_type='volume',
+                     boot_index=0,
+                     image_id=uuids.image_id,
+                     device_name='/dev/vda',
+                     volume_size=1))])
+        ex = self.assertRaises(exception.InvalidBDM,
+                               self.compute._prep_block_device,
+                               self.context, self.instance, bdms)
+        self.assertEqual('oops!', six.text_type(ex))
 
     @mock.patch('nova.objects.InstanceGroup.get_by_hint')
     def test_validate_policy_honors_workaround_disabled(self, mock_get):
@@ -4645,7 +5197,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 instance, self.requested_networks, self.security_groups)
 
         mock_allocate.assert_called_once_with(self.context, instance,
-                self.requested_networks, None, self.security_groups, None)
+                self.requested_networks, None, self.security_groups)
         self.assertTrue(hasattr(nw_info_obj, 'wait'), "wait must be there")
 
     @mock.patch.object(manager.ComputeManager, '_allocate_network')
@@ -4659,7 +5211,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 instance, self.requested_networks, self.security_groups)
 
         mock_allocate.assert_called_once_with(self.context, instance,
-                self.requested_networks, None, self.security_groups, None)
+                self.requested_networks, None, self.security_groups)
         self.assertTrue(hasattr(nw_info_obj, 'wait'), "wait must be there")
 
     @mock.patch.object(manager.ComputeManager, '_allocate_network')
@@ -4728,10 +5280,10 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                 self.context, mock.sentinel.instance,
                 requested_networks=requested_networks)
 
-    @mock.patch('nova.compute.utils.notify_about_instance_action')
+    @mock.patch('nova.compute.utils.notify_about_instance_create')
     @mock.patch.object(manager.ComputeManager, '_instance_update')
     def test_launched_at_in_create_end_notification(self,
-            mock_instance_update, mock_notify_instance_action):
+            mock_instance_update, mock_notify_instance_create):
 
         def fake_notify(*args, **kwargs):
             if args[2] == 'create.end':
@@ -4760,11 +5312,11 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                     mock_notify.call_count - 1]
             self.assertEqual(expected_call, create_end_call)
 
-            mock_notify_instance_action.assert_has_calls([
+            mock_notify_instance_create.assert_has_calls([
                 mock.call(self.context, self.instance, 'fake-mini',
-                          action='create', phase='start'),
+                          phase='start'),
                 mock.call(self.context, self.instance, 'fake-mini',
-                          action='create', phase='end')])
+                          phase='end')])
 
     def test_access_ip_set_when_instance_set_to_active(self):
 
@@ -4793,7 +5345,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                     mock.ANY, 'expected_task_state': 'spawning'}
             expected_call = mock.call(self.context, self.instance.uuid,
                     updates, columns_to_join=['metadata', 'system_metadata',
-                        'info_cache'])
+                        'info_cache', 'tags'])
             last_update_call = mock_db_update.call_args_list[
                 mock_db_update.call_count - 1]
             self.assertEqual(expected_call, last_update_call)
@@ -4832,7 +5384,77 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             self.assertEqual(expected_call, create_error_call)
 
 
+@ddt.ddt
+class ComputeManagerErrorsOutMigrationTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super(ComputeManagerErrorsOutMigrationTestCase, self).setUp()
+        self.context = context.RequestContext(fakes.FAKE_USER_ID,
+                                              fakes.FAKE_PROJECT_ID)
+
+        self.instance = fake_instance.fake_instance_obj(self.context)
+
+        self.migration = objects.Migration()
+        self.migration.instance_uuid = self.instance.uuid
+        self.migration.status = 'migrating'
+        self.migration.id = 0
+
+    @mock.patch.object(objects.Migration, 'save')
+    @mock.patch.object(objects.Migration, 'obj_as_admin')
+    def test_decorator(self, mock_save, mock_obj_as_admin):
+        # Tests that errors_out_migration decorator in compute manager sets
+        # migration status to 'error' when an exception is raised from
+        # decorated method
+
+        @manager.errors_out_migration
+        def fake_function(self, context, instance, migration):
+            raise test.TestingException()
+
+        mock_obj_as_admin.return_value = mock.MagicMock()
+
+        self.assertRaises(test.TestingException, fake_function,
+                          self, self.context, self.instance, self.migration)
+        self.assertEqual('error', self.migration.status)
+        mock_save.assert_called_once_with()
+        mock_obj_as_admin.assert_called_once_with()
+
+    @mock.patch.object(objects.Migration, 'save')
+    @mock.patch.object(objects.Migration, 'obj_as_admin')
+    def test_contextmanager(self, mock_save, mock_obj_as_admin):
+        # Tests that errors_out_migration_ctxt context manager in compute
+        # manager sets migration status to 'error' when an exception is raised
+        # from decorated method
+
+        def test_function():
+            with manager.errors_out_migration_ctxt(self.migration):
+                raise test.TestingException()
+
+        mock_obj_as_admin.return_value = mock.MagicMock()
+
+        self.assertRaises(test.TestingException, test_function)
+        self.assertEqual('error', self.migration.status)
+        mock_save.assert_called_once_with()
+        mock_obj_as_admin.assert_called_once_with()
+
+    @ddt.data('completed', 'finished')
+    @mock.patch.object(objects.Migration, 'save')
+    def test_status_exclusion(self, status, mock_save):
+        # Tests that errors_out_migration doesn't error out migration if the
+        # status is anything other than 'migrating' or 'post-migrating'
+        self.migration.status = status
+
+        def test_function():
+            with manager.errors_out_migration_ctxt(self.migration):
+                raise test.TestingException()
+
+        self.assertRaises(test.TestingException, test_function)
+        self.assertEqual(status, self.migration.status)
+        mock_save.assert_not_called()
+
+
 class ComputeManagerMigrationTestCase(test.NoDBTestCase):
+    class TestResizeError(Exception):
+        pass
+
     def setUp(self):
         super(ComputeManagerMigrationTestCase, self).setUp()
         self.compute = manager.ComputeManager()
@@ -4848,95 +5470,115 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
         self.useFixture(fixtures.EventReporterStub())
 
-    @mock.patch.object(objects.Migration, 'save')
-    @mock.patch.object(objects.Migration, 'obj_as_admin')
-    def test_errors_out_migration_decorator(self, mock_save,
-                                            mock_obj_as_admin):
-        # Tests that errors_out_migration decorator in compute manager
-        # sets migration status to 'error' when an exception is raised
-        # from decorated method
-        instance = fake_instance.fake_instance_obj(self.context)
-
-        migration = objects.Migration()
-        migration.instance_uuid = instance.uuid
-        migration.status = 'migrating'
-        migration.id = 0
-
-        @manager.errors_out_migration
-        def fake_function(self, context, instance, migration):
-            raise test.TestingException()
-
-        mock_obj_as_admin.return_value = mock.MagicMock()
-
-        self.assertRaises(test.TestingException, fake_function,
-                          self, self.context, instance, migration)
-        self.assertEqual('error', migration.status)
-        mock_save.assert_called_once_with()
-        mock_obj_as_admin.assert_called_once_with()
-
-    def test_finish_resize_failure(self):
+    @contextlib.contextmanager
+    def _mock_finish_resize(self):
         with test.nested(
-            mock.patch.object(self.compute, '_finish_resize',
-                              side_effect=exception.ResizeError(reason='')),
+            mock.patch.object(self.compute, '_finish_resize'),
             mock.patch.object(db, 'instance_fault_create'),
-            mock.patch.object(self.compute, '_instance_update'),
+            mock.patch.object(self.compute, '_update_resource_tracker'),
             mock.patch.object(self.instance, 'save'),
-            mock.patch.object(self.migration, 'save'),
-            mock.patch.object(self.migration, 'obj_as_admin',
-                              return_value=mock.MagicMock())
-        ) as (meth, fault_create, instance_update, instance_save,
-              migration_save, migration_obj_as_admin):
+        ) as (_finish_resize, fault_create, instance_update, instance_save):
             fault_create.return_value = (
                 test_instance_fault.fake_faults['fake-uuid'][0])
+            yield _finish_resize
+
+    def test_finish_resize_failure(self):
+        migration = mock.NonCallableMagicMock()
+        migration.status = 'post-migrating'
+
+        with self._mock_finish_resize() as _finish_resize:
+            _finish_resize.side_effect = self.TestResizeError
             self.assertRaises(
-                exception.ResizeError, self.compute.finish_resize,
+                self.TestResizeError, self.compute.finish_resize,
                 context=self.context, disk_info=[], image=self.image,
                 instance=self.instance, reservations=[],
-                migration=self.migration
+                migration=migration
             )
-            self.assertEqual("error", self.migration.status)
-            migration_save.assert_called_once_with()
-            migration_obj_as_admin.assert_called_once_with()
 
-    def test_resize_instance_failure(self):
-        self.migration.dest_host = None
+        # Assert that we set the migration to an error state
+        self.assertEqual("error", migration.status)
+
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_notify_about_instance_usage')
+    def test_finish_resize_notify_failure(self, notify):
+        migration = mock.NonCallableMagicMock()
+        migration.status = 'post-migrating'
+
+        with self._mock_finish_resize():
+            notify.side_effect = self.TestResizeError
+            self.assertRaises(
+                self.TestResizeError, self.compute.finish_resize,
+                context=self.context, disk_info=[], image=self.image,
+                instance=self.instance, reservations=[],
+                migration=migration
+            )
+
+        # Assert that we did not set the migration to an error state
+        self.assertEqual('post-migrating', migration.status)
+
+    @contextlib.contextmanager
+    def _mock_resize_instance(self):
         with test.nested(
             mock.patch.object(self.compute.driver,
-                              'migrate_disk_and_power_off',
-                              side_effect=exception.ResizeError(reason='')),
+                              'migrate_disk_and_power_off'),
             mock.patch.object(db, 'instance_fault_create'),
-            mock.patch.object(self.compute, '_instance_update'),
-            mock.patch.object(self.migration, 'save'),
-            mock.patch.object(self.migration, 'obj_as_admin',
-                              return_value=mock.MagicMock()),
-            mock.patch.object(self.compute.network_api, 'get_instance_nw_info',
-                              return_value=None),
+            mock.patch.object(self.compute, '_update_resource_tracker'),
+            mock.patch.object(self.compute, 'network_api'),
             mock.patch.object(self.instance, 'save'),
             mock.patch.object(self.compute, '_notify_about_instance_usage'),
             mock.patch.object(self.compute,
-                              '_get_instance_block_device_info',
-                              return_value=None),
+                              '_get_instance_block_device_info'),
             mock.patch.object(objects.BlockDeviceMappingList,
-                              'get_by_instance_uuid',
-                              return_value=None),
-            mock.patch.object(objects.Flavor,
-                              'get_by_id',
-                              return_value=None)
-        ) as (meth, fault_create, instance_update,
-              migration_save, migration_obj_as_admin, nw_info, save_inst,
-              notify, vol_block_info, bdm, flavor):
+                              'get_by_instance_uuid'),
+            mock.patch.object(objects.Flavor, 'get_by_id'),
+            mock.patch.object(self.compute, '_terminate_volume_connections'),
+            mock.patch.object(self.compute, 'compute_rpcapi'),
+        ) as (
+            migrate_disk_and_power_off, fault_create, instance_update,
+            network_api, save_inst, notify, vol_block_info, bdm, flavor,
+            terminate_volume_connections, compute_rpcapi
+        ):
             fault_create.return_value = (
                 test_instance_fault.fake_faults['fake-uuid'][0])
+            yield (migrate_disk_and_power_off, notify)
+
+    def test_resize_instance_failure(self):
+        migration = mock.NonCallableMagicMock()
+
+        with self._mock_resize_instance() as (
+                migrate_disk_and_power_off, notify):
+            migrate_disk_and_power_off.side_effect = self.TestResizeError
             self.assertRaises(
-                exception.ResizeError, self.compute.resize_instance,
+                self.TestResizeError, self.compute.resize_instance,
                 context=self.context, instance=self.instance, image=self.image,
-                reservations=[], migration=self.migration,
+                reservations=[], migration=migration,
                 instance_type='type', clean_shutdown=True)
-            self.assertEqual("error", self.migration.status)
-            self.assertEqual([mock.call(), mock.call()],
-                             migration_save.mock_calls)
-            self.assertEqual([mock.call(), mock.call()],
-                             migration_obj_as_admin.mock_calls)
+
+        # Assert that we set the migration to an error state
+        self.assertEqual("error", migration.status)
+
+    def test_resize_instance_notify_failure(self):
+        migration = mock.NonCallableMagicMock()
+        migration.dest_compute = None
+        migration.dest_node = None
+
+        # Raise an exception sending the end notification, which is after we
+        # cast the migration to the destination host
+        def fake_notify(context, instance, event, network_info=None):
+            if event == 'resize.end':
+                raise self.TestResizeError()
+
+        with self._mock_resize_instance() as (
+                migrate_disk_and_power_off, notify_about_instance_action):
+            notify_about_instance_action.side_effect = fake_notify
+            self.assertRaises(
+                self.TestResizeError, self.compute.resize_instance,
+                context=self.context, instance=self.instance, image=self.image,
+                reservations=[], migration=migration,
+                instance_type='type', clean_shutdown=True)
+
+        # Assert that we did not set the migration to an error state
+        self.assertEqual('post-migrating', migration.status)
 
     def _test_revert_resize_instance_destroy_disks(self, is_shared=False):
 
@@ -4992,7 +5634,7 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                                             mock.ANY, mock.ANY, not is_shared)
             mock_finish_revert.assert_called_once_with(
                     self.context, self.instance, self.migration,
-                    self.migration.source_compute, mock.ANY)
+                    self.migration.source_compute)
 
         do_test()
 
@@ -5058,8 +5700,9 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
         fake_rt.tracked_migrations[self.instance['uuid']] = (
             self.migration, None)
 
+        @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                    'drop_move_claim')
         @mock.patch('nova.compute.rpcapi.ComputeAPI.finish_revert_resize')
-        @mock.patch.object(fake_rt, '_get_instance_type', return_value=None)
         @mock.patch.object(self.instance, 'revert_migration_context')
         @mock.patch.object(self.compute.network_api, 'get_instance_nw_info')
         @mock.patch.object(self.compute, '_is_instance_storage_shared')
@@ -5086,8 +5729,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                              mock_is_instance_storage_shared,
                              mock_get_instance_nw_info,
                              mock_revert_migration_context,
-                             mock_get_itype,
-                             mock_finish_revert):
+                             mock_finish_revert,
+                             mock_drop_move_claim):
 
             self.instance.migration_context = objects.MigrationContext()
             self.migration.source_compute = self.instance['host']
@@ -5097,8 +5740,12 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                                        migration=self.migration,
                                        instance=self.instance,
                                        reservations=None)
+            mock_drop_move_claim.assert_called_once_with(self.context,
+                self.instance, self.instance.node)
             self.assertIsNotNone(self.instance.migration_context)
 
+        @mock.patch('nova.objects.Service.get_minimum_version',
+                    return_value=22)
         @mock.patch.object(self.compute, "_notify_about_instance_usage")
         @mock.patch.object(self.compute, "_set_instance_info")
         @mock.patch.object(self.instance, 'save')
@@ -5121,7 +5768,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                                     mock_mig_save,
                                     mock_inst_save,
                                     mock_set,
-                                    mock_notify):
+                                    mock_notify,
+                                    mock_version):
             self.compute.finish_revert_resize(context=self.context,
                                               instance=self.instance,
                                               reservations=None,
@@ -5258,16 +5906,24 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
     def test_rollback_live_migration_handles_dict(self):
         compute = manager.ComputeManager()
 
+        @mock.patch('nova.compute.utils.notify_about_instance_action')
         @mock.patch.object(compute.network_api, 'setup_networks_on_host')
         @mock.patch.object(compute, '_notify_about_instance_usage')
         @mock.patch.object(compute, '_live_migration_cleanup_flags')
         @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
-        def _test(mock_bdm, mock_lmcf, mock_notify, mock_nwapi):
+        def _test(mock_bdm, mock_lmcf, mock_notify, mock_nwapi,
+                  mock_notify_about_instance_action):
             mock_bdm.return_value = []
             mock_lmcf.return_value = False, False
+            mock_instance = mock.MagicMock()
             compute._rollback_live_migration(self.context,
-                                             mock.MagicMock(),
+                                             mock_instance,
                                              'foo', {})
+            mock_notify_about_instance_action.assert_has_calls([
+                mock.call(self.context, mock_instance, compute.host,
+                          action='live_migration_rollback', phase='start'),
+                mock.call(self.context, mock_instance, compute.host,
+                          action='live_migration_rollback', phase='end')])
             self.assertIsInstance(mock_lmcf.call_args_list[0][0][0],
                                   migrate_data_obj.LiveMigrateData)
 

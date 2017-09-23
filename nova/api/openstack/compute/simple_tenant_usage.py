@@ -109,11 +109,11 @@ class SimpleTenantUsageController(wsgi.Controller):
         all_instances = []
         cells = objects.CellMappingList.get_all(context)
         for cell in cells:
-            with nova_context.target_cell(context, cell):
+            with nova_context.target_cell(context, cell) as cctxt:
                 try:
                     instances = (
                         objects.InstanceList.get_active_by_window_joined(
-                            context, period_start, period_stop, tenant_id,
+                            cctxt, period_start, period_stop, tenant_id,
                             expected_attrs=['flavor'], limit=limit,
                             marker=marker))
                 except exception.MarkerNotFound:
@@ -242,7 +242,7 @@ class SimpleTenantUsageController(wsgi.Controller):
         # instance object fields and still maintain backwards compatibility
         # in the API.
         if value.utcoffset() is None:
-            value = value.replace(tzinfo=iso8601.iso8601.Utc())
+            value = value.replace(tzinfo=iso8601.UTC)
         return value
 
     def _get_datetime_range(self, req):

@@ -24,7 +24,7 @@ from oslo_vmware import pbm
 from oslo_vmware import vim_util as vutil
 
 from nova import exception
-from nova.i18n import _, _LE, _LI
+from nova.i18n import _
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
@@ -118,8 +118,8 @@ def get_datastore(session, cluster, datastore_regex=None,
                                          "get_object_property",
                                          cluster,
                                          "datastore")
-    # If there are no hosts in the cluster then an empty string is
-    # returned
+    # If there are no datastores in the cluster then an exception is
+    # raised
     if not datastore_ret:
         raise exception.DatastoreNotFound()
 
@@ -277,7 +277,7 @@ def disk_move(session, dc_ref, src_file, dst_file):
             destDatacenter=dc_ref,
             force=False)
     session._wait_for_task(move_task)
-    LOG.info(_LI("Moved virtual disk from %(src)s to %(dst)s."),
+    LOG.info("Moved virtual disk from %(src)s to %(dst)s.",
              {'src': src_file, 'dst': dst_file})
 
 
@@ -295,7 +295,7 @@ def disk_copy(session, dc_ref, src_file, dst_file):
             destDatacenter=dc_ref,
             force=False)
     session._wait_for_task(copy_disk_task)
-    LOG.info(_LI("Copied virtual disk from %(src)s to %(dst)s."),
+    LOG.info("Copied virtual disk from %(src)s to %(dst)s.",
              {'src': src_file, 'dst': dst_file})
 
 
@@ -309,7 +309,7 @@ def disk_delete(session, dc_ref, file_path):
             name=str(file_path),
             datacenter=dc_ref)
     session._wait_for_task(delete_disk_task)
-    LOG.info(_LI("Deleted virtual disk %s."), file_path)
+    LOG.info("Deleted virtual disk %s.", file_path)
 
 
 def file_move(session, dc_ref, src_file, dst_file):
@@ -451,14 +451,13 @@ def _filter_datastores_matching_storage_policy(session, data_stores,
                                if oc.obj in matching_ds]
             data_stores.objects = object_contents
             return data_stores
-    LOG.error(_LE("Unable to retrieve storage policy with name %s"),
-              storage_policy)
+    LOG.error("Unable to retrieve storage policy with name %s", storage_policy)
 
 
 def _update_datacenter_cache_from_objects(session, dcs):
     """Updates the datastore/datacenter cache."""
-    while dcs:
-        for dco in dcs.objects:
+    with vutil.WithRetrieval(session.vim, dcs) as dc_objs:
+        for dco in dc_objs:
             dc_ref = dco.obj
             ds_refs = []
             prop_dict = vm_util.propset_dict(dco.propSet)
@@ -475,7 +474,6 @@ def _update_datacenter_cache_from_objects(session, dcs):
             for ds_ref in ds_refs:
                 _DS_DC_MAPPING[ds_ref] = DcInfo(ref=dc_ref, name=name,
                                                 vmFolder=vmFolder)
-        dcs = session._call_method(vutil, 'continue_retrieval', dcs)
 
 
 def get_dc_info(session, ds_ref):

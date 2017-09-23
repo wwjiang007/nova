@@ -33,7 +33,7 @@ from oslo_vmware import vim_util as vutil
 
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova.network import model as network_model
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import vim_util
@@ -933,15 +933,24 @@ def clone_vm_spec(client_factory, location,
     return clone_spec
 
 
-def relocate_vm_spec(client_factory, datastore=None, host=None,
+def relocate_vm_spec(client_factory, res_pool=None, datastore=None, host=None,
                      disk_move_type="moveAllDiskBackingsAndAllowSharing"):
-    """Builds the VM relocation spec."""
     rel_spec = client_factory.create('ns0:VirtualMachineRelocateSpec')
     rel_spec.datastore = datastore
+    rel_spec.host = host
+    rel_spec.pool = res_pool
     rel_spec.diskMoveType = disk_move_type
-    if host:
-        rel_spec.host = host
     return rel_spec
+
+
+def relocate_vm(session, vm_ref, res_pool=None, datastore=None, host=None,
+                disk_move_type="moveAllDiskBackingsAndAllowSharing"):
+    client_factory = session.vim.client.factory
+    rel_spec = relocate_vm_spec(client_factory, res_pool, datastore, host,
+                                disk_move_type)
+    relocate_task = session._call_method(session.vim, "RelocateVM_Task",
+                                         vm_ref, spec=rel_spec)
+    session._wait_for_task(relocate_task)
 
 
 def get_machine_id_change_spec(client_factory, machine_id_str):
@@ -1054,7 +1063,12 @@ def _get_object_from_results(session, results, value, func):
 
 
 def _get_vm_ref_from_name(session, vm_name):
-    """Get reference to the VM with the name specified."""
+    """Get reference to the VM with the name specified.
+
+    This method reads all of the names of the VM's that are running
+    on the backend, then it filters locally the matching vm_name.
+    It is far more optimal to use _get_vm_ref_from_vm_uuid.
+    """
     vms = session._call_method(vim_util, "get_objects",
                 "VirtualMachine", ["name"])
     return _get_object_from_results(session, vms, vm_name,
@@ -1065,20 +1079,6 @@ def _get_vm_ref_from_name(session, vm_name):
 def get_vm_ref_from_name(session, vm_name):
     return (_get_vm_ref_from_vm_uuid(session, vm_name) or
             _get_vm_ref_from_name(session, vm_name))
-
-
-def _get_vm_ref_from_uuid(session, instance_uuid):
-    """Get reference to the VM with the uuid specified.
-
-    This method reads all of the names of the VM's that are running
-    on the backend, then it filters locally the matching
-    instance_uuid. It is far more optimal to use
-    _get_vm_ref_from_vm_uuid.
-    """
-    vms = session._call_method(vim_util, "get_objects",
-                "VirtualMachine", ["name"])
-    return _get_object_from_results(session, vms, instance_uuid,
-                                    _get_object_for_value)
 
 
 def _get_vm_ref_from_vm_uuid(session, instance_uuid):
@@ -1129,7 +1129,7 @@ def search_vm_ref_by_identifier(session, identifier):
     """
     vm_ref = (_get_vm_ref_from_vm_uuid(session, identifier) or
               _get_vm_ref_from_extraconfig(session, identifier) or
-              _get_vm_ref_from_uuid(session, identifier))
+              _get_vm_ref_from_name(session, identifier))
     return vm_ref
 
 
@@ -1280,7 +1280,7 @@ def get_all_cluster_mors(session):
             return results.objects
 
     except Exception as excep:
-        LOG.warning(_LW("Failed to get cluster references %s"), excep)
+        LOG.warning("Failed to get cluster references %s", excep)
 
 
 def get_cluster_ref_by_name(session, cluster_name):
@@ -1327,10 +1327,10 @@ def create_vm(session, instance, vm_folder, config_spec, res_pool_ref):
         # Consequently, a value which we don't recognise may in fact be valid.
         with excutils.save_and_reraise_exception():
             if config_spec.guestId not in constants.VALID_OS_TYPES:
-                LOG.warning(_LW('vmware_ostype from image is not recognised: '
-                                '\'%(ostype)s\'. An invalid os type may be '
-                                'one cause of this instance creation failure'),
-                         {'ostype': config_spec.guestId})
+                LOG.warning('vmware_ostype from image is not recognised: '
+                            '\'%(ostype)s\'. An invalid os type may be '
+                            'one cause of this instance creation failure',
+                            {'ostype': config_spec.guestId})
     LOG.debug("Created VM on the ESX host", instance=instance)
     return task_info.result
 
@@ -1344,9 +1344,9 @@ def destroy_vm(session, instance, vm_ref=None):
         destroy_task = session._call_method(session.vim, "Destroy_Task",
                                             vm_ref)
         session._wait_for_task(destroy_task)
-        LOG.info(_LI("Destroyed the VM"), instance=instance)
+        LOG.info("Destroyed the VM", instance=instance)
     except Exception:
-        LOG.exception(_LE('Destroy VM failed'), instance=instance)
+        LOG.exception(_('Destroy VM failed'), instance=instance)
 
 
 def create_virtual_disk(session, dc_ref, adapter_type, disk_type,
@@ -1598,15 +1598,12 @@ def create_folder(session, parent_folder_ref, name):
     The moref of the folder is returned.
     """
 
-    folder = _get_folder(session, parent_folder_ref, name)
-    if folder:
-        return folder
     LOG.debug("Creating folder: %(name)s. Parent ref: %(parent)s.",
               {'name': name, 'parent': parent_folder_ref.value})
     try:
         folder = session._call_method(session.vim, "CreateFolder",
                                       parent_folder_ref, name=name)
-        LOG.info(_LI("Created folder: %(name)s in parent %(parent)s."),
+        LOG.info("Created folder: %(name)s in parent %(parent)s.",
                  {'name': name, 'parent': parent_folder_ref.value})
     except vexc.DuplicateName as e:
         LOG.debug("Folder already exists: %(name)s. Parent ref: %(parent)s.",

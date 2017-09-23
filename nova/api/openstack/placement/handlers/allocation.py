@@ -12,18 +12,19 @@
 """Placement API handlers for setting and deleting allocations."""
 
 import collections
+import copy
 
-import jsonschema
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 import webob
 
+from nova.api.openstack.placement import microversion
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
-from nova import objects
+from nova.objects import resource_provider as rp_obj
 
 
 LOG = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ ALLOCATION_SCHEMA = {
     "properties": {
         "allocations": {
             "type": "array",
+            "minItems": 1,
             "items": {
                 "type": "object",
                 "properties": {
@@ -49,6 +51,7 @@ ALLOCATION_SCHEMA = {
                     },
                     "resources": {
                         "type": "object",
+                        "minProperties": 1,
                         "patternProperties": {
                             "^[0-9A-Z_]+$": {
                                 "type": "integer",
@@ -69,6 +72,15 @@ ALLOCATION_SCHEMA = {
     "required": ["allocations"],
     "additionalProperties": False
 }
+
+ALLOCATION_SCHEMA_V1_8 = copy.deepcopy(ALLOCATION_SCHEMA)
+ALLOCATION_SCHEMA_V1_8['properties']['project_id'] = {'type': 'string',
+                                                      'minLength': 1,
+                                                      'maxLength': 255}
+ALLOCATION_SCHEMA_V1_8['properties']['user_id'] = {'type': 'string',
+                                                   'minLength': 1,
+                                                   'maxLength': 255}
+ALLOCATION_SCHEMA_V1_8['required'].extend(['project_id', 'user_id'])
 
 
 def _allocations_dict(allocations, key_fetcher, resource_provider=None):
@@ -93,42 +105,26 @@ def _allocations_dict(allocations, key_fetcher, resource_provider=None):
     return result
 
 
-def _extract_allocations(body, schema):
-    """Extract allocation data from a JSON body."""
-    try:
-        data = jsonutils.loads(body)
-    except ValueError as exc:
-        raise webob.exc.HTTPBadRequest(
-            _('Malformed JSON: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
-    try:
-        jsonschema.validate(data, schema,
-                            format_checker=jsonschema.FormatChecker())
-    except jsonschema.ValidationError as exc:
-        raise webob.exc.HTTPBadRequest(
-            _('JSON does not validate: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
-    return data
-
-
 def _serialize_allocations_for_consumer(allocations):
     """Turn a list of allocations into a dict by resource provider uuid.
 
-    {'allocations':
-       RP_UUID_1: {
-           'generation': GENERATION,
-           'resources': {
-              'DISK_GB': 4,
-              'VCPU': 2
-           }
-       },
-       RP_UUID_2: {
-           'generation': GENERATION,
-           'resources': {
-              'DISK_GB': 6,
-              'VCPU': 3
-           }
-       }
+    {
+        'allocations': {
+            RP_UUID_1: {
+                'generation': GENERATION,
+                'resources': {
+                    'DISK_GB': 4,
+                    'VCPU': 2
+                }
+            },
+            RP_UUID_2: {
+                'generation': GENERATION,
+                'resources': {
+                    'DISK_GB': 6,
+                    'VCPU': 3
+                }
+            }
+        }
     }
     """
     return _allocations_dict(allocations,
@@ -169,7 +165,7 @@ def list_for_consumer(req):
     # NOTE(cdent): There is no way for a 404 to be returned here,
     # only an empty result. We do not have a way to validate a
     # consumer id.
-    allocations = objects.AllocationList.get_all_by_consumer_id(
+    allocations = rp_obj.AllocationList.get_all_by_consumer_id(
         context, consumer_id)
 
     allocations_json = jsonutils.dumps(
@@ -196,14 +192,14 @@ def list_for_resource_provider(req):
     # confirm existence of resource provider so we get a reasonable
     # 404 instead of empty list
     try:
-        resource_provider = objects.ResourceProvider.get_by_uuid(
+        resource_provider = rp_obj.ResourceProvider.get_by_uuid(
             context, uuid)
     except exception.NotFound as exc:
         raise webob.exc.HTTPNotFound(
             _("Resource provider '%(rp_uuid)s' not found: %(error)s") %
             {'rp_uuid': uuid, 'error': exc})
 
-    allocations = objects.AllocationList.get_all_by_resource_provider_uuid(
+    allocations = rp_obj.AllocationList.get_all_by_resource_provider_uuid(
         context, uuid)
 
     allocations_json = jsonutils.dumps(
@@ -216,12 +212,10 @@ def list_for_resource_provider(req):
     return req.response
 
 
-@wsgi_wrapper.PlacementWsgify
-@util.require_content('application/json')
-def set_allocations(req):
+def _set_allocations(req, schema):
     context = req.environ['placement.context']
     consumer_uuid = util.wsgi_path_item(req.environ, 'consumer_uuid')
-    data = _extract_allocations(req.body, ALLOCATION_SCHEMA)
+    data = util.extract_json(req.body, schema)
     allocation_data = data['allocations']
 
     # If the body includes an allocation for a resource provider
@@ -231,7 +225,7 @@ def set_allocations(req):
         resource_provider_uuid = allocation['resource_provider']['uuid']
 
         try:
-            resource_provider = objects.ResourceProvider.get_by_uuid(
+            resource_provider = rp_obj.ResourceProvider.get_by_uuid(
                 context, resource_provider_uuid)
         except exception.NotFound:
             raise webob.exc.HTTPBadRequest(
@@ -241,14 +235,19 @@ def set_allocations(req):
 
         resources = allocation['resources']
         for resource_class in resources:
-            allocation = objects.Allocation(
+            allocation = rp_obj.Allocation(
                 resource_provider=resource_provider,
                 consumer_id=consumer_uuid,
                 resource_class=resource_class,
                 used=resources[resource_class])
             allocation_objects.append(allocation)
 
-    allocations = objects.AllocationList(context, objects=allocation_objects)
+    allocations = rp_obj.AllocationList(
+        context,
+        objects=allocation_objects,
+        project_id=data.get('project_id'),
+        user_id=data.get('user_id'),
+    )
 
     try:
         allocations.create_all()
@@ -262,11 +261,9 @@ def set_allocations(req):
                   "%(rp_uuid)s: %(error)s") %
             {'rp_uuid': resource_provider_uuid, 'error': exc})
     except exception.InvalidInventory as exc:
-        LOG.exception("Bad inventory")
         raise webob.exc.HTTPConflict(
             _('Unable to allocate inventory: %(error)s') % {'error': exc})
     except exception.ConcurrentUpdateDetected as exc:
-        LOG.exception("Concurrent Update")
         raise webob.exc.HTTPConflict(
             _('Inventory changed while attempting to allocate: %(error)s') %
             {'error': exc})
@@ -277,11 +274,25 @@ def set_allocations(req):
 
 
 @wsgi_wrapper.PlacementWsgify
+@microversion.version_handler('1.0', '1.7')
+@util.require_content('application/json')
+def set_allocations(req):
+    return _set_allocations(req, ALLOCATION_SCHEMA)
+
+
+@wsgi_wrapper.PlacementWsgify  # noqa
+@microversion.version_handler('1.8')
+@util.require_content('application/json')
+def set_allocations(req):
+    return _set_allocations(req, ALLOCATION_SCHEMA_V1_8)
+
+
+@wsgi_wrapper.PlacementWsgify
 def delete_allocations(req):
     context = req.environ['placement.context']
     consumer_uuid = util.wsgi_path_item(req.environ, 'consumer_uuid')
 
-    allocations = objects.AllocationList.get_all_by_consumer_id(
+    allocations = rp_obj.AllocationList.get_all_by_consumer_id(
         context, consumer_uuid)
     if allocations:
         try:

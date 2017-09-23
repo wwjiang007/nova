@@ -21,7 +21,6 @@ from oslo_log import log as logging
 
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LI
 from nova import objects
 from nova.virt import hardware
 
@@ -145,9 +144,9 @@ class Claim(NopClaim):
         vcpus_limit = limits.get('vcpu')
         numa_topology_limit = limits.get('numa_topology')
 
-        LOG.info(_LI("Attempting claim on node %(node)s: "
-                     "memory %(memory_mb)d MB, "
-                     "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU"),
+        LOG.info("Attempting claim on node %(node)s: "
+                 "memory %(memory_mb)d MB, "
+                 "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU",
                  {'node': self.nodename, 'memory_mb': self.memory_mb,
                   'disk_gb': self.disk_gb, 'vcpus': self.vcpus},
                  instance=self.instance)
@@ -162,7 +161,7 @@ class Claim(NopClaim):
             raise exception.ComputeResourcesUnavailable(reason=
                     "; ".join(reasons))
 
-        LOG.info(_LI('Claim successful on node %s'), self.nodename,
+        LOG.info('Claim successful on node %s', self.nodename,
                  instance=self.instance)
 
     def _test_memory(self, resources, limit):
@@ -197,7 +196,7 @@ class Claim(NopClaim):
         if pci_requests.requests:
             stats = self.tracker.pci_tracker.stats
             if not stats.support_requests(pci_requests.requests):
-                return _('Claim pci failed.')
+                return _('Claim pci failed')
 
     def _test_numa_topology(self, resources, limit):
         host_topology = (resources.numa_topology
@@ -220,12 +219,12 @@ class Claim(NopClaim):
 
             if requested_topology and not instance_topology:
                 if pci_requests.requests:
-                    return (_("Requested instance NUMA topology together with"
-                              " requested PCI devices cannot fit the given"
-                              " host NUMA topology"))
+                    return (_("Requested instance NUMA topology together with "
+                              "requested PCI devices cannot fit the given "
+                              "host NUMA topology"))
                 else:
                     return (_("Requested instance NUMA topology cannot fit "
-                          "the given host NUMA topology"))
+                              "the given host NUMA topology"))
             elif instance_topology:
                 self.claimed_numa_topology = instance_topology
 
@@ -233,22 +232,22 @@ class Claim(NopClaim):
         """Test if the given type of resource needed for a claim can be safely
         allocated.
         """
-        LOG.info(_LI('Total %(type)s: %(total)d %(unit)s, used: %(used).02f '
-                    '%(unit)s'),
+        LOG.info('Total %(type)s: %(total)d %(unit)s, used: %(used).02f '
+                 '%(unit)s',
                   {'type': type_, 'total': total, 'unit': unit, 'used': used},
                   instance=self.instance)
 
         if limit is None:
             # treat resource as unlimited:
-            LOG.info(_LI('%(type)s limit not specified, defaulting to '
-                        'unlimited'), {'type': type_}, instance=self.instance)
+            LOG.info('%(type)s limit not specified, defaulting to unlimited',
+                     {'type': type_}, instance=self.instance)
             return
 
         free = limit - used
 
         # Oversubscribed resource policy info:
-        LOG.info(_LI('%(type)s limit: %(limit).02f %(unit)s, '
-                     'free: %(free).02f %(unit)s'),
+        LOG.info('%(type)s limit: %(limit).02f %(unit)s, '
+                 'free: %(free).02f %(unit)s',
                   {'type': type_, 'limit': limit, 'free': free, 'unit': unit},
                   instance=self.instance)
 

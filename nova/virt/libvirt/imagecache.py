@@ -32,9 +32,7 @@ from oslo_utils import encodeutils
 import six
 
 import nova.conf
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
+import nova.privsep.path
 from nova import utils
 from nova.virt import imagecache
 from nova.virt.libvirt import utils as libvirt_utils
@@ -197,10 +195,9 @@ class ImageCacheManager(imagecache.ImageCacheManager):
                             inuse_images.append(backing_path)
 
                         if backing_path in self.unexplained_images:
-                            LOG.warning(_LW('Instance %(instance)s is using a '
-                                         'backing file %(backing)s which '
-                                         'does not appear in the image '
-                                         'service'),
+                            LOG.warning('Instance %(instance)s is using a '
+                                        'backing file %(backing)s which '
+                                        'does not appear in the image service',
                                         {'instance': ent,
                                          'backing': backing_file})
                             self.unexplained_images.remove(backing_path)
@@ -261,7 +258,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
             if not exists or age < maxage:
                 return
 
-            LOG.info(_LI('Removing base or swap file: %s'), base_file)
+            LOG.info('Removing base or swap file: %s', base_file)
             try:
                 os.remove(base_file)
 
@@ -279,14 +276,13 @@ class ImageCacheManager(imagecache.ImageCacheManager):
                 if os.path.exists(signature):
                     os.remove(signature)
             except OSError as e:
-                LOG.error(_LE('Failed to remove %(base_file)s, '
-                              'error was %(error)s'),
+                LOG.error('Failed to remove %(base_file)s, '
+                          'error was %(error)s',
                           {'base_file': base_file,
                            'error': e})
 
         if age < maxage:
-            LOG.info(_LI('Base or swap file too young to remove: %s'),
-                         base_file)
+            LOG.info('Base or swap file too young to remove: %s', base_file)
         else:
             _inner_remove_old_enough_file()
             if remove_lock:
@@ -321,7 +317,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
     def _mark_in_use(self, img_id, base_file):
         """Mark a single base image as in use."""
 
-        LOG.info(_LI('image %(id)s at (%(base_file)s): checking'),
+        LOG.info('image %(id)s at (%(base_file)s): checking',
                  {'id': img_id, 'base_file': base_file})
 
         if base_file in self.unexplained_images:
@@ -331,7 +327,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
 
         LOG.debug('image %(id)s at (%(base_file)s): image is in use',
                   {'id': img_id, 'base_file': base_file})
-        libvirt_utils.update_mtime(base_file)
+        nova.privsep.path.utime(base_file)
 
     def _age_and_verify_swap_images(self, context, base_dir):
         LOG.debug('Verify swap images')
@@ -339,14 +335,14 @@ class ImageCacheManager(imagecache.ImageCacheManager):
         for ent in self.back_swap_images:
             base_file = os.path.join(base_dir, ent)
             if ent in self.used_swap_images and os.path.exists(base_file):
-                libvirt_utils.update_mtime(base_file)
+                nova.privsep.path.utime(base_file)
             elif self.remove_unused_base_images:
                 self._remove_swap_file(base_file)
 
         error_images = self.used_swap_images - self.back_swap_images
         for error_image in error_images:
-            LOG.warning(_LW('%s swap image was used by instance'
-                         ' but no back files existing!'), error_image)
+            LOG.warning('%s swap image was used by instance'
+                        ' but no back files existing!', error_image)
 
     def _age_and_verify_cached_images(self, context, all_instances, base_dir):
         LOG.debug('Verify base images')
@@ -368,16 +364,16 @@ class ImageCacheManager(imagecache.ImageCacheManager):
 
         # Anything left is an unknown base image
         for img in self.unexplained_images:
-            LOG.warning(_LW('Unknown base file: %s'), img)
+            LOG.warning('Unknown base file: %s', img)
             self.removable_base_files.append(img)
 
         # Dump these lists
         if self.active_base_files:
-            LOG.info(_LI('Active base files: %s'),
+            LOG.info('Active base files: %s',
                      ' '.join(self.active_base_files))
 
         if self.removable_base_files:
-            LOG.info(_LI('Removable base files: %s'),
+            LOG.info('Removable base files: %s',
                      ' '.join(self.removable_base_files))
 
             if self.remove_unused_base_images:

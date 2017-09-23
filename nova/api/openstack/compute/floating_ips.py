@@ -28,7 +28,6 @@ from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
-from nova.compute import utils as compute_utils
 from nova import exception
 from nova.i18n import _
 from nova import network
@@ -199,6 +198,8 @@ class FloatingIPController(wsgi.Controller):
         except exception.CannotDisassociateAutoAssignedFloatingIP:
             msg = _('Cannot disassociate auto assigned floating IP')
             raise webob.exc.HTTPForbidden(explanation=msg)
+        except exception.FloatingIpNotFoundForAddress as exc:
+            raise webob.exc.HTTPNotFound(explanation=exc.format_message())
 
 
 class FloatingIPActionController(wsgi.Controller):
@@ -222,7 +223,7 @@ class FloatingIPActionController(wsgi.Controller):
 
         instance = common.get_instance(self.compute_api, context, id,
                                        expected_attrs=['flavor'])
-        cached_nwinfo = compute_utils.get_nw_info_for_instance(instance)
+        cached_nwinfo = instance.get_network_info()
         if not cached_nwinfo:
             LOG.warning(
                 'Info cache is %r during associate with no nw_info cache',
@@ -267,6 +268,8 @@ class FloatingIPActionController(wsgi.Controller):
         except exception.FloatingIpAssociated:
             msg = _('floating IP is already associated')
             raise webob.exc.HTTPBadRequest(explanation=msg)
+        except exception.FloatingIpAssociateFailed as e:
+            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         except exception.NoFloatingIpInterface:
             msg = _('l3driver call to add floating IP failed')
             raise webob.exc.HTTPBadRequest(explanation=msg)

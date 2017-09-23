@@ -13,6 +13,7 @@
 # under the License.
 
 import collections
+import copy
 
 import mock
 from oslo_serialization import jsonutils
@@ -25,6 +26,7 @@ from nova.objects import base as base_obj
 from nova.objects import fields
 from nova.pci import stats
 from nova import test
+from nova.tests.unit import fake_pci_device_pools as fake_pci
 from nova.tests import uuidsentinel as uuids
 from nova.virt import hardware as hw
 
@@ -32,47 +34,23 @@ from nova.virt import hardware as hw
 class InstanceInfoTests(test.NoDBTestCase):
 
     def test_instance_info_default(self):
-        ii = hw.InstanceInfo()
-        self.assertIsNone(ii.state)
-        self.assertIsNone(ii.id)
-        self.assertEqual(0, ii.max_mem_kb)
-        self.assertEqual(0, ii.mem_kb)
-        self.assertEqual(0, ii.num_cpu)
-        self.assertEqual(0, ii.cpu_time_ns)
+        ii = hw.InstanceInfo('fake-state')
+        self.assertEqual('fake-state', ii.state)
+        self.assertIsNone(ii.internal_id)
 
     def test_instance_info(self):
         ii = hw.InstanceInfo(state='fake-state',
-                             max_mem_kb=1,
-                             mem_kb=2,
-                             num_cpu=3,
-                             cpu_time_ns=4,
-                             id='fake-id')
+                             internal_id='fake-id')
         self.assertEqual('fake-state', ii.state)
-        self.assertEqual('fake-id', ii.id)
-        self.assertEqual(1, ii.max_mem_kb)
-        self.assertEqual(2, ii.mem_kb)
-        self.assertEqual(3, ii.num_cpu)
-        self.assertEqual(4, ii.cpu_time_ns)
+        self.assertEqual('fake-id', ii.internal_id)
 
-    def test_instance_infoi_equals(self):
+    def test_instance_info_equals(self):
         ii1 = hw.InstanceInfo(state='fake-state',
-                              max_mem_kb=1,
-                              mem_kb=2,
-                              num_cpu=3,
-                              cpu_time_ns=4,
-                              id='fake-id')
+                              internal_id='fake-id')
         ii2 = hw.InstanceInfo(state='fake-state',
-                              max_mem_kb=1,
-                              mem_kb=2,
-                              num_cpu=3,
-                              cpu_time_ns=4,
-                              id='fake-id')
+                              internal_id='fake-id')
         ii3 = hw.InstanceInfo(state='fake-estat',
-                              max_mem_kb=11,
-                              mem_kb=22,
-                              num_cpu=33,
-                              cpu_time_ns=44,
-                              id='fake-di')
+                              internal_id='fake-di')
         self.assertEqual(ii1, ii2)
         self.assertNotEqual(ii1, ii3)
 
@@ -1781,6 +1759,33 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
                                                         pci_requests=pci_reqs,
                                                         pci_stats=pci_stats)
             self.assertIsNone(fitted_instance1)
+
+    def test_get_fitting_pci_avoided(self):
+
+        def _create_pci_stats(node):
+            test_dict = copy.copy(fake_pci.fake_pool_dict)
+            test_dict['numa_node'] = node
+            return stats.PciDeviceStats(
+                [objects.PciDevicePool.from_dict(test_dict)])
+
+        # the PCI device is found on host cell 1
+        pci_stats = _create_pci_stats(1)
+
+        # ...threfore an instance without a PCI device should get host cell 2
+        instance_topology = hw.numa_fit_instance_to_host(
+                self.host, self.instance1, pci_stats=pci_stats)
+        self.assertIsInstance(instance_topology, objects.InstanceNUMATopology)
+        # TODO(sfinucan): We should be comparing this against the HOST cell
+        self.assertEqual(2, instance_topology.cells[0].id)
+
+        # the PCI device is now found on host cell 2
+        pci_stats = _create_pci_stats(2)
+
+        # ...threfore an instance without a PCI device should get host cell 1
+        instance_topology = hw.numa_fit_instance_to_host(
+                self.host, self.instance1, pci_stats=pci_stats)
+        self.assertIsInstance(instance_topology, objects.InstanceNUMATopology)
+        self.assertEqual(1, instance_topology.cells[0].id)
 
 
 class NumberOfSerialPortsTest(test.NoDBTestCase):

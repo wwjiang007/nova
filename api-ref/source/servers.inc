@@ -333,6 +333,7 @@ Request
   - os:scheduler_hints: os:scheduler_hints
   - OS-DCF:diskConfig: OS-DCF:diskConfig
   - description: server_description
+  - tags: server_tags_create
 
 **Example Create Server**
 
@@ -502,6 +503,17 @@ Response
   - addresses: addresses
   - created: created
   - flavor: flavor_server
+  - flavor.id: flavor_id_body_2_46
+  - flavor.links: flavor_links_2_46
+  - flavor.vcpus: flavor_cpus_2_47
+  - flavor.ram: flavor_ram_2_47
+  - flavor.disk: flavor_disk_2_47
+  - flavor.ephemeral: flavor_ephem_disk_2_47
+  - flavor.swap: flavor_swap_2_47
+  - flavor.original_name: flavor_original_name
+  - flavor.extra_specs: extra_specs_2_47
+  - flavor.extra_specs.key: flavor_extra_spec_key_2_47
+  - flavor.extra_specs.value: flavor_extra_spec_value_2_47
   - hostId: hostId
   - id: server_id
   - image: image
@@ -542,9 +554,9 @@ Response
   - OS-EXT-SRV-ATTR:user_data: server_user_data
   - locked: locked
 
-**Example List Servers Detailed**
+**Example List Servers Detailed (2.47)**
 
-.. literalinclude:: /../../doc/api_samples/servers/servers-details-resp.json
+.. literalinclude:: /../../doc/api_samples/servers/v2.47/servers-details-resp.json
    :language: javascript
 
 
@@ -590,6 +602,17 @@ Response
   - addresses: addresses
   - created: created
   - flavor: flavor_server
+  - flavor.id: flavor_id_body_2_46
+  - flavor.links: flavor_links_2_46
+  - flavor.vcpus: flavor_cpus_2_47
+  - flavor.ram: flavor_ram_2_47
+  - flavor.disk: flavor_disk_2_47
+  - flavor.ephemeral: flavor_ephem_disk_2_47
+  - flavor.swap: flavor_swap_2_47
+  - flavor.original_name: flavor_original_name
+  - flavor.extra_specs: extra_specs_2_47
+  - flavor.extra_specs.key: flavor_extra_spec_key_2_47
+  - flavor.extra_specs.value: flavor_extra_spec_value_2_47
   - hostId: hostId
   - id: server_id
   - image: image
@@ -631,9 +654,9 @@ Response
   - OS-EXT-SRV-ATTR:user_data: server_user_data
   - locked: locked
 
-**Example Show Server Details**
+**Example Show Server Details (2.47)**
 
-.. literalinclude:: ../../doc/api_samples/servers/server-get-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-get-resp.json
    :language: javascript
 
 Update Server
@@ -660,9 +683,9 @@ Request
   - OS-DCF:diskConfig: OS-DCF:diskConfig
   - description: server_description
 
-**Example Update server name**
+**Example Update server name (2.47)**
 
-.. literalinclude:: ../../doc/api_samples/servers/server-update-req.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-update-req.json
    :language: javascript
 
 ..
@@ -688,6 +711,17 @@ Response
   - addresses: addresses
   - created: created
   - flavor: flavor_server
+  - flavor.id: flavor_id_body_2_46
+  - flavor.links: flavor_links_2_46
+  - flavor.vcpus: flavor_cpus_2_47
+  - flavor.ram: flavor_ram_2_47
+  - flavor.disk: flavor_disk_2_47
+  - flavor.ephemeral: flavor_ephem_disk_2_47
+  - flavor.swap: flavor_swap_2_47
+  - flavor.original_name: flavor_original_name
+  - flavor.extra_specs: extra_specs_2_47
+  - flavor.extra_specs.key: flavor_extra_spec_key_2_47
+  - flavor.extra_specs.value: flavor_extra_spec_value_2_47
   - hostId: hostId
   - id: server_id
   - image: image
@@ -724,9 +758,9 @@ Response
   - OS-EXT-SRV-ATTR:user_data: server_user_data
   - locked: locked
 
-**Example Update server name**
+**Example Update server name (2.47)**
 
-.. literalinclude:: ../../doc/api_samples/servers/server-update-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-update-resp.json
    :language: javascript
 
 Delete Server
@@ -738,7 +772,7 @@ Deletes a server.
 
 By default, the instance is going to be (hard) deleted immediately from
 the system, but you can set ``reclaim_instance_interval`` > 0 to make
-the API soft delete the instance, so that the instance's vm won't be
+the API soft delete the instance, so that the instance won't be
 deleted until the ``reclaim_instance_interval`` has expired since the
 instance was soft deleted. The instance marked as ``SOFT_DELETED`` can
 be recovered via ``restore`` action before it's really deleted from the

@@ -54,8 +54,10 @@
 
 from __future__ import print_function
 
+import argparse
 import functools
 import os
+import re
 import sys
 import traceback
 
@@ -65,11 +67,13 @@ from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_utils import encodeutils
 from oslo_utils import importutils
 from oslo_utils import uuidutils
 import prettytable
-
+import six
 import six.moves.urllib.parse as urlparse
+from sqlalchemy.engine import url as sqla_url
 
 from nova.api.ec2 import ec2utils
 from nova import availability_zones
@@ -79,27 +83,32 @@ from nova import config
 from nova import context
 from nova import db
 from nova.db import migration
+from nova.db.sqlalchemy import api as sa_db
 from nova import exception
 from nova.i18n import _
 from nova import objects
 from nova.objects import aggregate as aggregate_obj
 from nova.objects import build_request as build_request_obj
-from nova.objects import flavor as flavor_obj
 from nova.objects import host_mapping as host_mapping_obj
 from nova.objects import instance as instance_obj
 from nova.objects import instance_group as instance_group_obj
 from nova.objects import keypair as keypair_obj
+from nova.objects import quotas as quotas_obj
 from nova.objects import request_spec
 from nova import quota
 from nova import rpc
 from nova import utils
 from nova import version
+from nova.virt import ironic
 
 CONF = nova.conf.CONF
 
 QUOTAS = quota.QUOTAS
 
-_EXTRA_DEFAULT_LOG_LEVELS = ['oslo_db=INFO', 'oslo_policy=INFO']
+# Keep this list sorted and one entry per line for readability.
+_EXTRA_DEFAULT_LOG_LEVELS = ['oslo_concurrency=INFO',
+                             'oslo_db=INFO',
+                             'oslo_policy=INFO']
 
 
 # Decorators for actions
@@ -115,6 +124,16 @@ def param2id(object_id):
         return ec2utils.ec2_vol_id_to_uuid(object_id)
     else:
         return object_id
+
+
+def mask_passwd_in_url(url):
+    parsed = urlparse.urlparse(url)
+    safe_netloc = re.sub(':.*@', ':****@', parsed.netloc)
+    new_parsed = urlparse.ParseResult(
+        parsed.scheme, safe_netloc,
+        parsed.path, parsed.params,
+        parsed.query, parsed.fragment)
+    return urlparse.urlunparse(new_parsed)
 
 
 class ShellCommands(object):
@@ -208,29 +227,21 @@ def _db_error(caught_exception):
 class QuotaCommands(object):
     """Class for managing quotas."""
 
+    # TODO(melwitt): Remove this during the Queens cycle
+    description = ('DEPRECATED: The quota commands are deprecated since '
+                   'Pike as quota usage is counted from resources instead '
+                   'of being tracked separately. They will be removed in an '
+                   'upcoming release.')
+
     @args('--project', dest='project_id', metavar='<Project Id>',
             help='Project Id', required=True)
     @args('--user', dest='user_id', metavar='<User Id>',
             help='User Id')
     @args('--key', metavar='<key>', help='Key')
     def refresh(self, project_id, user_id=None, key=None):
-        """Refresh the quotas for a project or user.
-
-        If no quota key is provided, all the quota usages will be refreshed.
-        If a valid quota key is provided and it does not exist, it will be
-        created. Otherwise, it will be refreshed.
+        """DEPRECATED: This command is deprecated and no longer does anything.
         """
-        ctxt = context.get_admin_context()
-
-        keys = None
-        if key:
-            keys = [key]
-
-        try:
-            QUOTAS.usage_refresh(ctxt, project_id, user_id, keys)
-        except exception.QuotaUsageRefreshNotAllowed as e:
-            print(e.format_message())
-            return 2
+        pass
 
 
 class ProjectCommands(object):
@@ -283,11 +294,11 @@ class ProjectCommands(object):
                     print(_('Quota limit must be less than %s.') % maximum)
                     return 2
                 try:
-                    db.quota_create(ctxt, project_id, key, value,
-                                    user_id=user_id)
+                    objects.Quotas.create_limit(ctxt, project_id, key, value,
+                                                user_id=user_id)
                 except exception.QuotaExists:
-                    db.quota_update(ctxt, project_id, key, value,
-                                    user_id=user_id)
+                    objects.Quotas.update_limit(ctxt, project_id, key, value,
+                                                user_id=user_id)
             else:
                 print(_('%(key)s is not a valid quota key. Valid options are: '
                         '%(options)s.') % {'key': key,
@@ -316,26 +327,10 @@ class ProjectCommands(object):
             help='User Id')
     @args('--key', metavar='<key>', help='Key')
     def quota_usage_refresh(self, project_id, user_id=None, key=None):
-        """Refresh the quotas for project/user
-
-        If no quota key is provided, all the quota usages will be refreshed.
-        If a valid quota key is provided and it does not exist, it will be
-        created. Otherwise, it will be refreshed.
-
-        DEPRECATED: This command is deprecated. Use ``nova-manage quota
-        refresh`` instead.
+        """DEPRECATED: This command is deprecated and no longer does anything.
         """
-        ctxt = context.get_admin_context()
-
-        keys = None
-        if key:
-            keys = [key]
-
-        try:
-            QUOTAS.usage_refresh(ctxt, project_id, user_id, keys)
-        except exception.QuotaUsageRefreshNotAllowed as e:
-            print(e.format_message())
-            return 2
+        # TODO(melwitt): Remove this during the Queens cycle
+        pass
 
 
 class AccountCommands(ProjectCommands):
@@ -648,10 +643,6 @@ class DbCommands(object):
 
     online_migrations = (
         # Added in Newton
-        flavor_obj.migrate_flavors,
-        # Added in Newton
-        flavor_obj.migrate_flavor_reset_autoincrement,
-        # Added in Newton
         instance_obj.migrate_instance_keypairs,
         # Added in Newton
         request_spec.migrate_instances_add_request_spec,
@@ -669,17 +660,62 @@ class DbCommands(object):
         build_request_obj.delete_build_requests_with_no_instance_uuid,
         # Added in Pike
         db.service_uuids_online_data_migration,
+        # Added in Pike
+        quotas_obj.migrate_quota_limits_to_api_db,
+        # Added in Pike
+        quotas_obj.migrate_quota_classes_to_api_db,
+        # Added in Queens
+        sa_db.migration_migrate_to_uuid,
     )
 
     def __init__(self):
         pass
 
-    @args('--version', metavar='<version>', help='Database version')
+    @staticmethod
+    def print_dict(dct, dict_property="Property", dict_value='Value'):
+        """Print a `dict` as a table of two columns.
+
+        :param dct: `dict` to print
+        :param dict_property: name of the first column
+        :param wrap: wrapping for the second column
+        :param dict_value: header label for the value (second) column
+        """
+        pt = prettytable.PrettyTable([dict_property, dict_value])
+        pt.align = 'l'
+        for k, v in sorted(dct.items()):
+            # convert dict to str to check length
+            if isinstance(v, dict):
+                v = six.text_type(v)
+            # if value has a newline, add in multiple rows
+            # e.g. fault with stacktrace
+            if v and isinstance(v, six.string_types) and r'\n' in v:
+                lines = v.strip().split(r'\n')
+                col1 = k
+                for line in lines:
+                    pt.add_row([col1, line])
+                    col1 = ''
+            else:
+                pt.add_row([k, v])
+
+        if six.PY2:
+            print(encodeutils.safe_encode(pt.get_string()))
+        else:
+            print(encodeutils.safe_encode(pt.get_string()).decode())
+
+    @args('--version', metavar='<version>', help=argparse.SUPPRESS)
     @args('--local_cell', action='store_true',
           help='Only sync db in the local cell: do not attempt to fan-out'
                'to all cells')
-    def sync(self, version=None, local_cell=False):
+    @args('version2', metavar='VERSION', nargs='?', help='Database version')
+    def sync(self, version=None, local_cell=False, version2=None):
         """Sync the database up to the most recent version."""
+        if version and not version2:
+            print(_("DEPRECATED: The '--version' parameter was deprecated in "
+                    "the Pike cycle and will not be supported in future "
+                    "versions of nova. Use the 'VERSION' positional argument "
+                    "instead"))
+            version2 = version
+
         if not local_cell:
             ctxt = context.RequestContext()
             # NOTE(mdoff): Multiple cells not yet implemented. Currently
@@ -687,22 +723,28 @@ class DbCommands(object):
             try:
                 cell_mapping = objects.CellMapping.get_by_uuid(ctxt,
                                             objects.CellMapping.CELL0_UUID)
-                with context.target_cell(ctxt, cell_mapping):
-                    migration.db_sync(version, context=ctxt)
+                with context.target_cell(ctxt, cell_mapping) as cctxt:
+                    migration.db_sync(version2, context=cctxt)
             except exception.CellMappingNotFound:
                 print(_('WARNING: cell0 mapping not found - not'
                         ' syncing cell0.'))
-            except Exception:
-                print(_('ERROR: could not access cell mapping database - has'
-                        ' api db been created?'))
+            except Exception as e:
+                print(_("""ERROR: Could not access cell0.
+Has the nova_api database been created?
+Has the nova_cell0 database been created?
+Has "nova-manage api_db sync" been run?
+Has "nova-manage cell_v2 map_cell0" been run?
+Is [api_database]/connection set in nova.conf?
+Is the cell0 database connection URL correct?
+Error: %s""") % six.text_type(e))
         return migration.db_sync(version)
 
     def version(self):
         """Print the current database version."""
         print(migration.db_version())
 
-    @args('--max_rows', metavar='<number>', default=1000,
-            help='Maximum number of deleted rows to archive')
+    @args('--max_rows', type=int, metavar='<number>', default=1000,
+          help='Maximum number of deleted rows to archive')
     @args('--verbose', action='store_true', dest='verbose', default=False,
           help='Print how many rows were archived per table.')
     @args('--until-complete', action='store_true', dest='until_complete',
@@ -750,8 +792,8 @@ class DbCommands(object):
                 sys.stdout.write('.')
         if verbose:
             if table_to_rows_archived:
-                utils.print_dict(table_to_rows_archived, _('Table'),
-                                 dict_value=_('Number of Rows Archived'))
+                self.print_dict(table_to_rows_archived, _('Table'),
+                                dict_value=_('Number of Rows Archived'))
             else:
                 print(_('Nothing was archived.'))
         # NOTE(danms): Return nonzero if we archived something
@@ -850,6 +892,102 @@ class DbCommands(object):
 
         return ran and 1 or 0
 
+    @args('--resource_class', metavar='<class>', required=True,
+          help='Ironic node class to set on instances')
+    @args('--host', metavar='<host>', required=False,
+          help='Compute service name to migrate nodes on')
+    @args('--node', metavar='<node>', required=False,
+          help='Ironic node UUID to migrate (all on the host if omitted)')
+    @args('--all', action='store_true', default=False, dest='all_hosts',
+          help='Run migrations for all ironic hosts and nodes')
+    @args('--verbose', action='store_true', default=False,
+          help='Print information about migrations being performed')
+    def ironic_flavor_migration(self, resource_class, host=None, node=None,
+                                all_hosts=False, verbose=False):
+        """Migrate flavor information for ironic instances.
+
+        This will manually push the instance flavor migration required
+        for ironic-hosted instances in Pike. The best way to accomplish
+        this migration is to run your ironic computes normally in Pike.
+        However, if you need to push the migration manually, then use
+        this.
+
+        This is idempotent, but not trivial to start/stop/resume. It is
+        recommended that you do this with care and not from a script
+        assuming it is trivial.
+
+        Running with --all may generate a large amount of DB traffic
+        all at once. Running at least one host at a time is recommended
+        for batching.
+
+        Return values:
+
+        0: All work is completed (or none is needed)
+        1: Specified host and/or node is not found, or no ironic nodes present
+        2: Internal accounting error shows more than one instance per node
+        3: Invalid combination of required arguments
+        """
+        if not resource_class:
+            # Note that if --resource_class is not specified on the command
+            # line it will actually result in a return code of 2, but we
+            # leave 3 here for testing purposes.
+            print(_('A resource_class is required for all modes of operation'))
+            return 3
+
+        ctx = context.get_admin_context()
+
+        if all_hosts:
+            if host or node:
+                print(_('--all with --host and/or --node does not make sense'))
+                return 3
+            cns = objects.ComputeNodeList.get_by_hypervisor_type(ctx, 'ironic')
+        elif host and node:
+            try:
+                cn = objects.ComputeNode.get_by_host_and_nodename(ctx, host,
+                                                                  node)
+                cns = [cn]
+            except exception.ComputeHostNotFound:
+                cns = []
+        elif host:
+            try:
+                cns = objects.ComputeNodeList.get_all_by_host(ctx, host)
+            except exception.ComputeHostNotFound:
+                cns = []
+        else:
+            print(_('Either --all, --host, or --host and --node are required'))
+            return 3
+
+        if len(cns) == 0:
+            print(_('No ironic compute nodes found that match criteria'))
+            return 1
+
+        # Check that we at least got one ironic compute and we can pretty
+        # safely assume the rest are
+        if cns[0].hypervisor_type != 'ironic':
+            print(_('Compute node(s) specified is not of type ironic'))
+            return 1
+
+        for cn in cns:
+            # NOTE(danms): The instance.node is the
+            # ComputeNode.hypervisor_hostname, which in the case of ironic is
+            # the node uuid. Since only one instance can be on a node in
+            # ironic, do another sanity check here to make sure we look legit.
+            inst = objects.InstanceList.get_by_filters(
+                ctx, {'node': cn.hypervisor_hostname,
+                      'deleted': False})
+            if len(inst) > 1:
+                print(_('Ironic node %s has multiple instances? '
+                        'Something is wrong.') % cn.hypervisor_hostname)
+                return 2
+            elif len(inst) == 1:
+                result = ironic.IronicDriver._pike_flavor_migration_for_node(
+                    ctx, resource_class, inst[0].uuid)
+                if result and verbose:
+                    print(_('Migrated instance %(uuid)s on node %(node)s') % {
+                        'uuid': inst[0].uuid,
+                        'node': cn.hypervisor_hostname})
+        return 0
+
 
 class ApiDbCommands(object):
     """Class for managing the api database."""
@@ -857,10 +995,18 @@ class ApiDbCommands(object):
     def __init__(self):
         pass
 
-    @args('--version', metavar='<version>', help='Database version')
-    def sync(self, version=None):
+    @args('--version', metavar='<version>', help=argparse.SUPPRESS)
+    @args('version2', metavar='VERSION', nargs='?', help='Database version')
+    def sync(self, version=None, version2=None):
         """Sync the database up to the most recent version."""
-        return migration.db_sync(version, database='api')
+        if version and not version2:
+            print(_("DEPRECATED: The '--version' parameter was deprecated in "
+                    "the Pike cycle and will not be supported in future "
+                    "versions of nova. Use the 'VERSION' positional argument "
+                    "instead"))
+            version2 = version
+
+        return migration.db_sync(version2, database='api')
 
     def version(self):
         """Print the current database version."""
@@ -1015,7 +1161,43 @@ class GetLogCommands(object):
 
 
 class CellCommands(object):
-    """Commands for managing cells."""
+    """Commands for managing cells v1 functionality."""
+
+    # TODO(stephenfin): Remove this when cells v1 is removed
+    description = ('DEPRECATED: The cell commands, which configure cells v1 '
+                   'functionality, are deprecated as Cells v1 itself has '
+                   'been deprecated. They will be removed in an upcoming '
+                   'release.')
+
+    @staticmethod
+    def parse_server_string(server_str):
+        """Parses the given server_string and returns a tuple of host and port.
+        If it's not a combination of host part and port, the port element is an
+        empty string. If the input is invalid expression, return a tuple of two
+        empty strings.
+        """
+        try:
+            # First of all, exclude pure IPv6 address (w/o port).
+            if netaddr.valid_ipv6(server_str):
+                return (server_str, '')
+
+            # Next, check if this is IPv6 address with a port number
+            # combination.
+            if server_str.find("]:") != -1:
+                (address, port) = server_str.replace('[', '', 1).split(']:')
+                return (address, port)
+
+            # Third, check if this is a combination of an address and a port
+            if server_str.find(':') == -1:
+                return (server_str, '')
+
+            # This must be a combination of an address and a port
+            (address, port) = server_str.split(':')
+            return (address, port)
+
+        except (ValueError, netaddr.AddrFormatError):
+            print('Invalid server_string: %s' % server_str)
+            return ('', '')
 
     def _create_transport_hosts(self, username, password,
                                 broker_hosts=None, hostname=None, port=None):
@@ -1026,7 +1208,7 @@ class CellCommands(object):
             hosts = broker_hosts.split(',')
             for host in hosts:
                 host = host.strip()
-                broker_hostname, broker_port = utils.parse_server_string(host)
+                broker_hostname, broker_port = self.parse_server_string(host)
                 if not broker_port:
                     msg = _('Invalid broker_hosts value: %s. It should be'
                             ' in hostname:port format') % host
@@ -1167,9 +1349,9 @@ class CellV2Commands(object):
                 ctxt, objects.CellMapping.CELL0_UUID)
 
         # Run migrations so cell0 is usable
-        with context.target_cell(ctxt, cell0_mapping):
+        with context.target_cell(ctxt, cell0_mapping) as cctxt:
             try:
-                migration.db_sync(None, context=ctxt)
+                migration.db_sync(None, context=cctxt)
             except db_exc.DBError as ex:
                 print(_('Unable to sync cell0 schema: %s') % ex)
 
@@ -1215,12 +1397,16 @@ class CellV2Commands(object):
             # based on the database connection url.
             # The cell0 database will use the same database scheme and
             # netloc as the main database, with a related path.
-            scheme, netloc, path, query, fragment = \
-                urlparse.urlsplit(CONF.database.connection)
-            root, ext = os.path.splitext(path)
-            path = root + "_cell0" + ext
-            return urlparse.urlunsplit((scheme, netloc, path, query,
-                                        fragment))
+            # NOTE(sbauza): The URL has to be RFC1738 compliant in order to
+            # be usable by sqlalchemy.
+            connection = CONF.database.connection
+            # sqlalchemy has a nice utility for parsing database connection
+            # URLs so we use that here to get the db name so we don't have to
+            # worry about parsing and splitting a URL which could have special
+            # characters in the password, which makes parsing a nightmare.
+            url = sqla_url.make_url(connection)
+            url.database = url.database + '_cell0'
+            return urlparse.unquote(str(url))
 
         dbc = database_connection or cell0_default_connection()
         ctxt = context.RequestContext()
@@ -1423,7 +1609,8 @@ class CellV2Commands(object):
                 ctxt, uuid)
         except exception.InstanceMappingNotFound:
             say('Instance %s is not mapped to a cell '
-                '(upgrade is incomplete)' % uuid)
+                '(upgrade is incomplete) or instance '
+                'does not exist' % uuid)
             return 1
         if mapping.cell_mapping is None:
             say('Instance %s is not mapped to a cell' % uuid)
@@ -1440,7 +1627,11 @@ class CellV2Commands(object):
                'map.')
     @args('--verbose', action='store_true',
           help=_('Provide detailed output when discovering hosts.'))
-    def discover_hosts(self, cell_uuid=None, verbose=False):
+    @args('--strict', action='store_true',
+          help=_('Considered successful (exit code 0) only when an unmapped '
+                 'host is discovered. Any other outcome will be considered a '
+                 'failure (exit code 1).'))
+    def discover_hosts(self, cell_uuid=None, verbose=False, strict=False):
         """Searches cells, or a single cell, and maps found hosts.
 
         When a new host is added to a deployment it will add a service entry
@@ -1453,7 +1644,10 @@ class CellV2Commands(object):
                 print(msg)
 
         ctxt = context.RequestContext()
-        host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn)
+        hosts = host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn)
+        # discover_hosts will return an empty list if no hosts are discovered
+        if strict:
+            return int(not hosts)
 
     @action_description(
         _("Add a new cell to nova API database. "
@@ -1499,7 +1693,7 @@ class CellV2Commands(object):
         return 0
 
     @args('--verbose', action='store_true',
-          help=_('Show more details than just the cell name and uuid.'))
+          help=_('Show sensitive details, such as passwords'))
     def list_cells(self, verbose=False):
         """Lists the v2 cells in the deployment.
 
@@ -1509,15 +1703,18 @@ class CellV2Commands(object):
         cell_mappings = objects.CellMappingList.get_all(
             context.get_admin_context())
 
-        field_names = [_('Name'), _('UUID')]
-        if verbose:
-            field_names.extend([_('Transport URL'), _('Database Connection')])
+        field_names = [_('Name'), _('UUID'), _('Transport URL'),
+                       _('Database Connection')]
 
         t = prettytable.PrettyTable(field_names)
         for cell in sorted(cell_mappings, key=lambda _cell: _cell.name):
             fields = [cell.name, cell.uuid]
             if verbose:
                 fields.extend([cell.transport_url, cell.database_connection])
+            else:
+                fields.extend([
+                    mask_passwd_in_url(cell.transport_url),
+                    mask_passwd_in_url(cell.database_connection)])
             t.add_row(fields)
         print(t)
         return 0

@@ -25,7 +25,7 @@ import six
 import nova.conf
 from nova import context
 from nova import exception
-from nova.i18n import _, _LI
+from nova.i18n import _
 from nova import objects
 from nova.objects import fields
 from nova.objects import instance as obj_instance
@@ -120,7 +120,7 @@ def format_cpu_spec(cpuset, allow_ranges=True):
     """Format a libvirt CPU range specification.
 
     Format a set/list of CPU indexes as a libvirt CPU range
-    specification. It allow_ranges is true, it will try to detect
+    specification. If allow_ranges is true, it will try to detect
     continuous ranges of CPUs, otherwise it will just list each CPU
     index explicitly.
 
@@ -197,24 +197,15 @@ def get_number_of_serial_ports(flavor, image_meta):
 
 class InstanceInfo(object):
 
-    def __init__(self, state=None, max_mem_kb=0, mem_kb=0, num_cpu=0,
-                 cpu_time_ns=0, id=None):
+    def __init__(self, state, internal_id=None):
         """Create a new Instance Info object
 
-        :param state: the running state, one of the power_state codes
-        :param max_mem_kb: (int) the maximum memory in KBytes allowed
-        :param mem_kb: (int) the memory in KBytes used by the instance
-        :param num_cpu: (int) the number of virtual CPUs for the
-                        instance
-        :param cpu_time_ns: (int) the CPU time used in nanoseconds
-        :param id: a unique ID for the instance
+        :param state: Required. The running state, one of the power_state codes
+        :param internal_id: Optional. A unique ID for the instance. Need not be
+                            related to the Instance.uuid.
         """
         self.state = state
-        self.max_mem_kb = max_mem_kb
-        self.mem_kb = mem_kb
-        self.num_cpu = num_cpu
-        self.cpu_time_ns = cpu_time_ns
-        self.id = id
+        self.internal_id = internal_id
 
     def __eq__(self, other):
         return (self.__class__ == other.__class__ and
@@ -753,9 +744,9 @@ def _pack_instance_onto_cores(available_siblings,
 
         :param threads_no: Number of host threads per cores which can
                            be used to pin vCPUs according to the
-                           policies :param sibling_set: List of
-                           available threads per host cores on a
-                           specific host NUMA node.
+                           policies.
+        :param sibling_set: List of available threads per host cores
+                            on a specific host NUMA node.
         :param instance_cores: Set of vCPUs requested.
         :param num_cpu_reserved: Number of additional host CPUs which
                                  needs to be reserved.
@@ -784,8 +775,8 @@ def _pack_instance_onto_cores(available_siblings,
         # vcpus_pinning=[(2, 0), (3, 4)]
         vcpus_pinning = list(zip(sorted(instance_cores),
                                  itertools.chain(*usable_cores)))
-        msg = _LI("Computed NUMA topology CPU pinning: usable pCPUs: "
-                  "%(usable_cores)s, vCPUs mapping: %(vcpus_pinning)s")
+        msg = ("Computed NUMA topology CPU pinning: usable pCPUs: "
+               "%(usable_cores)s, vCPUs mapping: %(vcpus_pinning)s")
         msg_args = {
             'usable_cores': usable_cores,
             'vcpus_pinning': vcpus_pinning,
@@ -809,8 +800,8 @@ def _pack_instance_onto_cores(available_siblings,
             # cpuset_reserved=[4]
             cpuset_reserved = set(list(
                 itertools.chain(*usable_cores))[:num_cpu_reserved])
-            msg = _LI("Computed NUMA topology reserved pCPUs: usable pCPUs: "
-                      "%(usable_cores)s, reserved pCPUs: %(cpuset_reserved)s")
+            msg = ("Computed NUMA topology reserved pCPUs: usable pCPUs: "
+                   "%(usable_cores)s, reserved pCPUs: %(cpuset_reserved)s")
             msg_args = {
                 'usable_cores': usable_cores,
                 'cpuset_reserved': cpuset_reserved,
@@ -943,9 +934,9 @@ def _numa_fit_instance_cell_with_pinning(host_cell, instance_cell,
     else:
         if (instance_cell.cpu_thread_policy ==
                 fields.CPUThreadAllocationPolicy.REQUIRE):
-            LOG.info(_LI("Host does not support hyperthreading or "
-                         "hyperthreading is disabled, but 'require' "
-                         "threads policy was requested."))
+            LOG.info("Host does not support hyperthreading or "
+                     "hyperthreading is disabled, but 'require' "
+                     "threads policy was requested.")
             return
 
         # Straightforward to pin to available cpus when there is no
@@ -1023,7 +1014,7 @@ def _numa_fit_instance_cell(host_cell, instance_cell, limit_cell=None,
             LOG.debug('Host cell has limitations on usable CPUs. There are '
                       'not enough free CPUs to schedule this instance. '
                       'Usage: %(usage)d, limit: %(limit)d',
-                      {'usage': memory_usage, 'limit': cpu_limit})
+                      {'usage': cpu_usage, 'limit': cpu_limit})
             return
 
     pagesize = None
@@ -1479,10 +1470,19 @@ def numa_fit_instance_to_host(
     if 'emulator_threads_policy' in instance_topology:
         emulator_threads_policy = instance_topology.emulator_threads_policy
 
+    host_cells = host_topology.cells
+
+    # If PCI device(s) are not required, prefer host cells that don't have
+    # devices attached. Presence of a given numa_node in a PCI pool is
+    # indicative of a PCI device being associated with that node
+    if not pci_requests and pci_stats:
+        host_cells = sorted(host_cells, key=lambda cell: cell.id in [
+            pool['numa_node'] for pool in pci_stats.pools])
+
     # TODO(ndipanov): We may want to sort permutations differently
     # depending on whether we want packing/spreading over NUMA nodes
     for host_cell_perm in itertools.permutations(
-            host_topology.cells, len(instance_topology)):
+            host_cells, len(instance_topology)):
         cells = []
         for host_cell, instance_cell in zip(
                 host_cell_perm, instance_topology.cells):

@@ -24,7 +24,7 @@ from nova.api.openstack.placement import wsgi_wrapper
 from nova import db
 from nova import exception
 from nova.i18n import _
-from nova import objects
+from nova.objects import resource_provider as rp_obj
 
 RESOURCE_CLASS_IDENTIFIER = "^[A-Z0-9_]+$"
 BASE_INVENTORY_SCHEMA = {
@@ -149,7 +149,7 @@ def _make_inventory_object(resource_provider, resource_class, **data):
     # 0) for non-negative integers. It's not clear if that is
     # duplication or decoupling so leaving it as this for now.
     try:
-        inventory = objects.Inventory(
+        inventory = rp_obj.Inventory(
             resource_provider=resource_provider,
             resource_class=resource_class, **data)
     except (ValueError, TypeError) as exc:
@@ -213,7 +213,7 @@ def create_inventory(req):
     """
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
     data = _extract_inventory(req.body, POST_INVENTORY_SCHEMA)
     resource_class = data.pop('resource_class')
@@ -255,7 +255,7 @@ def delete_inventory(req):
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
 
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
     try:
         resource_provider.delete_inventory(resource_class)
@@ -286,14 +286,14 @@ def get_inventories(req):
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     try:
-        resource_provider = objects.ResourceProvider.get_by_uuid(
+        resource_provider = rp_obj.ResourceProvider.get_by_uuid(
             context, uuid)
     except exception.NotFound as exc:
         raise webob.exc.HTTPNotFound(
             _("No resource provider with uuid %(uuid)s found : %(error)s") %
              {'uuid': uuid, 'error': exc})
 
-    inventories = objects.InventoryList.get_all_by_resource_provider_uuid(
+    inventories = rp_obj.InventoryList.get_all_by_resource_provider_uuid(
         context, resource_provider.uuid)
 
     return _send_inventories(req.response, resource_provider, inventories)
@@ -311,9 +311,9 @@ def get_inventory(req):
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
 
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
-    inventory = objects.InventoryList.get_all_by_resource_provider_uuid(
+    inventory = rp_obj.InventoryList.get_all_by_resource_provider_uuid(
         context, resource_provider.uuid).find(resource_class)
 
     if not inventory:
@@ -342,7 +342,7 @@ def set_inventories(req):
     """
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
     data = _extract_inventories(req.body, PUT_INVENTORY_SCHEMA)
@@ -355,7 +355,7 @@ def set_inventories(req):
         inventory = _make_inventory_object(
             resource_provider, res_class, **inventory_data)
         inv_list.append(inventory)
-    inventories = objects.InventoryList(objects=inv_list)
+    inventories = rp_obj.InventoryList(objects=inv_list)
 
     try:
         resource_provider.set_inventory(inventories)
@@ -396,17 +396,23 @@ def delete_inventories(req):
     microversion.raise_http_status_code_if_not_version(req, 405, (1, 5))
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
-    inventories = objects.InventoryList(objects=[])
+    inventories = rp_obj.InventoryList(objects=[])
 
     try:
         resource_provider.set_inventory(inventories)
-    except (exception.ConcurrentUpdateDetected,
-            exception.InventoryInUse) as exc:
+    except exception.ConcurrentUpdateDetected:
         raise webob.exc.HTTPConflict(
-            _('update conflict: %(error)s') % {'error': exc})
+            _('Unable to delete inventory for resource provider '
+              '%(rp_uuid)s because the inventory was updated by '
+              'another process. Please retry your request.')
+              % {'rp_uuid': resource_provider.uuid})
+    except exception.InventoryInUse as ex:
+        # NOTE(mriedem): This message cannot change without impacting the
+        # nova.scheduler.client.report._RE_INV_IN_USE regex.
+        raise webob.exc.HTTPConflict(explanation=ex.format_message())
 
     response = req.response
     response.status = 204
@@ -431,7 +437,7 @@ def update_inventory(req):
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
 
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
     data = _extract_inventory(req.body, BASE_INVENTORY_SCHEMA)

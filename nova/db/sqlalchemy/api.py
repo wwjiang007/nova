@@ -65,8 +65,7 @@ import nova.conf
 import nova.context
 from nova.db.sqlalchemy import models
 from nova import exception
-from nova.i18n import _, _LI, _LE, _LW
-from nova import quota
+from nova.i18n import _
 from nova import safe_utils
 
 profiler_sqlalchemy = importutils.try_import('osprofiler.sqlalchemy')
@@ -585,8 +584,13 @@ def service_get_by_compute_host(context, host):
 def service_create(context, values):
     service_ref = models.Service()
     service_ref.update(values)
-    if not CONF.enable_new_services:
-        msg = _("New service disabled due to config option.")
+    # We only auto-disable nova-compute services since those are the only
+    # ones that can be enabled using the os-services REST API and they are
+    # the only ones where being disabled means anything. It does
+    # not make sense to be able to disable non-compute services like
+    # nova-scheduler or nova-osapi_compute since that does nothing.
+    if not CONF.enable_new_services and values.get('binary') == 'nova-compute':
+        msg = _("New compute service disabled due to config option.")
         service_ref.disabled = True
         service_ref.disabled_reason = msg
     try:
@@ -793,7 +797,8 @@ def compute_node_statistics(context):
                 inner_sel.c.service_id == services_tbl.c.id
             ),
             services_tbl.c.disabled == false(),
-            services_tbl.c.binary == 'nova-compute'
+            services_tbl.c.binary == 'nova-compute',
+            services_tbl.c.deleted == 0
         )
     )
 
@@ -900,7 +905,7 @@ def floating_ip_get(context, id):
         if not result:
             raise exception.FloatingIpNotFound(id=id)
     except db_exc.DBError:
-        LOG.warning(_LW("Invalid floating IP ID %s in request"), id)
+        LOG.warning("Invalid floating IP ID %s in request", id)
         raise exception.InvalidID(id=id)
     return result
 
@@ -999,20 +1004,6 @@ def floating_ip_bulk_destroy(context, ips):
         model_query(context, models.FloatingIp).\
             filter(models.FloatingIp.address.in_(ip_block)).\
             soft_delete(synchronize_session='fetch')
-
-    # Delete the quotas, if needed.
-    # Quota update happens in a separate transaction, so previous must have
-    # been committed first.
-    for project_id, count in project_id_to_quota_count.items():
-        try:
-            reservations = quota.QUOTAS.reserve(context,
-                                                project_id=project_id,
-                                                floating_ips=count)
-            quota.QUOTAS.commit(context, reservations, project_id=project_id)
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                LOG.exception(_LE("Failed to update usages bulk "
-                                  "deallocating floating IP"))
 
 
 @require_context
@@ -1598,7 +1589,7 @@ def virtual_interface_create(context, values):
         vif_ref.update(values)
         vif_ref.save(context.session)
     except db_exc.DBError:
-        LOG.exception(_LE("VIF creation failed with a database error."))
+        LOG.exception("VIF creation failed with a database error.")
         raise exception.VirtualInterfaceCreateException()
 
     return vif_ref
@@ -1838,6 +1829,11 @@ def instance_create(context, values):
     # create the instance uuid to ec2_id mapping entry for instance
     ec2_instance_create(context, instance_ref['uuid'])
 
+    # Parity with the return value of instance_get_all_by_filters_sort()
+    # Obviously a newly-created instance record can't already have a fault
+    # record because of the FK constraint, so this is fine.
+    instance_ref.fault = None
+
     return instance_ref
 
 
@@ -1945,7 +1941,7 @@ def instance_get(context, instance_id, columns_to_join=None):
     except db_exc.DBError:
         # NOTE(sdague): catch all in case the db engine chokes on the
         # id because it's too long of an int to store.
-        LOG.warning(_LW("Invalid instance id %s in request"), instance_id)
+        LOG.warning("Invalid instance id %s in request", instance_id)
         raise exception.InvalidID(id=instance_id)
 
 
@@ -2000,6 +1996,12 @@ def _instances_fill_metadata(context, instances, manual_joins=None):
         for row in _instance_pcidevs_get_multi(context, uuids):
             pcidevs[row['instance_uuid']].append(row)
 
+    if 'fault' in manual_joins:
+        faults = instance_fault_get_by_instance_uuids(context, uuids,
+                                                      latest=True)
+    else:
+        faults = {}
+
     filled_instances = []
     for inst in instances:
         inst = dict(inst)
@@ -2007,6 +2009,8 @@ def _instances_fill_metadata(context, instances, manual_joins=None):
         inst['metadata'] = meta[inst['uuid']]
         if 'pci_devices' in manual_joins:
             inst['pci_devices'] = pcidevs[inst['uuid']]
+        inst_faults = faults.get(inst['uuid'])
+        inst['fault'] = inst_faults and inst_faults[0] or None
         filled_instances.append(inst)
 
     return filled_instances
@@ -2015,7 +2019,7 @@ def _instances_fill_metadata(context, instances, manual_joins=None):
 def _manual_join_columns(columns_to_join):
     """Separate manually joined columns from columns_to_join
 
-    If columns_to_join contains 'metadata', 'system_metadata', or
+    If columns_to_join contains 'metadata', 'system_metadata', 'fault', or
     'pci_devices' those columns are removed from columns_to_join and added
     to a manual_joins list to be used with the _instances_fill_metadata method.
 
@@ -2028,7 +2032,7 @@ def _manual_join_columns(columns_to_join):
     """
     manual_joins = []
     columns_to_join_new = copy.copy(columns_to_join)
-    for column in ('metadata', 'system_metadata', 'pci_devices'):
+    for column in ('metadata', 'system_metadata', 'pci_devices', 'fault'):
         if column in columns_to_join_new:
             columns_to_join_new.remove(column)
             manual_joins.append(column)
@@ -2282,6 +2286,32 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
         raise exception.InvalidSortKey()
 
     return _instances_fill_metadata(context, query_prefix.all(), manual_joins)
+
+
+@require_context
+@pick_context_manager_reader_allow_async
+def instance_get_by_sort_filters(context, sort_keys, sort_dirs, values):
+    """Attempt to get a single instance based on a combination of sort
+    keys, directions and filter values. This is used to try to find a
+    marker instance when we don't have a marker uuid.
+
+    This returns just a uuid of the instance that matched.
+    """
+    query = context.session.query(models.Instance.uuid)
+    for skey, sdir, val in zip(sort_keys, sort_dirs, values):
+        col = getattr(models.Instance, skey)
+        if sdir == 'asc':
+            query = query.filter(col >= val).order_by(col)
+        else:
+            query = query.filter(col <= val).order_by(col.desc())
+
+    # We can't raise InstanceNotFound because we don't have a uuid to
+    # be looking for, so just return nothing if no match.
+    result = query.limit(1).first()
+    if result:
+        return result[0]
+    else:
+        return result
 
 
 def _db_connection_type(db_connection):
@@ -3698,17 +3728,17 @@ def _refresh_quota_usages(quota_usage, until_refresh, in_use):
     :param in_use:        Actual quota usage for the resource.
     """
     if quota_usage.in_use != in_use:
-        LOG.info(_LI('quota_usages out of sync, updating. '
-                     'project_id: %(project_id)s, '
-                     'user_id: %(user_id)s, '
-                     'resource: %(res)s, '
-                     'tracked usage: %(tracked_use)s, '
-                     'actual usage: %(in_use)s'),
-            {'project_id': quota_usage.project_id,
-             'user_id': quota_usage.user_id,
-             'res': quota_usage.resource,
-             'tracked_use': quota_usage.in_use,
-             'in_use': in_use})
+        LOG.info('quota_usages out of sync, updating. '
+                 'project_id: %(project_id)s, '
+                 'user_id: %(user_id)s, '
+                 'resource: %(res)s, '
+                 'tracked usage: %(tracked_use)s, '
+                 'actual usage: %(in_use)s',
+                 {'project_id': quota_usage.project_id,
+                  'user_id': quota_usage.user_id,
+                  'res': quota_usage.resource,
+                  'tracked_use': quota_usage.in_use,
+                  'in_use': in_use})
     else:
         LOG.debug('QuotaUsage has not changed, refresh is unnecessary for: %s',
                   dict(quota_usage))
@@ -3905,8 +3935,8 @@ def quota_reserve(context, resources, project_quotas, user_quotas, deltas,
         context.session.add(usage_ref)
 
     if unders:
-        LOG.warning(_LW("Change will make usage less than 0 for the following "
-                        "resources: %s"), unders)
+        LOG.warning("Change will make usage less than 0 for the following "
+                    "resources: %s", unders)
 
     if overs:
         if project_quotas == user_quotas:
@@ -4830,6 +4860,25 @@ def migration_get_all_by_filters(context, filters):
     return query.all()
 
 
+@pick_context_manager_writer
+def migration_migrate_to_uuid(context, count):
+    # Avoid circular import
+    from nova import objects
+
+    db_migrations = model_query(context, models.Migration).filter_by(
+        uuid=None).limit(count).all()
+
+    done = 0
+    for db_migration in db_migrations:
+        mig = objects.Migration(context)
+        mig._from_db_object(context, mig, db_migration)
+        done += 1
+
+    # We don't have any situation where we can (detectably) not
+    # migrate a thing, so report anything that matched as "completed".
+    return done, done
+
+
 ##################
 
 
@@ -4934,7 +4983,7 @@ def console_get(context, console_id, instance_uuid=None):
     if not result:
         if instance_uuid:
             raise exception.ConsoleNotFoundForInstance(
-                    console_id=console_id, instance_uuid=instance_uuid)
+                    instance_uuid=instance_uuid)
         else:
             raise exception.ConsoleNotFound(console_id=console_id)
 
@@ -5607,9 +5656,9 @@ def vol_usage_update(context, id, rd_req, rd_bytes, wr_req, wr_bytes,
             rd_bytes < current_usage['curr_read_bytes'] or
             wr_req < current_usage['curr_writes'] or
                 wr_bytes < current_usage['curr_write_bytes']):
-            LOG.info(_LI("Volume(%s) has lower stats then what is in "
-                         "the database. Instance must have been rebooted "
-                         "or crashed. Updating totals."), id)
+            LOG.info("Volume(%s) has lower stats then what is in "
+                     "the database. Instance must have been rebooted "
+                     "or crashed. Updating totals.", id)
             if not update_totals:
                 values['tot_reads'] = (models.VolumeUsage.tot_reads +
                                        current_usage['curr_reads'])
@@ -5968,8 +6017,8 @@ def aggregate_metadata_add(context, aggregate_id, metadata, set_delete=False,
                 if attempt < max_retries - 1:
                     ctxt.reraise = False
                 else:
-                    LOG.warning(_LW("Add metadata failed for aggregate %(id)s "
-                                    "after %(retries)s retries"),
+                    LOG.warning("Add metadata failed for aggregate %(id)s "
+                                "after %(retries)s retries",
                                 {"id": aggregate_id, "retries": max_retries})
 
 
@@ -6389,7 +6438,7 @@ def _archive_if_instance_deleted(table, shadow_table, instances, conn,
             result_delete = conn.execute(delete_statement)
             return result_delete.rowcount
     except db_exc.DBReferenceError as ex:
-        LOG.warning(_LW('Failed to archive %(table)s: %(error)s'),
+        LOG.warning('Failed to archive %(table)s: %(error)s',
                     {'table': table.__tablename__,
                      'error': six.text_type(ex)})
         return 0
@@ -6481,8 +6530,8 @@ def _archive_deleted_rows_for_table(tablename, max_rows):
         # A foreign key constraint keeps us from deleting some of
         # these rows until we clean up a dependent table.  Just
         # skip this table for now; we'll come back to it later.
-        LOG.warning(_LW("IntegrityError detected when archiving table "
-                        "%(tablename)s: %(error)s"),
+        LOG.warning("IntegrityError detected when archiving table "
+                    "%(tablename)s: %(error)s",
                     {'tablename': tablename, 'error': six.text_type(ex)})
 
     if ((max_rows is None or rows_archived < max_rows)

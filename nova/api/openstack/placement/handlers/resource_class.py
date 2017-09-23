@@ -22,7 +22,7 @@ from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
-from nova import objects
+from nova.objects import resource_provider as rp_obj
 
 
 POST_RC_SCHEMA_V1_2 = {
@@ -77,7 +77,7 @@ def create_resource_class(req):
     data = util.extract_json(req.body, POST_RC_SCHEMA_V1_2)
 
     try:
-        rc = objects.ResourceClass(context, name=data['name'])
+        rc = rp_obj.ResourceClass(context, name=data['name'])
         rc.create()
     except exception.ResourceClassExists:
         raise webob.exc.HTTPConflict(
@@ -106,7 +106,7 @@ def delete_resource_class(req):
     name = util.wsgi_path_item(req.environ, 'name')
     context = req.environ['placement.context']
     # The containing application will catch a not found here.
-    rc = objects.ResourceClass.get_by_name(context, name)
+    rc = rp_obj.ResourceClass.get_by_name(context, name)
     try:
         rc.destroy()
     except exception.ResourceClassCannotDeleteStandard as exc:
@@ -134,7 +134,7 @@ def get_resource_class(req):
     name = util.wsgi_path_item(req.environ, 'name')
     context = req.environ['placement.context']
     # The containing application will catch a not found here.
-    rc = objects.ResourceClass.get_by_name(context, name)
+    rc = rp_obj.ResourceClass.get_by_name(context, name)
 
     req.response.body = encodeutils.to_utf8(jsonutils.dumps(
         _serialize_resource_class(req.environ, rc))
@@ -153,7 +153,7 @@ def list_resource_classes(req):
     a collection of resource classes.
     """
     context = req.environ['placement.context']
-    rcs = objects.ResourceClassList.get_all(context)
+    rcs = rp_obj.ResourceClassList.get_all(context)
 
     response = req.response
     response.body = encodeutils.to_utf8(jsonutils.dumps(
@@ -178,7 +178,7 @@ def update_resource_class(req):
     data = util.extract_json(req.body, PUT_RC_SCHEMA_V1_2)
 
     # The containing application will catch a not found here.
-    rc = objects.ResourceClass.get_by_name(context, name)
+    rc = rp_obj.ResourceClass.get_by_name(context, name)
 
     rc.name = data['name']
 
@@ -218,10 +218,10 @@ def update_resource_class(req):
 
     status = 204
     try:
-        rc = objects.ResourceClass.get_by_name(context, name)
+        rc = rp_obj.ResourceClass.get_by_name(context, name)
     except exception.NotFound:
         try:
-            rc = objects.ResourceClass(context, name=name)
+            rc = rp_obj.ResourceClass(context, name=name)
             rc.create()
             status = 201
         # We will not see ResourceClassCannotUpdateStandard because

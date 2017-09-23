@@ -61,13 +61,12 @@ class TestLocalDeleteAttachedVolumes(test.TestCase):
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
         self.start_service('conductor')
-        self.flags(driver='chance_scheduler', group='scheduler')
         self.start_service('scheduler')
         self.start_service('compute')
         # The consoleauth service is needed for deleting console tokens.
         self.start_service('consoleauth')
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
 
         self.flavor_id = self.api.get_flavors()[0]['id']
 

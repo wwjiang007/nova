@@ -44,8 +44,13 @@ class IsolationTestCase(test.TestCase):
     def test_rpc_consumer_isolation(self):
         class NeverCalled(object):
 
-            def __getattribute__(*args):
-                assert False, "I should never get called."
+            def __getattribute__(self, name):
+                if name == 'target':
+                    # oslo.messaging 5.31.0 explicitly looks for 'target'
+                    # on the endpoint and checks it's type, so we can't avoid
+                    # it here, just ignore it if that's the case.
+                    return
+                assert False, "I should never get called. name: %s" % name
 
         server = rpc.get_server(messaging.Target(topic='compute',
                                                  server=CONF.host),
@@ -108,7 +113,10 @@ class JsonTestCase(test.NoDBTestCase):
             # error reported is going to be a cryptic length failure
             # on the level2 structure.
             self.assertEqual(
-                "3 != 4: path: root.top.l1.l2. List lengths are not equal",
+                ("3 != 4: path: root.top.l1.l2. Different list items\n"
+                 "expected=['a', 'b', 'c']\n"
+                 "observed=['a', 'b', 'c', 'd']\n"
+                 "difference=['d']"),
                 e.difference)
             self.assertIn(
                 "actual:\n{'top': {'l1': {'l2': ['c', 'a', 'b', 'd']}}}",
@@ -138,7 +146,10 @@ class JsonTestCase(test.NoDBTestCase):
             self.assertJsonEqual(expected, actual)
         except Exception as e:
             self.assertEqual(
-                "3 != 2: path: root.top.l1.l2. Dict lengths are not equal",
+                ("3 != 2: path: root.top.l1.l2. Different dict key sets\n"
+                 "expected=['a', 'b', 'c']\n"
+                 "observed=['a', 'b']\n"
+                 "difference=['c']"),
                 e.difference)
         else:
             self.fail("This should have raised a mismatch exception")

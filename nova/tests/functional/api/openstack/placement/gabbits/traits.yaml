@@ -55,6 +55,12 @@ tests:
   DELETE: /traits/CUSTOM_NON_EXSITED
   status: 404
 
+- name: try to delete standard trait
+  DELETE: /traits/HW_CPU_X86_SSE
+  status: 400
+  response_strings:
+      - Cannot delete standard trait
+
 - name: create CUSTOM_TRAIT_1
   PUT: /traits/CUSTOM_TRAIT_1
   status: 201
@@ -71,14 +77,17 @@ tests:
   response_forbidden_headers:
     - content-type
 
+# NOTE(cdent): This simply tests that traits we know should be
+# present are in the results. We can't check length here because
+# the standard traits, which will grow over time, are present.
 - name: list traits
   GET: /traits
   status: 200
-  response_json_paths:
-    $.traits.`len`: 2
   response_strings:
     - CUSTOM_TRAIT_1
     - CUSTOM_TRAIT_2
+    - MISC_SHARES_VIA_AGGREGATE
+    - HW_CPU_X86_SHA
 
 - name: list traits with invalid format of name parameter
   GET: /traits?name=in_abc

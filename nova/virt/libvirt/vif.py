@@ -23,13 +23,13 @@ import os
 
 import os_vif
 from os_vif import exception as osv_exception
+from os_vif.objects import fields as osv_fields
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
 from nova.network import linux_net
 from nova.network import model as network_model
 from nova.network import os_vif_util
@@ -469,6 +469,22 @@ class LibvirtGenericVIFDriver(object):
             conf.driver_name = None
             conf.vhost_queues = None
 
+    def _set_config_VIFHostDevice(self, instance, vif, conf, host=None):
+        if vif.dev_type == osv_fields.VIFHostDeviceDevType.ETHERNET:
+            # This sets the required fields for an <interface type='hostdev'>
+            # section in a libvirt domain (by using a subset of hw_veb's
+            # options).
+            designer.set_vif_host_backend_hw_veb(
+                conf, 'hostdev', vif.dev_address, None)
+        else:
+            # TODO(jangutter): dev_type == VIFHostDeviceDevType.GENERIC
+            # is currently unsupported under os-vif. The corresponding conf
+            # class would be: LibvirtConfigGuestHostdevPCI
+            # but os-vif only returns a LibvirtConfigGuestInterface object
+            raise exception.InternalError(
+                _("Unsupported os-vif VIFHostDevice dev_type %(type)s") %
+                {'type': vif.dev_type})
+
     def _set_config_VIFPortProfileOpenVSwitch(self, profile, conf):
         conf.vporttype = "openvswitch"
         conf.add_vport_param("interfaceid",
@@ -550,60 +566,6 @@ class LibvirtGenericVIFDriver(object):
         return func(instance, vif, image_meta,
                     inst_type, virt_type, host)
 
-    def _plug_bridge_with_port(self, instance, vif, port):
-        iface_id = self.get_ovs_interfaceid(vif)
-        br_name = self.get_br_name(vif['id'])
-        v1_name, v2_name = self.get_veth_pair_names(vif['id'])
-
-        if not linux_net.device_exists(br_name):
-            utils.execute('brctl', 'addbr', br_name, run_as_root=True)
-            utils.execute('brctl', 'setfd', br_name, 0, run_as_root=True)
-            utils.execute('brctl', 'stp', br_name, 'off', run_as_root=True)
-            utils.execute('tee',
-                          ('/sys/class/net/%s/bridge/multicast_snooping' %
-                           br_name),
-                          process_input='0',
-                          run_as_root=True,
-                          check_exit_code=[0, 1])
-            disv6 = '/proc/sys/net/ipv6/conf/%s/disable_ipv6' % br_name
-            if os.path.exists(disv6):
-                utils.execute('tee',
-                              disv6,
-                              process_input='1',
-                              run_as_root=True,
-                              check_exit_code=[0, 1])
-
-        if not linux_net.device_exists(v2_name):
-            mtu = vif['network'].get_meta('mtu')
-            linux_net._create_veth_pair(v1_name, v2_name, mtu)
-            utils.execute('ip', 'link', 'set', br_name, 'up', run_as_root=True)
-            utils.execute('brctl', 'addif', br_name, v1_name, run_as_root=True)
-            if port == 'ovs':
-                linux_net.create_ovs_vif_port(self.get_bridge_name(vif),
-                                              v2_name, iface_id,
-                                              vif['address'], instance.uuid,
-                                              mtu)
-            elif port == 'ivs':
-                linux_net.create_ivs_vif_port(v2_name, iface_id,
-                                              vif['address'], instance.uuid)
-
-    def plug_ovs_hybrid(self, instance, vif):
-        """Plug using hybrid strategy
-
-        Create a per-VIF linux bridge, then link that bridge to the OVS
-        integration bridge via a veth device, setting up the other end
-        of the veth device just like a normal OVS port.  Then boot the
-        VIF on the linux bridge using standard libvirt mechanisms.
-        """
-        self._plug_bridge_with_port(instance, vif, port='ovs')
-
-    def plug_ivs_ethernet(self, instance, vif):
-        iface_id = self.get_ovs_interfaceid(vif)
-        dev = self.get_vif_devname(vif)
-        linux_net.create_tap_dev(dev)
-        linux_net.create_ivs_vif_port(dev, iface_id, vif['address'],
-                                      instance.uuid)
-
     def plug_ivs_hybrid(self, instance, vif):
         """Plug using hybrid strategy (same as OVS)
 
@@ -612,7 +574,31 @@ class LibvirtGenericVIFDriver(object):
         of the veth device just like a normal IVS port.  Then boot the
         VIF on the linux bridge using standard libvirt mechanisms.
         """
-        self._plug_bridge_with_port(instance, vif, port='ivs')
+        iface_id = self.get_ovs_interfaceid(vif)
+        br_name = self.get_br_name(vif['id'])
+        v1_name, v2_name = self.get_veth_pair_names(vif['id'])
+
+        if not linux_net.device_exists(br_name):
+            utils.execute('brctl', 'addbr', br_name, run_as_root=True)
+            utils.execute('brctl', 'setfd', br_name, 0, run_as_root=True)
+            utils.execute('brctl', 'stp', br_name, 'off', run_as_root=True)
+            nova.privsep.libvirt.disable_multicast_snooping(br_name)
+            nova.privsep.libvirt.disable_ipv6(br_name)
+
+        if not linux_net.device_exists(v2_name):
+            mtu = vif['network'].get_meta('mtu')
+            linux_net._create_veth_pair(v1_name, v2_name, mtu)
+            utils.execute('ip', 'link', 'set', br_name, 'up', run_as_root=True)
+            utils.execute('brctl', 'addif', br_name, v1_name, run_as_root=True)
+            linux_net.create_ivs_vif_port(v2_name, iface_id,
+                                          vif['address'], instance.uuid)
+
+    def plug_ivs_ethernet(self, instance, vif):
+        iface_id = self.get_ovs_interfaceid(vif)
+        dev = self.get_vif_devname(vif)
+        linux_net.create_tap_dev(dev)
+        linux_net.create_ivs_vif_port(dev, iface_id, vif['address'],
+                                      instance.uuid)
 
     def plug_ivs(self, instance, vif):
         if self.get_firewall_required(vif) or vif.is_hybrid_plug_enabled():
@@ -634,10 +620,8 @@ class LibvirtGenericVIFDriver(object):
                           fabric, network_model.VIF_TYPE_IB_HOSTDEV,
                           pci_slot, run_as_root=True)
         except processutils.ProcessExecutionError:
-            LOG.exception(
-                _LE("Failed while plugging ib hostdev vif"),
-                instance=instance
-            )
+            LOG.exception(_("Failed while plugging ib hostdev vif"),
+                          instance=instance)
 
     def plug_802qbg(self, instance, vif):
         pass
@@ -679,7 +663,7 @@ class LibvirtGenericVIFDriver(object):
             utils.execute('mm-ctl', '--bind-port', port_id, dev,
                           run_as_root=True)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while plugging vif"), instance=instance)
+            LOG.exception(_("Failed while plugging vif"), instance=instance)
 
     def plug_iovisor(self, instance, vif):
         """Plug using PLUMgrid IO Visor Driver
@@ -700,7 +684,7 @@ class LibvirtGenericVIFDriver(object):
                           'pgtag2=%s' % net_id, 'pgtag1=%s' % tenant_id,
                           run_as_root=True)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while plugging vif"), instance=instance)
+            LOG.exception(_("Failed while plugging vif"), instance=instance)
 
     def plug_tap(self, instance, vif):
         """Plug a VIF_TYPE_TAP virtual interface."""
@@ -754,7 +738,7 @@ class LibvirtGenericVIFDriver(object):
             linux_net.create_tap_dev(dev, multiqueue=multiqueue)
             utils.execute('vrouter-port-control', cmd_args, run_as_root=True)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while plugging vif"), instance=instance)
+            LOG.exception(_("Failed while plugging vif"), instance=instance)
 
     def _plug_os_vif(self, instance, vif):
         instance_info = os_vif_util.nova_to_osvif_instance(instance)
@@ -796,38 +780,6 @@ class LibvirtGenericVIFDriver(object):
                   "vif_type=%s") % vif_type)
         func(instance, vif)
 
-    def unplug_ovs_hybrid(self, instance, vif):
-        """UnPlug using hybrid strategy
-
-        Unhook port from OVS, unhook port from bridge, delete
-        bridge, and delete both veth devices.
-        """
-        try:
-            br_name = self.get_br_name(vif['id'])
-            v1_name, v2_name = self.get_veth_pair_names(vif['id'])
-
-            if linux_net.device_exists(br_name):
-                utils.execute('brctl', 'delif', br_name, v1_name,
-                              run_as_root=True)
-                utils.execute('ip', 'link', 'set', br_name, 'down',
-                              run_as_root=True)
-                utils.execute('brctl', 'delbr', br_name,
-                              run_as_root=True)
-
-            linux_net.delete_ovs_vif_port(self.get_bridge_name(vif),
-                                          v2_name)
-        except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
-
-    def unplug_ivs_ethernet(self, instance, vif):
-        """Unplug the VIF by deleting the port from the bridge."""
-        try:
-            linux_net.delete_ivs_vif_port(self.get_vif_devname(vif))
-        except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
-
     def unplug_ivs_hybrid(self, instance, vif):
         """UnPlug using hybrid strategy (same as OVS)
 
@@ -844,8 +796,14 @@ class LibvirtGenericVIFDriver(object):
             utils.execute('brctl', 'delbr', br_name, run_as_root=True)
             linux_net.delete_ivs_vif_port(v2_name)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
+
+    def unplug_ivs_ethernet(self, instance, vif):
+        """Unplug the VIF by deleting the port from the bridge."""
+        try:
+            linux_net.delete_ivs_vif_port(self.get_vif_devname(vif))
+        except processutils.ProcessExecutionError:
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
 
     def unplug_ivs(self, instance, vif):
         if self.get_firewall_required(vif) or vif.is_hybrid_plug_enabled():
@@ -864,7 +822,7 @@ class LibvirtGenericVIFDriver(object):
             utils.execute('ebrctl', 'del-port', fabric, vnic_mac,
                           run_as_root=True)
         except Exception:
-            LOG.exception(_LE("Failed while unplugging ib hostdev vif"))
+            LOG.exception(_("Failed while unplugging ib hostdev vif"))
 
     def unplug_802qbg(self, instance, vif):
         pass
@@ -900,8 +858,7 @@ class LibvirtGenericVIFDriver(object):
                           run_as_root=True)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
 
     def unplug_tap(self, instance, vif):
         """Unplug a VIF_TYPE_TAP virtual interface."""
@@ -909,8 +866,7 @@ class LibvirtGenericVIFDriver(object):
         try:
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
 
     def unplug_iovisor(self, instance, vif):
         """Unplug using PLUMgrid IO Visor Driver
@@ -926,8 +882,7 @@ class LibvirtGenericVIFDriver(object):
                           run_as_root=True)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
-            LOG.exception(_LE("Failed while unplugging vif"),
-                          instance=instance)
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
 
     def unplug_vhostuser(self, instance, vif):
         pass
@@ -943,8 +898,7 @@ class LibvirtGenericVIFDriver(object):
             utils.execute('vrouter-port-control', cmd_args, run_as_root=True)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
-            LOG.exception(
-                _LE("Failed while unplugging vif"), instance=instance)
+            LOG.exception(_("Failed while unplugging vif"), instance=instance)
 
     def _unplug_os_vif(self, instance, vif):
         instance_info = os_vif_util.nova_to_osvif_instance(instance)

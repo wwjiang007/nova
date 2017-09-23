@@ -20,7 +20,6 @@
 
 import copy
 import datetime
-import uuid as stdlib_uuid
 
 import iso8601
 import mock
@@ -49,6 +48,7 @@ from sqlalchemy import sql
 from sqlalchemy import Table
 
 from nova import block_device
+from nova.compute import rpcapi as compute_rpcapi
 from nova.compute import task_states
 from nova.compute import vm_states
 import nova.conf
@@ -1051,8 +1051,8 @@ class SqlAlchemyDbApiNoDbTestCase(test.NoDBTestCase):
         t2 = t1 + datetime.timedelta(seconds=10)
         t3 = t2 + datetime.timedelta(hours=1)
 
-        t2_utc = t2.replace(tzinfo=iso8601.iso8601.Utc())
-        t3_utc = t3.replace(tzinfo=iso8601.iso8601.Utc())
+        t2_utc = t2.replace(tzinfo=iso8601.UTC)
+        t3_utc = t3.replace(tzinfo=iso8601.UTC)
 
         datetime_keys = ('created_at', 'deleted_at')
 
@@ -2373,7 +2373,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         dt_keys = ('created_at', 'deleted_at', 'updated_at',
                    'launched_at', 'terminated_at')
         dt = timeutils.utcnow()
-        dt_utc = dt.replace(tzinfo=iso8601.iso8601.Utc())
+        dt_utc = dt.replace(tzinfo=iso8601.UTC)
         for key in dt_keys:
             values[key] = dt_utc
         inst = db.instance_create(self.ctxt, values)
@@ -2390,7 +2390,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         dt_keys = ('created_at', 'deleted_at', 'updated_at',
                    'launched_at', 'terminated_at')
         dt = timeutils.utcnow()
-        dt_utc = dt.replace(tzinfo=iso8601.iso8601.Utc())
+        dt_utc = dt.replace(tzinfo=iso8601.UTC)
         for key in dt_keys:
             values[key] = dt_utc
         inst = db.instance_create(self.ctxt, {})
@@ -2522,6 +2522,22 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
             sys_meta = utils.metadata_to_dict(inst['system_metadata'])
             self.assertEqual(sys_meta, {})
 
+    def test_instance_get_all_by_filters_with_fault(self):
+        inst = self.create_instance_with_args()
+        result = db.instance_get_all_by_filters(self.ctxt, {},
+                                                columns_to_join=['fault'])
+        self.assertIsNone(result[0]['fault'])
+        db.instance_fault_create(self.ctxt,
+                                 {'instance_uuid': inst['uuid'],
+                                  'code': 123})
+        fault2 = db.instance_fault_create(self.ctxt,
+                                          {'instance_uuid': inst['uuid'],
+                                           'code': 123})
+        result = db.instance_get_all_by_filters(self.ctxt, {},
+                                                columns_to_join=['fault'])
+        # Make sure we get the latest fault
+        self.assertEqual(fault2['id'], result[0]['fault']['id'])
+
     def test_instance_get_all_by_filters(self):
         instances = [self.create_instance_with_args() for i in range(3)]
         filtered_instances = db.instance_get_all_by_filters(self.ctxt, {})
@@ -2639,6 +2655,9 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_instance_get_by_uuid(self):
         inst = self.create_instance_with_args()
         result = db.instance_get_by_uuid(self.ctxt, inst['uuid'])
+        # instance_create() will return a fault=None, so delete it before
+        # comparing the result of instance_get_by_uuid()
+        del inst.fault
         self._assertEqualInstances(inst, result)
 
     def test_instance_get_by_uuid_join_empty(self):
@@ -3182,7 +3201,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertIsNone(new['host'])
 
     def test_instance_update_and_get_original_expected_task_state_deleting(self):  # noqa
-        # Ensure that we raise UnepectedDeletingTaskStateError when task state
+        # Ensure that we raise UnexpectedDeletingTaskStateError when task state
         # is not as expected, and it is DELETING
         instance = self.create_instance_with_args(
             task_state=task_states.DELETING)
@@ -3515,14 +3534,23 @@ class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_service_create_disabled(self):
         self.flags(enable_new_services=False)
-        service = self._create_service({})
+        service = self._create_service({'binary': 'nova-compute'})
         self.assertTrue(service['disabled'])
 
     def test_service_create_disabled_reason(self):
         self.flags(enable_new_services=False)
-        service = self._create_service({})
-        msg = "New service disabled due to config option."
+        service = self._create_service({'binary': 'nova-compute'})
+        msg = "New compute service disabled due to config option."
         self.assertEqual(msg, service['disabled_reason'])
+
+    def test_service_create_disabled_non_compute_ignored(self):
+        """Tests that enable_new_services=False has no effect on
+        auto-disabling a new non-nova-compute service.
+        """
+        self.flags(enable_new_services=False)
+        service = self._create_service({'binary': 'nova-scheduler'})
+        self.assertFalse(service['disabled'])
+        self.assertIsNone(service['disabled_reason'])
 
     def test_service_destroy(self):
         service1 = self._create_service({})
@@ -3814,6 +3842,38 @@ class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Run the online migration again to see nothing was processed.
         total, done = db.service_uuids_online_data_migration(
             self.ctxt, 10)
+        self.assertEqual(0, total)
+        self.assertEqual(0, done)
+
+    def test_migration_migrate_to_uuid(self):
+        total, done = sqlalchemy_api.migration_migrate_to_uuid(self.ctxt, 10)
+        self.assertEqual(0, total)
+        self.assertEqual(0, done)
+
+        # Create two migrations, one with a uuid and one without.
+        db.migration_create(self.ctxt,
+                            dict(source_compute='src', source_node='srcnode',
+                                 dest_compute='dst', dest_node='dstnode',
+                                 status='running'))
+        db.migration_create(self.ctxt,
+                            dict(source_compute='src', source_node='srcnode',
+                                 dest_compute='dst', dest_node='dstnode',
+                                 status='running',
+                                 uuid=uuidsentinel.migration2))
+
+        # Now migrate them, we should find one and update one
+        total, done = sqlalchemy_api.migration_migrate_to_uuid(self.ctxt, 10)
+        self.assertEqual(1, total)
+        self.assertEqual(1, done)
+
+        # Get the migrations back to make sure the original uuid didn't change.
+        migrations = db.migration_get_all_by_filters(self.ctxt, {})
+        uuids = [m.uuid for m in migrations]
+        self.assertIn(uuidsentinel.migration2, uuids)
+        self.assertNotIn(None, uuids)
+
+        # Run the online migration again to see nothing was processed.
+        total, done = sqlalchemy_api.migration_migrate_to_uuid(self.ctxt, 10)
         self.assertEqual(0, total)
         self.assertEqual(0, done)
 
@@ -5665,17 +5725,8 @@ class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
         non_bulk_ips_for_delete = create_ips(4, 3)
         non_bulk_ips_for_non_delete = create_ips(5, 3)
         non_bulk_ips = non_bulk_ips_for_delete + non_bulk_ips_for_non_delete
-        project_id = 'fake_project'
-        reservations = quota.QUOTAS.reserve(self.ctxt,
-                                      floating_ips=len(non_bulk_ips),
-                                      project_id=project_id)
         for dct in non_bulk_ips:
             self._create_floating_ip(dct)
-        quota.QUOTAS.commit(self.ctxt, reservations, project_id=project_id)
-        self.assertEqual(db.quota_usage_get_all_by_project(
-                            self.ctxt, project_id),
-                            {'project_id': project_id,
-                             'floating_ips': {'in_use': 6, 'reserved': 0}})
         ips_for_delete.extend(non_bulk_ips_for_delete)
         ips_for_non_delete.extend(non_bulk_ips_for_non_delete)
 
@@ -5684,10 +5735,6 @@ class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
         expected_addresses = [x['address'] for x in ips_for_non_delete]
         self._assertEqualListsOfPrimitivesAsSets(self._get_existing_ips(),
                                                  expected_addresses)
-        self.assertEqual(db.quota_usage_get_all_by_project(
-                            self.ctxt, project_id),
-                            {'project_id': project_id,
-                             'floating_ips': {'in_use': 3, 'reserved': 0}})
 
     def test_floating_ip_create(self):
         floating_ip = self._create_floating_ip({})
@@ -7836,8 +7883,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         super(ComputeNodeTestCase, self).setUp()
         self.ctxt = context.get_admin_context()
         self.service_dict = dict(host='host1', binary='nova-compute',
-                            topic=CONF.compute_topic, report_count=1,
-                            disabled=False)
+                            topic=compute_rpcapi.RPC_TOPIC,
+                            report_count=1, disabled=False)
         self.service = db.service_create(self.ctxt, self.service_dict)
         self.compute_node_dict = dict(vcpus=2, memory_mb=1024, local_gb=2048,
                                  uuid=uuidutils.generate_uuid(),
@@ -7902,8 +7949,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_compute_node_get_all_by_pagination(self):
         service_dict = dict(host='host2', binary='nova-compute',
-                            topic=CONF.compute_topic, report_count=1,
-                            disabled=False)
+                            topic=compute_rpcapi.RPC_TOPIC,
+                            report_count=1, disabled=False)
         service = db.service_create(self.ctxt, service_dict)
         compute_node_dict = dict(vcpus=2, memory_mb=1024, local_gb=2048,
                                  uuid=uuidsentinel.fake_compute_node,
@@ -8160,8 +8207,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_compute_node_statistics(self):
         service_dict = dict(host='hostA', binary='nova-compute',
-                            topic=CONF.compute_topic, report_count=1,
-                            disabled=False)
+                            topic=compute_rpcapi.RPC_TOPIC,
+                            report_count=1, disabled=False)
         service = db.service_create(self.ctxt, service_dict)
         # Define the various values for the new compute node
         new_vcpus = 4
@@ -8238,7 +8285,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_compute_node_statistics_disabled_service(self):
         serv = db.service_get_by_host_and_topic(
-            self.ctxt, 'host1', CONF.compute_topic)
+            self.ctxt, 'host1', compute_rpcapi.RPC_TOPIC)
         db.service_update(self.ctxt, serv['id'], {'disabled': True})
         stats = db.compute_node_statistics(self.ctxt)
         self.assertEqual(stats.pop('count'), 0)
@@ -8266,7 +8313,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_compute_node_statistics_with_other_service(self):
         other_service = self.service_dict.copy()
         other_service['topic'] = 'fake-topic'
-        other_service['binary'] = 'nova-fake'
+        other_service['binary'] = 'nova-api'
         db.service_create(self.ctxt, other_service)
 
         stats = db.compute_node_statistics(self.ctxt)
@@ -8284,6 +8331,55 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
                 'memory_mb_used': 0}
         for key, value in data.items():
             self.assertEqual(value, stats.pop(key))
+
+    def test_compute_node_statistics_delete_and_recreate_service(self):
+        # Test added for bug #1692397, this test tests that deleted
+        # service record will not be selected when calculate compute
+        # node statistics.
+
+        # Let's first assert what we expect the setup to look like.
+        self.assertEqual(1, len(db.service_get_all_by_binary(
+            self.ctxt, 'nova-compute')))
+        self.assertEqual(1, len(db.compute_node_get_all_by_host(
+            self.ctxt, 'host1')))
+        # Get the statistics for the original node/service before we delete
+        # the service.
+        original_stats = db.compute_node_statistics(self.ctxt)
+
+        # At this point we have one compute_nodes record and one services
+        # record pointing at the same host. Now we need to simulate the user
+        # deleting the service record in the API, which will only delete very
+        # old compute_nodes records where the service and compute node are
+        # linked via the compute_nodes.service_id column, which is the case
+        # in this test class; at some point we should decouple those to be more
+        # modern.
+        db.service_destroy(self.ctxt, self.service['id'])
+
+        # Now we're going to simulate that the nova-compute service was
+        # restarted, which will create a new services record with a unique
+        # uuid but it will have the same host, binary and topic values as the
+        # deleted service. The unique constraints don't fail in this case since
+        # they include the deleted column and this service and the old service
+        # have a different deleted value.
+        service2_dict = self.service_dict.copy()
+        service2_dict['uuid'] = uuidsentinel.service2_uuid
+        db.service_create(self.ctxt, service2_dict)
+
+        # Again, because of the way the setUp is done currently, the compute
+        # node was linked to the original now-deleted service, so when we
+        # deleted that service it also deleted the compute node record, so we
+        # have to simulate the ResourceTracker in the nova-compute worker
+        # re-creating the compute nodes record.
+        new_compute_node = self.compute_node_dict.copy()
+        del new_compute_node['service_id']  # make it a new style compute node
+        new_compute_node['uuid'] = uuidsentinel.new_compute_uuid
+        db.compute_node_create(self.ctxt, new_compute_node)
+
+        # Now get the stats for all compute nodes (we just have one) and it
+        # should just be for a single service, not double, as we should ignore
+        # the (soft) deleted service.
+        stats = db.compute_node_statistics(self.ctxt)
+        self.assertDictEqual(original_stats, stats)
 
     def test_compute_node_not_found(self):
         self.assertRaises(exception.ComputeHostNotFound, db.compute_node_get,
@@ -9091,7 +9187,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
         self.uuidstrs = []
         for _ in range(6):
-            self.uuidstrs.append(stdlib_uuid.uuid4().hex)
+            self.uuidstrs.append(uuidutils.generate_uuid(dashed=False))
 
     def _assert_shadow_tables_empty_except(self, *exceptions):
         """Ensure shadow tables are empty
@@ -9725,6 +9821,7 @@ class PciDeviceDBApiTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def _get_fake_pci_devs(self):
         return {'id': 3353,
+                'uuid': uuidsentinel.pci_device1,
                 'compute_node_id': 1,
                 'address': '0000:0f:08.7',
                 'vendor_id': '8086',
@@ -9739,6 +9836,7 @@ class PciDeviceDBApiTestCase(test.TestCase, ModelsObjectComparatorMixin):
                 'request_id': None,
                 'parent_addr': '0000:0f:00.1',
                 }, {'id': 3356,
+                'uuid': uuidsentinel.pci_device3356,
                 'compute_node_id': 1,
                 'address': '0000:0f:03.7',
                 'parent_addr': '0000:0f:03.0',
@@ -10679,3 +10777,62 @@ class ConsoleAuthTokenTestCase(test.TestCase):
         self.assertIsNone(db_obj1, "the token should have been deleted")
         self.assertIsNotNone(db_obj2, "a valid token should be found here")
         self.assertIsNotNone(db_obj3, "a valid token should be found here")
+
+
+class SortMarkerHelper(test.TestCase):
+    def setUp(self):
+        super(SortMarkerHelper, self).setUp()
+
+        self.context = context.RequestContext('fake', 'fake')
+        self.instances = []
+
+        launched = datetime.datetime(2005, 4, 30, 13, 00, 00)
+        td = datetime.timedelta
+
+        values = {
+            'key_name': ['dan', 'dan', 'taylor', 'jax'],
+            'memory_mb': [512, 1024, 2048, 256],
+            'launched_at': [launched + td(1), launched - td(256),
+                            launched + td(32), launched - td(5000)],
+        }
+
+        for i in range(0, 4):
+            inst = {'user_id': self.context.user_id,
+                    'project_id': self.context.project_id}
+            for key in values:
+                inst[key] = values[key].pop(0)
+            db_instance = db.instance_create(self.context, inst)
+            self.instances.append(db_instance)
+
+    def test_thing(self):
+        # Pull out the first instance sorted by our desired key
+        first = db.instance_get_all_by_filters_sort(self.context, {}, limit=1,
+                                                    sort_keys=['memory_mb'],
+                                                    sort_dirs=['asc'])
+        marker = first[0]['uuid']
+
+        # Starting with the marker, page through one at a time looking for the
+        # instance that would match if the previous marker was our marker.
+        values_found = [marker]
+        while True:
+            marker_inst = db.instance_get_by_uuid(self.context, marker)
+
+            marker = db.instance_get_by_sort_filters(
+                self.context,
+                ['memory_mb'],
+                ['asc'],
+                [marker_inst['memory_mb'] + 1,
+                 marker_inst['key_name'] + 'z'])
+            if not marker:
+                break
+            values_found.append(marker)
+
+        # Make sure we found everything
+        self.assertEqual(set([x['uuid'] for x in self.instances]),
+                         set(values_found))
+
+    def test_no_match(self):
+        marker = db.instance_get_by_sort_filters(self.context,
+                                                 ['memory_mb'], ['asc'],
+                                                 [4096])
+        self.assertIsNone(marker)

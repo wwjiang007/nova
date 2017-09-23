@@ -17,8 +17,6 @@ import hashlib
 import importlib
 import os
 import os.path
-import socket
-import struct
 import tempfile
 
 import eventlet
@@ -147,36 +145,13 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.assertTrue([c for c in password
                          if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'])
 
-    def test_read_file_as_root(self):
-        def fake_execute(*args, **kwargs):
-            if args[1] == 'bad':
-                raise processutils.ProcessExecutionError()
-            return 'fakecontents', None
-
-        self.stub_out('nova.utils.execute', fake_execute)
-        contents = utils.read_file_as_root('good')
-        self.assertEqual(contents, 'fakecontents')
-        self.assertRaises(exception.FileNotFound,
-                          utils.read_file_as_root, 'bad')
-
-    def test_temporary_chown(self):
-        def fake_execute(*args, **kwargs):
-            if args[0] == 'chown':
-                fake_execute.uid = args[1]
-        self.stub_out('nova.utils.execute', fake_execute)
-
+    @mock.patch('nova.privsep.path.chown')
+    def test_temporary_chown(self, mock_chown):
         with tempfile.NamedTemporaryFile() as f:
             with utils.temporary_chown(f.name, owner_uid=2):
-                self.assertEqual(fake_execute.uid, 2)
-            self.assertEqual(fake_execute.uid, os.getuid())
-
-    def test_xhtml_escape(self):
-        self.assertEqual('&quot;foo&quot;', utils.xhtml_escape('"foo"'))
-        self.assertEqual('&apos;foo&apos;', utils.xhtml_escape("'foo'"))
-        self.assertEqual('&amp;', utils.xhtml_escape('&'))
-        self.assertEqual('&gt;', utils.xhtml_escape('>'))
-        self.assertEqual('&lt;', utils.xhtml_escape('<'))
-        self.assertEqual('&lt;foo&gt;', utils.xhtml_escape('<foo>'))
+                mock_chown.assert_called_once_with(f.name, uid=2)
+                mock_chown.reset_mock()
+            mock_chown.assert_called_once_with(f.name, uid=os.getuid())
 
     def test_get_shortened_ipv6(self):
         self.assertEqual("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
@@ -246,21 +221,6 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.flags(rootwrap_config='foo')
         cmd = utils.get_root_helper()
         self.assertEqual('sudo nova-rootwrap foo', cmd)
-
-    @mock.patch('nova.utils.RootwrapProcessHelper')
-    def test_get_root_helper_proc(self, mock_proc_helper):
-        self.flags(use_rootwrap_daemon=False)
-        self.flags(rootwrap_config="/path/to/conf")
-        utils._get_rootwrap_helper()
-        mock_proc_helper.assert_called_once_with()
-
-    @mock.patch('nova.utils.RootwrapDaemonHelper')
-    def test_get_root_helper_daemon(self, mock_daemon_helper):
-        conf_path = '/path/to/conf'
-        self.flags(use_rootwrap_daemon=True)
-        self.flags(rootwrap_config=conf_path)
-        utils._get_rootwrap_helper()
-        mock_daemon_helper.assert_called_once_with(conf_path)
 
     def test_use_sudo(self):
         self.flags(disable_rootwrap=True, group='workarounds')
@@ -481,58 +441,6 @@ Exit code: -2''')
             [mock.call(['a', '1'], None),
              mock.call(['a', '1'], None),
              mock.call(['a', '1'], None)])
-
-
-class VPNPingTestCase(test.NoDBTestCase):
-    """Unit tests for utils.vpn_ping()."""
-    def setUp(self):
-        super(VPNPingTestCase, self).setUp()
-        self.port = 'fake'
-        self.address = 'fake'
-        self.session_id = 0x1234
-        self.fmt = '!BQxxxxxQxxxx'
-
-    def fake_reply_packet(self, pkt_id=0x40):
-        return struct.pack(self.fmt, pkt_id, 0x0, self.session_id)
-
-    def setup_socket(self, mock_socket, return_value, side_effect=None):
-        socket_obj = mock.MagicMock()
-        if side_effect is not None:
-            socket_obj.recv.side_effect = side_effect
-        else:
-            socket_obj.recv.return_value = return_value
-        mock_socket.return_value = socket_obj
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_timeout(self, mock_socket):
-        """Server doesn't reply within timeout."""
-        self.setup_socket(mock_socket, None, socket.timeout)
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_bad_len(self, mock_socket):
-        """Test a short/invalid server reply."""
-        self.setup_socket(mock_socket, 'fake_reply')
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_bad_id(self, mock_socket):
-        """Server sends an unknown packet ID."""
-        self.setup_socket(mock_socket, self.fake_reply_packet(pkt_id=0x41))
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_ok(self, mock_socket):
-        self.setup_socket(mock_socket, self.fake_reply_packet())
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertTrue(rc)
 
 
 class MonkeyPatchTestCase(test.NoDBTestCase):
@@ -800,33 +708,6 @@ class MkfsTestCase(test.NoDBTestCase):
         utils.mkfs('swap', '/my/swap/block/dev', 'swap-vol')
         mock_execute.assert_called_once_with('mkswap', '-L', 'swap-vol',
             '/my/swap/block/dev', run_as_root=False)
-
-
-class LastBytesTestCase(test.NoDBTestCase):
-    """Test the last_bytes() utility method."""
-
-    def setUp(self):
-        super(LastBytesTestCase, self).setUp()
-        self.f = six.BytesIO(b'1234567890')
-
-    def test_truncated(self):
-        self.f.seek(0, os.SEEK_SET)
-        out, remaining = utils.last_bytes(self.f, 5)
-        self.assertEqual(out, b'67890')
-        self.assertGreater(remaining, 0)
-
-    def test_read_all(self):
-        self.f.seek(0, os.SEEK_SET)
-        out, remaining = utils.last_bytes(self.f, 1000)
-        self.assertEqual(out, b'1234567890')
-        self.assertFalse(remaining > 0)
-
-    def test_seek_too_far_real_file(self):
-        # StringIO doesn't raise IOError if you see past the start of the file.
-        with tempfile.TemporaryFile() as flo:
-            content = b'1234567890'
-            flo.write(content)
-            self.assertEqual((content, 0), utils.last_bytes(flo, 1000))
 
 
 class MetadataToDictTestCase(test.NoDBTestCase):

@@ -40,6 +40,7 @@ from nova.conf import hyperv
 from nova.conf import ipv6
 from nova.conf import ironic
 from nova.conf import key_manager
+from nova.conf import keystone
 from nova.conf import libvirt
 from nova.conf import mks
 from nova.conf import netconf
@@ -60,7 +61,6 @@ from nova.conf import service
 from nova.conf import service_token
 from nova.conf import servicegroup
 from nova.conf import spice
-from nova.conf import ssl
 from nova.conf import upgrade_levels
 from nova.conf import vendordata
 from nova.conf import vmware
@@ -94,6 +94,7 @@ mks.register_opts(CONF)
 ipv6.register_opts(CONF)
 ironic.register_opts(CONF)
 key_manager.register_opts(CONF)
+keystone.register_opts(CONF)
 libvirt.register_opts(CONF)
 netconf.register_opts(CONF)
 network.register_opts(CONF)
@@ -112,7 +113,6 @@ service.register_opts(CONF)
 service_token.register_opts(CONF)
 servicegroup.register_opts(CONF)
 spice.register_opts(CONF)
-ssl.register_opts(CONF)
 upgrade_levels.register_opts(CONF)
 vendordata.register_opts(CONF)
 vmware.register_opts(CONF)

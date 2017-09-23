@@ -16,6 +16,7 @@ import mock
 from oslo_vmware import exceptions as oslo_vmw_exceptions
 from oslo_vmware import vim_util as vutil
 
+from nova.compute import power_state
 from nova.compute import vm_states
 from nova import context
 from nova import exception
@@ -132,7 +133,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
             mock.patch.object(vm_util, 'get_vmdk_info',
                               return_value=vmdk_info),
             mock.patch.object(vm_util, 'get_vm_state',
-                              return_value='PoweredOn')
+                              return_value=power_state.RUNNING)
         ) as (get_vm_ref, get_volume_ref, get_vmdk_info,
               get_vm_state):
             self.assertRaises(exception.Invalid,
@@ -291,7 +292,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
             mock.patch.object(vm_util, 'get_vmdk_info',
                               return_value=vmdk_info),
             mock.patch.object(vm_util, 'get_vm_state',
-                              return_value='PoweredOn')
+                              return_value=power_state.RUNNING)
         ) as (get_vm_ref, get_volume_ref, get_vmdk_backed_disk_device,
               get_vmdk_info, get_vm_state):
             self.assertRaises(exception.Invalid,
@@ -411,9 +412,9 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
         adapter_type = adapter_type or default_adapter_type
 
         if adapter_type == constants.ADAPTER_TYPE_IDE:
-            vm_state = 'PoweredOff'
+            vm_state = power_state.SHUTDOWN
         else:
-            vm_state = 'PoweredOn'
+            vm_state = power_state.RUNNING
         with test.nested(
             mock.patch.object(vm_util, 'get_vm_ref', return_value=vm_ref),
             mock.patch.object(self._volumeops, '_get_volume_ref'),
@@ -493,9 +494,9 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
     @mock.patch.object(volumeops.VMwareVolumeOps,
                        '_get_vmdk_base_volume_device')
-    @mock.patch.object(volumeops.VMwareVolumeOps, '_relocate_vmdk_volume')
+    @mock.patch.object(vm_util, 'relocate_vm')
     def test_consolidate_vmdk_volume_with_no_relocate(
-            self, relocate_vmdk_volume, get_vmdk_base_volume_device):
+            self, relocate_vm, get_vmdk_base_volume_device):
         file_name = mock.sentinel.file_name
         backing = mock.Mock(fileName=file_name)
         original_device = mock.Mock(backing=backing)
@@ -510,18 +511,18 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
                                                  device, volume_ref)
 
         get_vmdk_base_volume_device.assert_called_once_with(volume_ref)
-        self.assertFalse(relocate_vmdk_volume.called)
+        self.assertFalse(relocate_vm.called)
 
     @mock.patch.object(volumeops.VMwareVolumeOps,
                        '_get_vmdk_base_volume_device')
-    @mock.patch.object(volumeops.VMwareVolumeOps, '_relocate_vmdk_volume')
+    @mock.patch.object(vm_util, 'relocate_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, '_get_host_of_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, '_get_res_pool_of_host')
     @mock.patch.object(volumeops.VMwareVolumeOps, 'detach_disk_from_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, 'attach_disk_to_vm')
     def test_consolidate_vmdk_volume_with_relocate(
             self, attach_disk_to_vm, detach_disk_from_vm, get_res_pool_of_host,
-            get_host_of_vm, relocate_vmdk_volume, get_vmdk_base_volume_device):
+            get_host_of_vm, relocate_vm, get_vmdk_base_volume_device):
         file_name = mock.sentinel.file_name
         backing = mock.Mock(fileName=file_name)
         original_device = mock.Mock(backing=backing)
@@ -537,6 +538,8 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
         rp = mock.sentinel.rp
         get_res_pool_of_host.return_value = rp
 
+        detach_disk_from_vm.side_effect = [
+            oslo_vmw_exceptions.FileNotFoundException]
         instance = self._instance
         volume_ref = mock.sentinel.volume_ref
         vm_ref = mock.sentinel.vm_ref
@@ -548,7 +551,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
                                                  disk_type)
 
         get_vmdk_base_volume_device.assert_called_once_with(volume_ref)
-        relocate_vmdk_volume.assert_called_once_with(
+        relocate_vm.assert_called_once_with(self._session,
             volume_ref, rp, datastore, host)
         detach_disk_from_vm.assert_called_once_with(
             volume_ref, instance, original_device, destroy_disk=True)
@@ -558,14 +561,14 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
     @mock.patch.object(volumeops.VMwareVolumeOps,
                        '_get_vmdk_base_volume_device')
-    @mock.patch.object(volumeops.VMwareVolumeOps, '_relocate_vmdk_volume')
+    @mock.patch.object(vm_util, 'relocate_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, '_get_host_of_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, '_get_res_pool_of_host')
     @mock.patch.object(volumeops.VMwareVolumeOps, 'detach_disk_from_vm')
     @mock.patch.object(volumeops.VMwareVolumeOps, 'attach_disk_to_vm')
     def test_consolidate_vmdk_volume_with_missing_vmdk(
             self, attach_disk_to_vm, detach_disk_from_vm, get_res_pool_of_host,
-            get_host_of_vm, relocate_vmdk_volume, get_vmdk_base_volume_device):
+            get_host_of_vm, relocate_vm, get_vmdk_base_volume_device):
         file_name = mock.sentinel.file_name
         backing = mock.Mock(fileName=file_name)
         original_device = mock.Mock(backing=backing)
@@ -581,7 +584,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
         rp = mock.sentinel.rp
         get_res_pool_of_host.return_value = rp
 
-        relocate_vmdk_volume.side_effect = [
+        relocate_vm.side_effect = [
             oslo_vmw_exceptions.FileNotFoundException, None]
 
         instance = mock.sentinel.instance
@@ -596,9 +599,11 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
         get_vmdk_base_volume_device.assert_called_once_with(volume_ref)
 
-        relocate_calls = [mock.call(volume_ref, rp, datastore, host),
-                          mock.call(volume_ref, rp, datastore, host)]
-        self.assertEqual(relocate_calls, relocate_vmdk_volume.call_args_list)
+        relocate_calls = [mock.call(self._session, volume_ref, rp, datastore,
+                                    host),
+                          mock.call(self._session, volume_ref, rp, datastore,
+                                    host)]
+        self.assertEqual(relocate_calls, relocate_vm.call_args_list)
         detach_disk_from_vm.assert_called_once_with(
             volume_ref, instance, original_device)
         attach_disk_to_vm.assert_called_once_with(

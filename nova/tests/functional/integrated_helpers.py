@@ -27,6 +27,7 @@ import nova.conf
 import nova.image.glance
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional.api import client as api_client
 from nova.tests.unit import cast_as_call
 import nova.tests.unit.image.fake
 from nova.tests import uuidsentinel as uuids
@@ -74,12 +75,13 @@ class _IntegratedTestBase(test.TestCase):
 
         # TODO(mriedem): Fix the functional tests to work with Neutron.
         self.flags(use_neutron=self.USE_NEUTRON)
-        self.flags(keep_alive=False, group="wsgi")
 
         nova.tests.unit.image.fake.stub_out_image_service(self)
-        self._setup_services()
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(nova_fixtures.PlacementFixture())
+
+        self._setup_services()
 
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
 
@@ -87,7 +89,6 @@ class _IntegratedTestBase(test.TestCase):
         return self.start_service('compute')
 
     def _setup_scheduler_service(self):
-        self.flags(group='scheduler', driver='chance_scheduler')
         return self.start_service('scheduler')
 
     def _setup_services(self):
@@ -201,7 +202,7 @@ class _IntegratedTestBase(test.TestCase):
         return server
 
     def _check_api_endpoint(self, endpoint, expected_middleware):
-        app = self.api_fixture.osapi.app.get((None, '/v2'))
+        app = self.api_fixture.app().get((None, '/v2'))
 
         while getattr(app, 'application', False):
             for middleware in expected_middleware:
@@ -217,21 +218,27 @@ class _IntegratedTestBase(test.TestCase):
 
 
 class InstanceHelperMixin(object):
-    def _wait_for_state_change(self, admin_api, server, expected_status,
-                               max_retries=10):
+    def _wait_for_server_parameter(self, admin_api, server, expected_params,
+                                   max_retries=10):
         retry_count = 0
         while True:
             server = admin_api.get_server(server['id'])
-            if server['status'] == expected_status:
+            if all([server[attr] == expected_params[attr]
+                    for attr in expected_params]):
                 break
             retry_count += 1
             if retry_count == max_retries:
                 self.fail('Wait for state change failed, '
-                          'expected_status=%s, actual_status=%s'
-                          % (expected_status, server['status']))
+                          'expected_params=%s, server=%s'
+                          % (expected_params, server))
             time.sleep(0.5)
 
         return server
+
+    def _wait_for_state_change(self, admin_api, server, expected_status,
+                               max_retries=10):
+        return self._wait_for_server_parameter(
+            admin_api, server, {'status': expected_status}, max_retries)
 
     def _build_minimal_create_server_request(self, api, name, image_uuid=None,
                                              flavor_id=None, networks=None):
@@ -248,3 +255,16 @@ class InstanceHelperMixin(object):
         if networks is not None:
             server['networks'] = networks
         return server
+
+    def _wait_until_deleted(self, server):
+        try:
+            for i in range(40):
+                server = self.api.get_server(server['id'])
+                if server['status'] == 'ERROR':
+                    self.fail('Server went to error state instead of'
+                              'disappearing.')
+                time.sleep(0.5)
+
+            self.fail('Server failed to delete.')
+        except api_client.OpenStackApiNotFoundException:
+            return

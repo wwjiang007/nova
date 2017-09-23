@@ -230,9 +230,9 @@ def if_notifications_enabled(f):
 
 def create_transport(url):
     exmods = get_allowed_exmods()
-    return messaging.get_transport(CONF,
-                                   url=url,
-                                   allowed_remote_exmods=exmods)
+    return messaging.get_rpc_transport(CONF,
+                                       url=url,
+                                       allowed_remote_exmods=exmods)
 
 
 class LegacyValidatingNotifier(object):
@@ -338,6 +338,7 @@ class LegacyValidatingNotifier(object):
         'compute.instance.volume.attach',
         'compute.instance.volume.detach',
         'compute.libvirt.error',
+        'compute.metrics.update',
         'compute_task.build_instances',
         'compute_task.migrate_server',
         'compute_task.rebuild_server',

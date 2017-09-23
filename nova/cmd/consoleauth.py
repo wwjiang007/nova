@@ -19,9 +19,11 @@ import sys
 
 from oslo_log import log as logging
 from oslo_reports import guru_meditation_report as gmr
+from oslo_reports import opts as gmr_opts
 
 import nova.conf
 from nova import config
+from nova.consoleauth import rpcapi
 from nova import objects
 from nova import service
 from nova import version
@@ -33,10 +35,11 @@ def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")
     objects.register_all()
+    gmr_opts.set_defaults(CONF)
 
-    gmr.TextGuruMeditation.setup_autorun(version)
+    gmr.TextGuruMeditation.setup_autorun(version, conf=CONF)
 
     server = service.Service.create(binary='nova-consoleauth',
-                                    topic=CONF.consoleauth_topic)
+                                    topic=rpcapi.RPC_TOPIC)
     service.serve(server)
     service.wait()

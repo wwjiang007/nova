@@ -33,7 +33,7 @@ Possible values:
 * Format is separated values of the form:
   <service_type>:<service_name>:<endpoint_type>
 
-Note: Nova does not support the Cinder v1 API since the Nova 15.0.0 Ocata
+Note: Nova does not support the Cinder v2 API since the Nova 17.0.0 Queens
 release.
 
 Related options:
@@ -48,9 +48,9 @@ this template for cinder endpoint
 Possible values:
 
 * URL for cinder endpoint API
-  e.g. http://localhost:8776/v2/%(project_id)s
+  e.g. http://localhost:8776/v3/%(project_id)s
 
-Note: Nova does not support the Cinder v1 API since the Nova 15.0.0 Ocata
+Note: Nova does not support the Cinder v2 API since the Nova 17.0.0 Queens
 release.
 
 Related options:
@@ -106,5 +106,7 @@ def register_opts(conf):
 
 def list_opts():
     return {
-        cinder_group.name: cinder_opts
+        cinder_group.name: (
+            cinder_opts +
+            ks_loading.get_session_conf_options())
     }

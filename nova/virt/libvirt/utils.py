@@ -22,34 +22,22 @@ import errno
 import os
 import re
 
-from lxml import etree
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 
 import nova.conf
 from nova.i18n import _
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova.objects import fields as obj_fields
 from nova import utils
 from nova.virt.disk import api as disk
 from nova.virt import images
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt.volume import remotefs
-from nova.virt import volumeutils
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
 RESIZE_SNAPSHOT_NAME = 'nova-resize'
-
-
-def execute(*args, **kwargs):
-    return utils.execute(*args, **kwargs)
-
-
-def get_iscsi_initiator():
-    return volumeutils.get_iscsi_initiator()
 
 
 def create_image(disk_format, path, size):
@@ -64,7 +52,7 @@ def create_image(disk_format, path, size):
                  M for Mebibytes, 'G' for Gibibytes, 'T' for Tebibytes).
                  If no suffix is given, it will be interpreted as bytes.
     """
-    execute('qemu-img', 'create', '-f', disk_format, path, size)
+    utils.execute('qemu-img', 'create', '-f', disk_format, path, size)
 
 
 def create_cow_image(backing_file, path, size=None):
@@ -96,7 +84,7 @@ def create_cow_image(backing_file, path, size=None):
         csv_opts = ",".join(cow_opts)
         cow_opts = ['-o', csv_opts]
     cmd = base_cmd + cow_opts + [path]
-    execute(*cmd)
+    utils.execute(*cmd)
 
 
 def create_ploop_image(disk_format, path, size, fs_type):
@@ -115,15 +103,15 @@ def create_ploop_image(disk_format, path, size, fs_type):
     if not fs_type:
         fs_type = CONF.default_ephemeral_format or \
                   disk.FS_FORMAT_EXT4
-    execute('mkdir', '-p', path)
+    utils.execute('mkdir', '-p', path)
     disk_path = os.path.join(path, 'root.hds')
-    execute('ploop', 'init', '-s', size, '-f', disk_format, '-t', fs_type,
-            disk_path, run_as_root=True, check_exit_code=True)
+    utils.execute('ploop', 'init', '-s', size, '-f', disk_format, '-t',
+                  fs_type, disk_path, run_as_root=True, check_exit_code=True)
     # Add read access for all users, because "ploop init" creates
     # disk with rw rights only for root. OpenStack user should have access
     # to the disk to request info via "qemu-img info"
-    execute('chmod', '-R', 'a+r', path,
-            run_as_root=True, check_exit_code=True)
+    utils.execute('chmod', '-R', 'a+r', path,
+                  run_as_root=True, check_exit_code=True)
 
 
 def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
@@ -145,8 +133,8 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
             # 4002000 == 4.2.0
             if hypervisor_version >= 4002000:
                 try:
-                    execute('xend', 'status',
-                            run_as_root=True, check_exit_code=True)
+                    utils.execute('xend', 'status',
+                                  run_as_root=True, check_exit_code=True)
                 except OSError as exc:
                     if exc.errno == errno.ENOENT:
                         LOG.debug("xend is not found")
@@ -160,7 +148,8 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
                     return 'qemu'
             # libvirt will use xend/xm toolstack
             try:
-                out, err = execute('tap-ctl', 'check', check_exit_code=False)
+                out, err = utils.execute('tap-ctl', 'check',
+                                         check_exit_code=False)
                 if out == 'ok\n':
                     # 4000000 == 4.0.0
                     if hypervisor_version > 4000000:
@@ -168,7 +157,7 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
                     else:
                         return "tap"
                 else:
-                    LOG.info(_LI("tap-ctl check: %s"), out)
+                    LOG.info("tap-ctl check: %s", out)
             except OSError as exc:
                 if exc.errno == errno.ENOENT:
                     LOG.debug("tap-ctl tool is not installed")
@@ -228,7 +217,7 @@ def copy_image(src, dest, host=None, receive=False,
         # rather recreated efficiently.  In addition, since
         # coreutils 8.11, holes can be read efficiently too.
         # we add '-r' argument because ploop disks are directories
-        execute('cp', '-r', src, dest)
+        utils.execute('cp', '-r', src, dest)
     else:
         if receive:
             src = "%s:%s" % (utils.safe_ip_format(host), src)
@@ -259,32 +248,6 @@ def write_to_file(path, contents, umask=None):
             os.umask(saved_umask)
 
 
-def chown(path, owner):
-    """Change ownership of file or directory
-
-    :param path: File or directory whose ownership to change
-    :param owner: Desired new owner (given as uid or username)
-    """
-    execute('chown', owner, path, run_as_root=True)
-
-
-def update_mtime(path):
-    """Touch a file without being the owner.
-
-    :param path: File bump the mtime on
-    """
-    try:
-        execute('touch', '-c', path, run_as_root=True)
-    except processutils.ProcessExecutionError as exc:
-        # touch can intermittently fail when launching several instances with
-        # the same base image and using shared storage, so log the exception
-        # but don't fail. Ideally we'd know if we were on shared storage and
-        # would re-raise the error if we are not on shared storage.
-        LOG.warning(_LW("Failed to update mtime on path %(path)s. "
-                        "Error: %(error)s"),
-                    {'path': path, "error": exc})
-
-
 def _id_map_to_config(id_map):
     return "%s:%s:%s" % (id_map.start, id_map.target, id_map.count)
 
@@ -302,8 +265,8 @@ def chown_for_id_maps(path, id_maps):
     gid_maps_str = ','.join([_id_map_to_config(id_map) for id_map in id_maps if
                              isinstance(id_map,
                                         vconfig.LibvirtConfigGuestGIDMap)])
-    execute('nova-idmapshift', '-i', '-u', uid_maps_str,
-            '-g', gid_maps_str, path, run_as_root=True)
+    utils.execute('nova-idmapshift', '-i', '-u', uid_maps_str,
+                  '-g', gid_maps_str, path, run_as_root=True)
 
 
 def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
@@ -326,7 +289,7 @@ def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
         qemu_img_cmd += ('-c',)
 
     qemu_img_cmd += (disk_path, out_path)
-    execute(*qemu_img_cmd)
+    utils.execute(*qemu_img_cmd)
 
 
 def load_file(path):
@@ -350,58 +313,33 @@ def file_open(*args, **kwargs):
     return open(*args, **kwargs)
 
 
-def file_delete(path):
-    """Delete (unlink) file
-
-    Note: The reason this is kept in a separate module is to easily
-          be able to provide a stub module that doesn't alter system
-          state at all (for unit tests)
-    """
-    return os.unlink(path)
-
-
-def path_exists(path):
-    """Returns if path exists
-
-    Note: The reason this is kept in a separate module is to easily
-          be able to provide a stub module that doesn't alter system
-          state at all (for unit tests)
-    """
-    return os.path.exists(path)
-
-
-def find_disk(virt_dom):
+def find_disk(guest):
     """Find root device path for instance
 
     May be file or device
     """
-    xml_desc = virt_dom.XMLDesc(0)
-    domain = etree.fromstring(xml_desc)
-    os_type = domain.find('os/type').text
-    driver = None
-    if CONF.libvirt.virt_type == 'lxc':
-        filesystem = domain.find('devices/filesystem')
-        driver = filesystem.find('driver')
+    guest_config = guest.get_config()
 
-        source = filesystem.find('source')
-        disk_path = source.get('dir')
+    disk_format = None
+    if guest_config.virt_type == 'lxc':
+        filesystem = next(d for d in guest_config.devices
+                          if isinstance(d, vconfig.LibvirtConfigGuestFilesys))
+        disk_path = filesystem.source_dir
         disk_path = disk_path[0:disk_path.rfind('rootfs')]
         disk_path = os.path.join(disk_path, 'disk')
-    elif (CONF.libvirt.virt_type == 'parallels' and
-          os_type == obj_fields.VMMode.EXE):
-        filesystem = domain.find('devices/filesystem')
-        driver = filesystem.find('driver')
-
-        source = filesystem.find('source')
-        disk_path = source.get('file')
+    elif (guest_config.virt_type == 'parallels' and
+          guest_config.os_type == obj_fields.VMMode.EXE):
+        filesystem = next(d for d in guest_config.devices
+                          if isinstance(d, vconfig.LibvirtConfigGuestFilesys))
+        disk_format = filesystem.driver_type
+        disk_path = filesystem.source_file
     else:
-        disk = domain.find('devices/disk')
-        driver = disk.find('driver')
-
-        source = disk.find('source')
-        disk_path = source.get('file') or source.get('dev')
-        if not disk_path and CONF.libvirt.images_type == 'rbd':
-            disk_path = source.get('name')
+        disk = next(d for d in guest_config.devices
+                    if isinstance(d, vconfig.LibvirtConfigGuestDisk))
+        disk_format = disk.driver_format
+        disk_path = disk.source_path if disk.source_type != 'mount' else None
+        if not disk_path and disk.source_protocol == 'rbd':
+            disk_path = disk.source_name
             if disk_path:
                 disk_path = 'rbd:' + disk_path
 
@@ -409,15 +347,11 @@ def find_disk(virt_dom):
         raise RuntimeError(_("Can't retrieve root device path "
                              "from instance libvirt configuration"))
 
-    if driver is not None:
-        format = driver.get('type')
-        # This is a legacy quirk of libvirt/xen. Everything else should
-        # report the on-disk format in type.
-        if format == 'aio':
-            format = 'raw'
-    else:
-        format = None
-    return (disk_path, format)
+    # This is a legacy quirk of libvirt/xen. Everything else should
+    # report the on-disk format in type.
+    if disk_format == 'aio':
+        disk_format = 'raw'
+    return (disk_path, disk_format)
 
 
 def get_disk_type_from_path(path):

@@ -11,12 +11,14 @@
 #    under the License.
 """Test to see if docs exists for routes and methods in the placement API."""
 
+import os
 import sys
 
 from nova.api.openstack.placement import handler
 
 # A humane ordering of HTTP methods for sorted output.
 ORDERED_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+DEPRECATED_METHODS = [('POST', '/resource_providers/{uuid}/inventories')]
 
 
 def _header_line(map_entry):
@@ -25,8 +27,8 @@ def _header_line(map_entry):
     return line
 
 
-def inspect_doc(doc_file):
-    """Load up doc_file and see if any routes are missing.
+def inspect_doc(doc_files):
+    """Load up doc_files and see if any routes are missing.
 
     The routes are defined in handler.ROUTE_DECLARATIONS.
     """
@@ -40,10 +42,13 @@ def inspect_doc(doc_file):
 
     header_lines = []
     for map_entry in routes:
-        header_lines.append(_header_line(map_entry))
+        if map_entry not in DEPRECATED_METHODS:
+            header_lines.append(_header_line(map_entry))
 
-    with open(doc_file) as doc_fh:
-        content_lines = doc_fh.read().splitlines()
+    content_lines = []
+    for doc_file in doc_files:
+        with open(doc_file) as doc_fh:
+            content_lines.extend(doc_fh.read().splitlines())
 
     missing_lines = []
     for line in header_lines:
@@ -60,5 +65,7 @@ def inspect_doc(doc_file):
 
 
 if __name__ == '__main__':
-    doc_file = sys.argv[1]
-    sys.exit(inspect_doc(doc_file))
+    path = sys.argv[1]
+    doc_files = [os.path.join(path, file)
+                 for file in os.listdir(path) if file.endswith(".inc")]
+    sys.exit(inspect_doc(doc_files))

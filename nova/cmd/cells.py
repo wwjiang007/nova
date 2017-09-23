@@ -19,7 +19,9 @@ import sys
 
 from oslo_log import log as logging
 from oslo_reports import guru_meditation_report as gmr
+from oslo_reports import opts as gmr_opts
 
+from nova import cells
 import nova.conf
 from nova import config
 from nova import objects
@@ -28,6 +30,7 @@ from nova import utils
 from nova import version
 
 CONF = nova.conf.CONF
+LOG = logging.getLogger('nova.cells')
 
 
 def main():
@@ -35,11 +38,14 @@ def main():
     logging.setup(CONF, 'nova')
     utils.monkey_patch()
     objects.register_all()
+    gmr_opts.set_defaults(CONF)
 
-    gmr.TextGuruMeditation.setup_autorun(version)
+    gmr.TextGuruMeditation.setup_autorun(version, conf=CONF)
 
+    LOG.warning('Cells v1 is deprecated in favor of Cells v2 and will be '
+                'removed in the future.')
     server = service.Service.create(binary='nova-cells',
-                                    topic=CONF.cells.topic,
+                                    topic=cells.TOPIC,
                                     manager='nova.cells.manager.CellsManager')
     service.serve(server)
     service.wait()

@@ -58,6 +58,7 @@ class IronicNodeState(host_manager.HostState):
         self.free_disk_mb = compute.free_disk_gb * 1024
 
         self.stats = compute.stats or {}
+        self.uuid = compute.uuid
 
         self.total_usable_disk_gb = compute.local_gb
         self.hypervisor_type = compute.hypervisor_type
@@ -112,9 +113,9 @@ class IronicHostManager(host_manager.HostManager):
         if not computes_by_cell:
             computes_by_cell = {}
             for cell in self.cells:
-                with context_module.target_cell(context, cell):
+                with context_module.target_cell(context, cell) as cctxt:
                     computes_by_cell[cell] = (
-                        objects.ComputeNodeList.get_all(context).objects)
+                        objects.ComputeNodeList.get_all(cctxt).objects)
 
         non_ironic_computes = {cell: [c for c in compute_nodes
                                       if not self._is_ironic_compute(c)]

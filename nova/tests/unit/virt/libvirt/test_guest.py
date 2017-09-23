@@ -18,12 +18,12 @@ import sys
 
 import mock
 from oslo_utils import encodeutils
+import six
 
 from nova import context
 from nova import exception
 from nova import test
 from nova.tests.unit.virt.libvirt import fakelibvirt
-from nova import utils
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import host
@@ -84,26 +84,23 @@ class GuestTestCase(test.NoDBTestCase):
         self.assertRaises(test.TestingException, self.guest.launch)
         self.assertEqual(1, mock_safe_decode.called)
 
-    @mock.patch.object(utils, 'execute')
+    @mock.patch('nova.privsep.libvirt.enable_hairpin')
     @mock.patch.object(libvirt_guest.Guest, 'get_interfaces')
-    def test_enable_hairpin(self, mock_get_interfaces, mock_execute):
+    def test_enable_hairpin(self, mock_get_interfaces, mock_writefile):
         mock_get_interfaces.return_value = ["vnet0", "vnet1"]
         self.guest.enable_hairpin()
-        mock_execute.assert_has_calls([
-            mock.call(
-                'tee', '/sys/class/net/vnet0/brport/hairpin_mode',
-                run_as_root=True, process_input='1', check_exit_code=[0, 1]),
-            mock.call(
-                'tee', '/sys/class/net/vnet1/brport/hairpin_mode',
-                run_as_root=True, process_input='1', check_exit_code=[0, 1])])
+        mock_writefile.assert_has_calls([
+            mock.call('vnet0'),
+            mock.call('vnet1')]
+        )
 
     @mock.patch.object(encodeutils, 'safe_decode')
-    @mock.patch.object(utils, 'execute')
+    @mock.patch('nova.privsep.libvirt.enable_hairpin')
     @mock.patch.object(libvirt_guest.Guest, 'get_interfaces')
     def test_enable_hairpin_exception(self, mock_get_interfaces,
-                            mock_execute, mock_safe_decode):
+                            mock_writefile, mock_safe_decode):
         mock_get_interfaces.return_value = ["foo"]
-        mock_execute.side_effect = test.TestingException('oops')
+        mock_writefile.side_effect = test.TestingException
 
         self.assertRaises(test.TestingException, self.guest.enable_hairpin)
         self.assertEqual(1, mock_safe_decode.called)
@@ -226,6 +223,21 @@ class GuestTestCase(test.NoDBTestCase):
             "</xml>", flags=(fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG |
                              fakelibvirt.VIR_DOMAIN_AFFECT_LIVE))
 
+    def test_detach_device_with_retry_from_transient_domain(self):
+        conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
+        conf.to_xml.return_value = "</xml>"
+        get_config = mock.Mock()
+        get_config.side_effect = [conf, conf, None]
+        dev_path = "/dev/vdb"
+        self.domain.isPersistent.return_value = False
+        retry_detach = self.guest.detach_device_with_retry(
+            get_config, dev_path, live=True, inc_sleep_time=.01)
+        self.domain.detachDeviceFlags.assert_called_once_with(
+            "</xml>", flags=fakelibvirt.VIR_DOMAIN_AFFECT_LIVE)
+        self.domain.detachDeviceFlags.reset_mock()
+        retry_detach()
+        self.assertEqual(1, self.domain.detachDeviceFlags.call_count)
+
     def test_detach_device_with_retry_detach_success(self):
         conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
         conf.to_xml.return_value = "</xml>"
@@ -233,10 +245,10 @@ class GuestTestCase(test.NoDBTestCase):
         # Force multiple retries of detach
         get_config.side_effect = [conf, conf, conf, None]
         dev_path = "/dev/vdb"
+        self.domain.isPersistent.return_value = True
 
         retry_detach = self.guest.detach_device_with_retry(
-            get_config, dev_path, persistent=True, live=True,
-            inc_sleep_time=.01)
+            get_config, dev_path, live=True, inc_sleep_time=.01)
         # Ensure we've only done the initial detach call
         self.domain.detachDeviceFlags.assert_called_once_with(
             "</xml>", flags=(fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG |
@@ -255,10 +267,11 @@ class GuestTestCase(test.NoDBTestCase):
         conf.to_xml.return_value = "</xml>"
         # Continue to return some value for the disk config
         get_config = mock.Mock(return_value=conf)
+        self.domain.isPersistent.return_value = True
 
         retry_detach = self.guest.detach_device_with_retry(
-            get_config, "/dev/vdb", persistent=True, live=True,
-            inc_sleep_time=.01, max_retry_count=3)
+            get_config, "/dev/vdb", live=True, inc_sleep_time=.01,
+            max_retry_count=3)
         # Ensure we've only done the initial detach call
         self.domain.detachDeviceFlags.assert_called_once_with(
             "</xml>", flags=(fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG |
@@ -272,9 +285,21 @@ class GuestTestCase(test.NoDBTestCase):
 
     def test_detach_device_with_retry_device_not_found(self):
         get_config = mock.Mock(return_value=None)
-        self.assertRaises(
+        self.domain.isPersistent.return_value = True
+        ex = self.assertRaises(
             exception.DeviceNotFound, self.guest.detach_device_with_retry,
-            get_config, "/dev/vdb", persistent=True, live=True)
+            get_config, "/dev/vdb", live=True)
+        self.assertIn("/dev/vdb", six.text_type(ex))
+
+    def test_detach_device_with_retry_device_not_found_alt_name(self):
+        """Tests to make sure we use the alternative name in errors."""
+        get_config = mock.Mock(return_value=None)
+        self.domain.isPersistent.return_value = True
+        ex = self.assertRaises(
+            exception.DeviceNotFound, self.guest.detach_device_with_retry,
+            get_config, mock.sentinel.device, live=True,
+            alternative_device_name='foo')
+        self.assertIn('foo', six.text_type(ex))
 
     @mock.patch.object(libvirt_guest.Guest, "detach_device")
     def test_detach_device_with_retry_operation_failed(self, mock_detach):
@@ -282,6 +307,8 @@ class GuestTestCase(test.NoDBTestCase):
         # failing because the device is not found
         conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
         conf.to_xml.return_value = "</xml>"
+        self.domain.isPersistent.return_value = True
+
         get_config = mock.Mock(return_value=conf)
         fake_device = "vdb"
         fake_exc = fakelibvirt.make_libvirtError(
@@ -291,29 +318,67 @@ class GuestTestCase(test.NoDBTestCase):
             error_domain=fakelibvirt.VIR_FROM_DOMAIN)
         mock_detach.side_effect = [None, fake_exc]
         retry_detach = self.guest.detach_device_with_retry(
-            get_config, fake_device, persistent=True, live=True,
+            get_config, fake_device, live=True,
             inc_sleep_time=.01, max_retry_count=3)
         # Some time later, we can do the wait/retry to ensure detach
         self.assertRaises(exception.DeviceNotFound, retry_detach)
 
-    @mock.patch.object(libvirt_guest.Guest, "detach_device")
-    def test_detach_device_with_retry_invalid_argument(self, mock_detach):
+    def test_detach_device_with_retry_invalid_argument(self):
         # This simulates a persistent domain detach failing because
         # the device is not found
         conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
         conf.to_xml.return_value = "</xml>"
-        get_config = mock.Mock(return_value=conf)
+        self.domain.isPersistent.return_value = True
+
+        get_config = mock.Mock()
+        # Simulate the persistent domain attach attempt followed by the live
+        # domain attach attempt and success
+        get_config.side_effect = [conf, conf, None]
         fake_device = "vdb"
         fake_exc = fakelibvirt.make_libvirtError(
             fakelibvirt.libvirtError, "",
             error_message="invalid argument: no target device vdb",
             error_code=fakelibvirt.VIR_ERR_INVALID_ARG,
             error_domain=fakelibvirt.VIR_FROM_DOMAIN)
-        mock_detach.side_effect = fake_exc
+        # Detach from persistent raises not found, detach from live succeeds
+        self.domain.detachDeviceFlags.side_effect = [fake_exc, None]
+        retry_detach = self.guest.detach_device_with_retry(get_config,
+            fake_device, live=True, inc_sleep_time=.01, max_retry_count=3)
+        # We should have tried to detach from the persistent domain
+        self.domain.detachDeviceFlags.assert_called_once_with(
+            "</xml>", flags=(fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG |
+                             fakelibvirt.VIR_DOMAIN_AFFECT_LIVE))
+        # During the retry detach, should detach from the live domain
+        self.domain.detachDeviceFlags.reset_mock()
+        retry_detach()
+        # We should have tried to detach from the live domain
+        self.domain.detachDeviceFlags.assert_called_once_with(
+            "</xml>", flags=fakelibvirt.VIR_DOMAIN_AFFECT_LIVE)
+
+    def test_detach_device_with_retry_invalid_argument_no_live(self):
+        # This simulates a persistent domain detach failing because
+        # the device is not found
+        conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
+        conf.to_xml.return_value = "</xml>"
+        self.domain.isPersistent.return_value = True
+
+        get_config = mock.Mock()
+        # Simulate the persistent domain attach attempt
+        get_config.return_value = conf
+        fake_device = "vdb"
+        fake_exc = fakelibvirt.make_libvirtError(
+            fakelibvirt.libvirtError, "",
+            error_message="invalid argument: no target device vdb",
+            error_code=fakelibvirt.VIR_ERR_INVALID_ARG,
+            error_domain=fakelibvirt.VIR_FROM_DOMAIN)
+        # Detach from persistent raises not found
+        self.domain.detachDeviceFlags.side_effect = fake_exc
         self.assertRaises(exception.DeviceNotFound,
-            self.guest.detach_device_with_retry,
-            get_config, fake_device, persistent=True, live=True,
-            inc_sleep_time=.01, max_retry_count=3)
+            self.guest.detach_device_with_retry, get_config,
+            fake_device, live=False, inc_sleep_time=.01, max_retry_count=3)
+        # We should have tried to detach from the persistent domain
+        self.domain.detachDeviceFlags.assert_called_once_with(
+            "</xml>", flags=fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG)
 
     def test_get_xml_desc(self):
         self.guest.get_xml_desc()
@@ -485,11 +550,7 @@ class GuestTestCase(test.NoDBTestCase):
         info = self.guest.get_info(self.host)
         self.domain.info.assert_called_once_with()
         self.assertEqual(1, info.state)
-        self.assertEqual(2, info.max_mem_kb)
-        self.assertEqual(3, info.mem_kb)
-        self.assertEqual(4, info.num_cpu)
-        self.assertEqual(5, info.cpu_time_ns)
-        self.assertEqual(6, info.id)
+        self.assertEqual(6, info.internal_id)
 
     def test_get_power_state(self):
         self.domain.info.return_value = (1, 2, 3, 4, 5)
@@ -666,6 +727,12 @@ class GuestBlockTestCase(test.NoDBTestCase):
         self.domain.blockRebase.assert_called_once_with(
             'vda', "foo", 0,
             flags=fakelibvirt.VIR_DOMAIN_BLOCK_REBASE_RELATIVE)
+
+    def test_rebase_copy_dev(self):
+        self.gblock.rebase("foo", copy_dev=True)
+        self.domain.blockRebase.assert_called_once_with(
+            'vda', "foo", 0,
+            flags=fakelibvirt.VIR_DOMAIN_BLOCK_REBASE_COPY_DEV)
 
     def test_commit(self):
         self.gblock.commit("foo", "top")

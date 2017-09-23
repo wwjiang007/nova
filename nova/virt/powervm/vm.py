@@ -12,13 +12,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import re
+
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
+from oslo_utils import strutils as stru
 from pypowervm import exceptions as pvm_exc
 from pypowervm.helpers import log_helper as pvm_log
 from pypowervm.tasks import power
+from pypowervm.tasks import power_opts as popts
 from pypowervm.tasks import vterm
 from pypowervm import util as pvm_u
 from pypowervm.utils import lpar_builder as lpar_bldr
@@ -26,16 +30,16 @@ from pypowervm.utils import uuid as pvm_uuid
 from pypowervm.utils import validation as pvm_vldn
 from pypowervm.wrappers import base_partition as pvm_bp
 from pypowervm.wrappers import logical_partition as pvm_lpar
+from pypowervm.wrappers import shared_proc_pool as pvm_spp
 import six
 
 from nova.compute import power_state
-from nova import conf
 from nova import exception as exc
+from nova.i18n import _
 from nova.virt import hardware
 
 
 LOG = logging.getLogger(__name__)
-CONF = conf.CONF
 
 _POWERVM_STARTABLE_STATE = (pvm_bp.LPARState.NOT_ACTIVATED,)
 _POWERVM_STOPPABLE_STATE = (
@@ -70,7 +74,11 @@ _POWERVM_TO_NOVA_STATE = {
 
 
 def get_lpar_names(adp):
-    """Get a list of the LPAR names."""
+    """Get a list of the LPAR names.
+
+    :param adp: A pypowervm.adapter.Adapter instance for the PowerVM API.
+    :return: A list of string names of the PowerVM Logical Partitions.
+    """
     return [x.name for x in pvm_lpar.LPAR.search(adp, is_mgmt_partition=False)]
 
 
@@ -144,19 +152,20 @@ def power_off(adapter, instance, force_immediate=False, timeout=None):
     with lockutils.lock('power_%s' % instance.uuid):
         entry = get_instance_wrapper(adapter, instance)
         # Get the current state and see if we can stop the VM
-        LOG.debug("Powering off request for instance %(inst)s which is in "
-                  "state %(state)s.  Force Immediate Flag: %(force)s.",
-                  {'inst': instance.name, 'state': entry.state,
-                   'force': force_immediate})
+        LOG.debug("Powering off request for instance in state %(state)s. "
+                  "Force Immediate Flag: %(force)s.",
+                  {'state': entry.state, 'force': force_immediate},
+                  instance=instance)
         if entry.state in _POWERVM_STOPPABLE_STATE:
             # Now stop the lpar
             try:
-                LOG.debug("Power off executing for instance %(inst)s.",
-                          {'inst': instance.name})
+                LOG.debug("Power off executing.", instance=instance)
                 kwargs = {'timeout': timeout} if timeout else {}
-                force = (power.Force.TRUE if force_immediate
-                         else power.Force.ON_FAILURE)
-                power.power_off(entry, None, force_immediate=force, **kwargs)
+                if force_immediate:
+                    power.PowerOp.stop(
+                        entry, opts=popts.PowerOffOpts().vsp_hard(), **kwargs)
+                else:
+                    power.power_off_progressive(entry, **kwargs)
             except pvm_exc.Error as e:
                 LOG.exception("PowerVM error during power_off.",
                               instance=instance)
@@ -179,8 +188,11 @@ def reboot(adapter, instance, hard):
         try:
             entry = get_instance_wrapper(adapter, instance)
             if entry.state != pvm_bp.LPARState.NOT_ACTIVATED:
-                power.power_off(entry, None, force_immediate=hard,
-                                restart=True)
+                if hard:
+                    power.PowerOp.stop(
+                        entry, opts=popts.PowerOffOpts().vsp_hard().restart())
+                else:
+                    power.power_off_progressive(entry, restart=True)
             else:
                 # pypowervm does NOT throw an exception if "already down".
                 # Any other exception from pypowervm is a legitimate failure;
@@ -301,8 +313,58 @@ def get_vm_qp(adapter, lpar_uuid, qprop=None, log_errors=True):
     return jsonutils.loads(resp.body)
 
 
+def get_vm_info(adapter, instance):
+    """Get the InstanceInfo for an instance.
+
+    :param adapter: The pypowervm.adapter.Adapter for the PowerVM REST API.
+    :param instance: nova.objects.instance.Instance object
+    :returns: An InstanceInfo object.
+    """
+    pvm_uuid = get_pvm_uuid(instance)
+    pvm_state = get_vm_qp(adapter, pvm_uuid, 'PartitionState')
+    nova_state = _translate_vm_state(pvm_state)
+    return hardware.InstanceInfo(nova_state)
+
+
 class VMBuilder(object):
     """Converts a Nova Instance/Flavor into a pypowervm LPARBuilder."""
+    _PVM_PROC_COMPAT = 'powervm:processor_compatibility'
+    _PVM_UNCAPPED = 'powervm:uncapped'
+    _PVM_DED_SHAR_MODE = 'powervm:dedicated_sharing_mode'
+    _PVM_SHAR_PROC_POOL = 'powervm:shared_proc_pool_name'
+    _PVM_SRR_CAPABILITY = 'powervm:srr_capability'
+
+    # Map of PowerVM extra specs to the lpar builder attributes.
+    # '' is used for attributes that are not implemented yet.
+    # None means there is no direct attribute mapping and must
+    # be handled individually
+    _ATTRS_MAP = {
+        'powervm:min_mem': lpar_bldr.MIN_MEM,
+        'powervm:max_mem': lpar_bldr.MAX_MEM,
+        'powervm:min_vcpu': lpar_bldr.MIN_VCPU,
+        'powervm:max_vcpu': lpar_bldr.MAX_VCPU,
+        'powervm:proc_units': lpar_bldr.PROC_UNITS,
+        'powervm:min_proc_units': lpar_bldr.MIN_PROC_U,
+        'powervm:max_proc_units': lpar_bldr.MAX_PROC_U,
+        'powervm:dedicated_proc': lpar_bldr.DED_PROCS,
+        'powervm:shared_weight': lpar_bldr.UNCAPPED_WEIGHT,
+        'powervm:availability_priority': lpar_bldr.AVAIL_PRIORITY,
+        _PVM_UNCAPPED: None,
+        _PVM_DED_SHAR_MODE: None,
+        _PVM_PROC_COMPAT: None,
+        _PVM_SHAR_PROC_POOL: None,
+        _PVM_SRR_CAPABILITY: None,
+    }
+
+    _DED_SHARING_MODES_MAP = {
+        'share_idle_procs': pvm_bp.DedicatedSharingMode.SHARE_IDLE_PROCS,
+        'keep_idle_procs': pvm_bp.DedicatedSharingMode.KEEP_IDLE_PROCS,
+        'share_idle_procs_active':
+            pvm_bp.DedicatedSharingMode.SHARE_IDLE_PROCS_ACTIVE,
+        'share_idle_procs_always':
+            pvm_bp.DedicatedSharingMode.SHARE_IDLE_PROCS_ALWAYS,
+    }
+
     def __init__(self, host_w, adapter):
         """Initialize the converter.
 
@@ -310,6 +372,7 @@ class VMBuilder(object):
         :param adapter: The pypowervm.adapter.Adapter for the PowerVM REST API.
         """
         self.adapter = adapter
+        self.host_w = host_w
         self.stdz = lpar_bldr.DefaultStandardize(host_w)
 
     def lpar_builder(self, inst):
@@ -317,40 +380,129 @@ class VMBuilder(object):
 
         :param inst: the VM instance
         """
-        attrs = {
-            lpar_bldr.NAME: pvm_u.sanitize_partition_name_for_api(inst.name),
-            lpar_bldr.UUID: get_pvm_uuid(inst),
-            lpar_bldr.MEM: inst.flavor.memory_mb,
-            lpar_bldr.VCPU: inst.flavor.vcpus}
-        # TODO(efried): Loop through the extra specs and process powervm keys
+        attrs = self._format_flavor(inst)
         # TODO(thorst, efried) Add in IBMi attributes
         return lpar_bldr.LPARBuilder(self.adapter, attrs, self.stdz)
 
+    def _format_flavor(self, inst):
+        """Returns the pypowervm format of the flavor.
 
-class InstanceInfo(hardware.InstanceInfo):
-    """Instance Information
+        :param inst: The Nova VM instance.
+        :return: A dict that can be used by the LPAR builder.
+        """
+        # The attrs are what is sent to pypowervm to convert the lpar.
+        attrs = {
+            lpar_bldr.NAME: pvm_u.sanitize_partition_name_for_api(inst.name),
+            # The uuid is only actually set on a create of an LPAR
+            lpar_bldr.UUID: get_pvm_uuid(inst),
+            lpar_bldr.MEM: inst.flavor.memory_mb,
+            lpar_bldr.VCPU: inst.flavor.vcpus,
+            # Set the srr capability to True by default
+            lpar_bldr.SRR_CAPABLE: True}
 
-    This object tries to lazy load the attributes since the compute
-    manager retrieves it a lot just to check the status and doesn't need
-    all the attributes.
+        # Loop through the extra specs and process powervm keys
+        for key in inst.flavor.extra_specs.keys():
+            # If it is not a valid key, then can skip.
+            if not self._is_pvm_valid_key(key):
+                continue
 
-    :param adapter: pypowervm adapter
-    :param instance: nova instance
-    """
-    _QP_STATE = 'PartitionState'
+            # Look for the mapping to the lpar builder
+            bldr_key = self._ATTRS_MAP.get(key)
 
-    def __init__(self, adapter, instance):
-        self._adapter = adapter
-        # This is the PowerVM LPAR UUID (not the instance (UU)ID).
-        self.id = get_pvm_uuid(instance)
-        self._state = None
+            # Check for no direct mapping, if the value is none, need to
+            # derive the complex type
+            if bldr_key is None:
+                self._build_complex_type(key, attrs, inst.flavor)
+            else:
+                # We found a direct mapping
+                attrs[bldr_key] = inst.flavor.extra_specs[key]
 
-    @property
-    def state(self):
-        # return the state if we previously loaded it
-        if self._state is not None:
-            return self._state
-        # otherwise, fetch the value now
-        pvm_state = get_vm_qp(self._adapter, self.id, self._QP_STATE)
-        self._state = _translate_vm_state(pvm_state)
-        return self._state
+        return attrs
+
+    def _is_pvm_valid_key(self, key):
+        """Will return if this is a valid PowerVM key.
+
+        :param key: The powervm key.
+        :return: True if valid key.  False if non-powervm key and should be
+                 skipped.
+        """
+        # If not a powervm key, then it is not 'pvm_valid'
+        if not key.startswith('powervm:'):
+            return False
+
+        # Check if this is a valid attribute
+        if key not in self._ATTRS_MAP:
+            # Could be a key from a future release - warn, but ignore.
+            LOG.warning("Unhandled PowerVM key '%s'.", key)
+            return False
+
+        return True
+
+    def _build_complex_type(self, key, attrs, flavor):
+        """If a key does not directly map, this method derives the right value.
+
+        Some types are complex, in that the flavor may have one key that maps
+        to several different attributes in the lpar builder.  This method
+        handles the complex types.
+
+        :param key: The flavor's key.
+        :param attrs: The attribute map to put the value into.
+        :param flavor: The Nova instance flavor.
+        :return: The value to put in for the key.
+        """
+        # Map uncapped to sharing mode
+        if key == self._PVM_UNCAPPED:
+            attrs[lpar_bldr.SHARING_MODE] = (
+                pvm_bp.SharingMode.UNCAPPED
+                if stru.bool_from_string(flavor.extra_specs[key], strict=True)
+                else pvm_bp.SharingMode.CAPPED)
+        elif key == self._PVM_DED_SHAR_MODE:
+            # Dedicated sharing modes...map directly
+            shr_mode_key = flavor.extra_specs[key]
+            mode = self._DED_SHARING_MODES_MAP.get(shr_mode_key)
+            if mode is None:
+                raise exc.InvalidParameterValue(err=_(
+                    "Invalid dedicated sharing mode '%s'!") % shr_mode_key)
+            attrs[lpar_bldr.SHARING_MODE] = mode
+        elif key == self._PVM_SHAR_PROC_POOL:
+            pool_name = flavor.extra_specs[key]
+            attrs[lpar_bldr.SPP] = self._spp_pool_id(pool_name)
+        elif key == self._PVM_PROC_COMPAT:
+            # Handle variants of the supported values
+            attrs[lpar_bldr.PROC_COMPAT] = re.sub(
+                r'\+', '_Plus', flavor.extra_specs[key])
+        elif key == self._PVM_SRR_CAPABILITY:
+            attrs[lpar_bldr.SRR_CAPABLE] = stru.bool_from_string(
+                flavor.extra_specs[key], strict=True)
+        else:
+            # There was no mapping or we didn't handle it.  This is a BUG!
+            raise KeyError(_(
+                "Unhandled PowerVM key '%s'!  Please report this bug.") % key)
+
+    def _spp_pool_id(self, pool_name):
+        """Returns the shared proc pool id for a given pool name.
+
+        :param pool_name: The shared proc pool name.
+        :return: The internal API id for the shared proc pool.
+        """
+        if (pool_name is None or
+                pool_name == pvm_spp.DEFAULT_POOL_DISPLAY_NAME):
+            # The default pool is 0
+            return 0
+
+        # Search for the pool with this name
+        pool_wraps = pvm_spp.SharedProcPool.search(
+            self.adapter, name=pool_name, parent=self.host_w)
+
+        # Check to make sure there is a pool with the name, and only one pool.
+        if len(pool_wraps) > 1:
+            msg = (_('Multiple Shared Processing Pools with name %(pool)s.') %
+                   {'pool': pool_name})
+            raise exc.ValidationError(msg)
+        elif len(pool_wraps) == 0:
+            msg = (_('Unable to find Shared Processing Pool %(pool)s') %
+                   {'pool': pool_name})
+            raise exc.ValidationError(msg)
+
+        # Return the singular pool id.
+        return pool_wraps[0].id

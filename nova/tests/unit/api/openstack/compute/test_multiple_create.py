@@ -17,7 +17,6 @@ import webob
 
 from nova.api.openstack.compute import block_device_mapping \
         as block_device_mapping_v21
-from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import multiple_create as multiple_create_v21
 from nova.api.openstack.compute import servers as servers_v21
 from nova.compute import api as compute_api
@@ -49,9 +48,7 @@ class MultiCreateExtensionTestV21(test.TestCase):
         # Network API needs to be stubbed out before creating the controllers.
         fakes.stub_out_nw_api(self)
 
-        ext_info = extension_info.LoadedExtensionInfo()
-        self.controller = servers_v21.ServersController(
-            extension_info=ext_info)
+        self.controller = servers_v21.ServersController()
 
         def instance_get(context, instance_id):
             """Stub for compute/api create() pulling in instance after
@@ -185,8 +182,8 @@ class MultiCreateExtensionTestV21(test.TestCase):
             'server': {
                 multiple_create_v21.MIN_ATTRIBUTE_NAME: '',
                 'name': 'server_test',
-                'image_ref': image_href,
-                'flavor_ref': flavor_ref,
+                'imageRef': image_href,
+                'flavorRef': flavor_ref,
             }
         }
         self.assertRaises(self.validation_error,
@@ -202,8 +199,8 @@ class MultiCreateExtensionTestV21(test.TestCase):
             'server': {
                 multiple_create_v21.MAX_ATTRIBUTE_NAME: '',
                 'name': 'server_test',
-                'image_ref': image_href,
-                'flavor_ref': flavor_ref,
+                'imageRef': image_href,
+                'flavorRef': flavor_ref,
             }
         }
         self.assertRaises(self.validation_error,
@@ -431,3 +428,36 @@ class MultiCreateExtensionTestV21(test.TestCase):
 
         self.assertRaises(self.validation_error,
                           self.controller.create, self.req, body=body)
+
+    def test_create_multiple_instance_max_count_overquota_min_count_ok(self):
+        self.flags(instances=3, group='quota')
+        image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+        flavor_ref = 'http://localhost/123/flavors/3'
+        body = {
+            'server': {
+                multiple_create_v21.MIN_ATTRIBUTE_NAME: 2,
+                multiple_create_v21.MAX_ATTRIBUTE_NAME: 5,
+                'name': 'server_test',
+                'imageRef': image_href,
+                'flavorRef': flavor_ref,
+            }
+        }
+        res = self.controller.create(self.req, body=body).obj
+        instance_uuids = self.instance_cache_by_uuid.keys()
+        self.assertIn(res["server"]["id"], instance_uuids)
+
+    def test_create_multiple_instance_max_count_overquota_min_count_over(self):
+        self.flags(instances=3, group='quota')
+        image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+        flavor_ref = 'http://localhost/123/flavors/3'
+        body = {
+            'server': {
+                multiple_create_v21.MIN_ATTRIBUTE_NAME: 4,
+                multiple_create_v21.MAX_ATTRIBUTE_NAME: 5,
+                'name': 'server_test',
+                'imageRef': image_href,
+                'flavorRef': flavor_ref,
+            }
+        }
+        self.assertRaises(webob.exc.HTTPForbidden, self.controller.create,
+                          self.req, body=body)

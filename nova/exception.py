@@ -27,13 +27,9 @@ from oslo_log import log as logging
 import webob.exc
 from webob import util as woutil
 
-import nova.conf
 from nova.i18n import _, _LE
 
 LOG = logging.getLogger(__name__)
-
-
-CONF = nova.conf.CONF
 
 
 class ConvertedException(webob.exc.WSGIHTTPException):
@@ -149,6 +145,13 @@ class UnsupportedCinderAPIVersion(NovaException):
     msg_fmt = _('Nova does not support Cinder API version %(version)s')
 
 
+class CinderAPIVersionNotAvailable(NovaException):
+    """Used to indicate that a requested Cinder API version, generally a
+    microversion, is not available.
+    """
+    msg_fmt = _('Cinder API version %(version)s is not available.')
+
+
 class Forbidden(NovaException):
     msg_fmt = _("Forbidden")
     code = 403
@@ -160,10 +163,6 @@ class AdminRequired(Forbidden):
 
 class PolicyNotAuthorized(Forbidden):
     msg_fmt = _("Policy doesn't allow %(action)s to be performed.")
-
-
-class VolumeLimitExceeded(Forbidden):
-    msg_fmt = _("Volume resource quota exceeded")
 
 
 class ImageNotActive(NovaException):
@@ -251,19 +250,38 @@ class VolumeAttachFailed(Invalid):
                 "Reason: %(reason)s")
 
 
-class VolumeUnattached(Invalid):
-    msg_fmt = _("Volume %(volume_id)s is not attached to anything")
-
-
 class VolumeNotCreated(NovaException):
     msg_fmt = _("Volume %(volume_id)s did not finish being created"
                 " even after we waited %(seconds)s seconds or %(attempts)s"
                 " attempts. And its status is %(volume_status)s.")
 
 
+class ExtendVolumeNotSupported(Invalid):
+    msg_fmt = _("Volume size extension is not supported by the hypervisor.")
+
+
 class VolumeEncryptionNotSupported(Invalid):
     msg_fmt = _("Volume encryption is not supported for %(volume_type)s "
                 "volume %(volume_id)s")
+
+
+class TaggedAttachmentNotSupported(Invalid):
+    msg_fmt = _("Tagged device attachment is not yet available.")
+
+
+class VolumeTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged volume attachment is not supported for this server "
+                "instance.")
+
+
+class VolumeTaggedAttachToShelvedNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged volume attachment is not supported for "
+                "shelved-offloaded instances.")
+
+
+class NetworkInterfaceTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged network interface attachment is not supported for "
+                "this server instance.")
 
 
 class InvalidKeypair(Invalid):
@@ -492,10 +510,6 @@ class InvalidDevicePath(Invalid):
 class DevicePathInUse(Invalid):
     msg_fmt = _("The supplied device path (%(path)s) is in use.")
     code = 409
-
-
-class DeviceIsBusy(Invalid):
-    msg_fmt = _("The supplied device (%(device)s) is busy.")
 
 
 class InvalidCPUInfo(Invalid):
@@ -1013,6 +1027,10 @@ class QuotaClassNotFound(QuotaNotFound):
     msg_fmt = _("Quota class %(class_name)s could not be found.")
 
 
+class QuotaClassExists(NovaException):
+    msg_fmt = _("Quota class %(class_name)s exists for resource %(resource)s")
+
+
 class QuotaUsageNotFound(QuotaNotFound):
     msg_fmt = _("Quota usage for project %(project_id)s could not be found.")
 
@@ -1380,11 +1398,11 @@ class OnsetFileLimitExceeded(QuotaError):
 
 
 class OnsetFilePathLimitExceeded(OnsetFileLimitExceeded):
-    msg_fmt = _("Personality file path too long")
+    msg_fmt = _("Personality file path exceeds maximum %(allowed)s")
 
 
 class OnsetFileContentLimitExceeded(OnsetFileLimitExceeded):
-    msg_fmt = _("Personality file content too long")
+    msg_fmt = _("Personality file content exceeds maximum %(allowed)s")
 
 
 class KeypairLimitExceeded(QuotaError):
@@ -1628,24 +1646,6 @@ class InstanceGroupSaveException(NovaException):
     msg_fmt = _("%(field)s should not be part of the updates.")
 
 
-class ImageDownloadModuleError(NovaException):
-    msg_fmt = _("There was an error with the download module %(module)s. "
-                "%(reason)s")
-
-
-class ImageDownloadModuleMetaDataError(ImageDownloadModuleError):
-    msg_fmt = _("The metadata for this location will not work with this "
-                "module %(module)s.  %(reason)s.")
-
-
-class ImageDownloadModuleNotImplementedError(ImageDownloadModuleError):
-    msg_fmt = _("The method %(method_name)s is not implemented.")
-
-
-class ImageDownloadModuleConfigurationError(ImageDownloadModuleError):
-    msg_fmt = _("The module %(module)s is misconfigured: %(reason)s.")
-
-
 class ResourceMonitorError(NovaException):
     msg_fmt = _("Error when creating resource monitor: %(monitor)s")
 
@@ -1713,7 +1713,7 @@ class PciRequestAliasNotDefined(NovaException):
 
 
 class PciConfigInvalidWhitelist(Invalid):
-    msg_fmt = _("Invalid PCI devices Whitelist config %(reason)s")
+    msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
 
 
 # Cannot be templated, msg needs to be constructed when raised.
@@ -1812,8 +1812,9 @@ class ImageNUMATopologyForbidden(Forbidden):
 
 
 class ImageNUMATopologyAsymmetric(Invalid):
-    msg_fmt = _("Asymmetric NUMA topologies require explicit assignment "
-                "of CPUs and memory to nodes in image or flavor")
+    msg_fmt = _("Instance CPUs and/or memory cannot be evenly distributed "
+                "across instance NUMA nodes. Explicit assignment of CPUs "
+                "and memory to nodes is required")
 
 
 class ImageNUMATopologyCPUOutOfRange(Invalid):
@@ -2042,6 +2043,10 @@ class AttachInterfaceNotSupported(Invalid):
                 "instance %(instance_uuid)s.")
 
 
+class InstanceDiagnosticsNotSupported(Invalid):
+    msg_fmt = _("Instance diagnostics are not supported by compute node.")
+
+
 class InvalidReservedMemoryPagesOption(Invalid):
     msg_fmt = _("The format of the option 'reserved_huge_pages' is invalid. "
                 "(found '%(conf)s') Please refer to the nova "
@@ -2086,12 +2091,18 @@ class ResourceClassCannotUpdateStandard(Invalid):
     msg_fmt = _("Cannot update standard resource class %(resource_class)s.")
 
 
+class InvalidResourceAmount(Invalid):
+    msg_fmt = _("Resource amounts must be integers. Received '%(amount)s'.")
+
+
 class InvalidInventory(Invalid):
     msg_fmt = _("Inventory for '%(resource_class)s' on "
                 "resource provider '%(resource_provider)s' invalid.")
 
 
 class InventoryInUse(InvalidInventory):
+    # NOTE(mriedem): This message cannot change without impacting the
+    # nova.scheduler.client.report._RE_INV_IN_USE regex.
     msg_fmt = _("Inventory for '%(resource_classes)s' on "
                 "resource provider '%(resource_provider)s' in use.")
 

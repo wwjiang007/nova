@@ -12,10 +12,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_db import exception as db_exc
+from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
 from nova import db
 from nova import exception
+from nova.i18n import _
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -37,10 +40,12 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
     # Version 1.2: Added migration_type and hidden
     # Version 1.3: Added get_by_id_and_instance()
     # Version 1.4: Added migration progress detail
-    VERSION = '1.4'
+    # Version 1.5: Added uuid
+    VERSION = '1.5'
 
     fields = {
         'id': fields.IntegerField(),
+        'uuid': fields.UUIDField(),
         'source_compute': fields.StringField(nullable=True),
         'dest_compute': fields.StringField(nullable=True),
         'source_node': fields.StringField(nullable=True),
@@ -68,10 +73,13 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
             value = db_migration[key]
             if key == 'migration_type' and value is None:
                 value = determine_migration_type(db_migration)
+            elif key == 'uuid' and value is None:
+                continue
             migration[key] = value
 
         migration._context = context
         migration.obj_reset_changes()
+        migration._ensure_uuid()
         return migration
 
     def obj_make_compatible(self, primitive, target_version):
@@ -89,6 +97,9 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
                 del primitive['disk_total']
                 del primitive['disk_processed']
                 del primitive['disk_remaining']
+        if target_version < (1, 5):
+            if 'uuid' in primitive:
+                del primitive['uuid']
 
     def obj_load_attr(self, attrname):
         if attrname == 'migration_type':
@@ -99,6 +110,19 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
             self.hidden = False
         else:
             super(Migration, self).obj_load_attr(attrname)
+
+    def _ensure_uuid(self):
+        if 'uuid' in self:
+            return
+
+        self.uuid = uuidutils.generate_uuid()
+        try:
+            self.save()
+        except db_exc.DBDuplicateEntry:
+            # NOTE(danms) We raced to generate a uuid for this,
+            # so fetch the winner and use that uuid
+            fresh = self.__class__.get_by_id(self.context, self.id)
+            self.uuid = fresh.uuid
 
     @base.remotable_classmethod
     def get_by_id(cls, context, migration_id):
@@ -122,12 +146,14 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
         if self.obj_attr_is_set('id'):
             raise exception.ObjectActionError(action='create',
                                               reason='already created')
+        if 'uuid' not in self:
+            self.uuid = uuidutils.generate_uuid()
         updates = self.obj_get_changes()
         if 'migration_type' not in updates:
             raise exception.ObjectActionError(
                 action="create",
-                reason="cannot create a Migration object without a "
-                       "migration_type set")
+                reason=_("cannot create a Migration object without a "
+                         "migration_type set"))
         db_migration = db.migration_create(self._context, updates)
         self._from_db_object(self._context, self, db_migration)
 

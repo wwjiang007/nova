@@ -769,6 +769,23 @@ class HostManagerTestCase(test.NoDBTestCase):
         self.assertEqual(len(new_info['instances']), len(orig_inst_dict))
         self.assertFalse(new_info['updated'])
 
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                side_effect=exception.HostMappingNotFound(name='host1'))
+    def test_update_instance_info_unknown_host_mapping_not_found(self,
+                                                                 get_by_host):
+        """Tests that case that update_instance_info is called with an
+        unregistered host so the host manager attempts to recreate the
+        instance list, but there is no host mapping found for the given
+        host (it might have just started not be discovered for cells
+        v2 yet).
+        """
+        ctxt = nova_context.RequestContext()
+        instance_info = objects.InstanceList()
+        self.host_manager.update_instance_info(ctxt, 'host1', instance_info)
+        self.assertDictEqual(
+            {}, self.host_manager._instance_info['host1']['instances'])
+        get_by_host.assert_called_once_with(ctxt, 'host1')
+
     def test_delete_instance_info(self):
         host_name = 'fake_host'
         inst1 = fake_instance.fake_instance_obj('fake_context',
@@ -939,7 +956,7 @@ class HostManagerTestCase(test.NoDBTestCase):
 
         @contextlib.contextmanager
         def fake_set_target(context, cell):
-            yield
+            yield mock.sentinel.cctxt
 
         mock_target.side_effect = fake_set_target
 
@@ -955,8 +972,8 @@ class HostManagerTestCase(test.NoDBTestCase):
         # targeted one if we honored the only-cell destination requirement,
         # and only looked up services and compute nodes in one
         mock_target.assert_called_once_with(context, cells[1])
-        mock_cn.assert_called_once_with(context)
-        mock_sl.assert_called_once_with(context, 'nova-compute',
+        mock_cn.assert_called_once_with(mock.sentinel.cctxt)
+        mock_sl.assert_called_once_with(mock.sentinel.cctxt, 'nova-compute',
                                         include_disabled=True)
 
 
@@ -1061,6 +1078,7 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=1, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
@@ -1104,6 +1122,7 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
@@ -1137,6 +1156,7 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
@@ -1296,6 +1316,7 @@ class HostStateTestCase(test.NoDBTestCase):
         ]
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             metrics=jsonutils.dumps(metrics),
             memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,

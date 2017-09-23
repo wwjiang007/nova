@@ -55,18 +55,25 @@ Possible values:
 """),
 
     cfg.HostAddressOpt(
-        'vncserver_listen',
+        'server_listen',
         default='127.0.0.1',
-        deprecated_group='DEFAULT',
+        deprecated_opts=[
+            cfg.DeprecatedOpt('vncserver_listen', group='DEFAULT'),
+            cfg.DeprecatedOpt('vncserver_listen', group='vnc'),
+        ],
         help="""
 The IP address or hostname on which an instance should listen to for
 incoming VNC connection requests on this node.
 """),
 
     cfg.HostAddressOpt(
-        'vncserver_proxyclient_address',
+        'server_proxyclient_address',
         default='127.0.0.1',
-        deprecated_group='DEFAULT',
+        deprecated_opts=[
+            cfg.DeprecatedOpt('vncserver_proxyclient_address',
+                              group='DEFAULT'),
+            cfg.DeprecatedOpt('vncserver_proxyclient_address', group='vnc'),
+        ],
         help="""
 Private, internal IP address or hostname of VNC console proxy.
 

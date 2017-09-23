@@ -22,7 +22,7 @@ from oslo_utils import excutils
 
 from nova.db import base
 from nova import hooks
-from nova.i18n import _, _LE
+from nova.i18n import _
 from nova.network import model as network_model
 from nova import objects
 
@@ -33,6 +33,11 @@ LOG = logging.getLogger(__name__)
 @hooks.add_hook('instance_network_info')
 def update_instance_cache_with_nw_info(impl, context, instance,
                                        nw_info=None, update_cells=True):
+    if instance.deleted:
+        LOG.debug('Instance is deleted, no further info cache update',
+                  instance=instance)
+        return
+
     try:
         if not isinstance(nw_info, network_model.NetworkInfo):
             nw_info = None
@@ -48,9 +53,10 @@ def update_instance_cache_with_nw_info(impl, context, instance,
         ic = objects.InstanceInfoCache.new(context, instance.uuid)
         ic.network_info = nw_info
         ic.save(update_cells=update_cells)
+        instance.info_cache = ic
     except Exception:
         with excutils.save_and_reraise_exception():
-            LOG.exception(_LE('Failed storing info cache'), instance=instance)
+            LOG.exception('Failed storing info cache', instance=instance)
 
 
 def refresh_cache(f):
@@ -179,8 +185,7 @@ class NetworkAPI(base.Base):
 
     def allocate_for_instance(self, context, instance, vpn,
                               requested_networks, macs=None,
-                              security_groups=None,
-                              dhcp_options=None, bind_host_id=None):
+                              security_groups=None, bind_host_id=None):
         """Allocates all network structures for an instance.
 
         :param context: The request context.
@@ -193,11 +198,6 @@ class NetworkAPI(base.Base):
             with requested_networks which is user supplied).
         :param security_groups: None or security groups to allocate for
             instance.
-        :param dhcp_options: None or a set of key/value pairs that should
-            determine the DHCP BOOTP response, eg. for PXE booting an instance
-            configured with the baremetal hypervisor. It is expected that these
-            are already formatted for the neutron v2 api.
-            See nova/virt/driver.py:dhcp_options_for_instance for an example.
         :param bind_host_id: the host ID to attach to the ports being created.
         :returns: network info as from get_instance_nw_info() below
         """
@@ -210,7 +210,7 @@ class NetworkAPI(base.Base):
 
     def allocate_port_for_instance(self, context, instance, port_id,
                                    network_id=None, requested_ip=None,
-                                   bind_host_id=None):
+                                   bind_host_id=None, tag=None):
         """Allocate port for instance."""
         raise NotImplementedError()
 

@@ -21,9 +21,10 @@ from oslo_log import log as logging
 from oslo_vmware import exceptions as oslo_vmw_exceptions
 from oslo_vmware import vim_util as vutil
 
+from nova.compute import power_state
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LI, _LW
+from nova.i18n import _
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import vm_util
 
@@ -332,7 +333,7 @@ class VMwareVolumeOps(object):
         # IDE does not support disk hotplug
         if adapter_type == constants.ADAPTER_TYPE_IDE:
             state = vm_util.get_vm_state(self._session, instance)
-            if state.lower() != 'poweredoff':
+            if state != power_state.SHUTDOWN:
                 raise exception.Invalid(_('%s does not support disk '
                                           'hotplug.') % adapter_type)
 
@@ -383,22 +384,6 @@ class VMwareVolumeOps(object):
             self._attach_volume_iscsi(connection_info, instance, adapter_type)
         else:
             raise exception.VolumeDriverNotFound(driver_type=driver_type)
-
-    def _relocate_vmdk_volume(self, volume_ref, res_pool, datastore,
-                              host=None):
-        """Relocate the volume.
-
-        The move type will be moveAllDiskBackingsAndAllowSharing.
-        """
-        client_factory = self._session.vim.client.factory
-        spec = vm_util.relocate_vm_spec(client_factory,
-                                        datastore=datastore,
-                                        host=host)
-        spec.pool = res_pool
-        task = self._session._call_method(self._session.vim,
-                                          "RelocateVM_Task", volume_ref,
-                                          spec=spec)
-        self._session._wait_for_task(task)
 
     def _get_host_of_vm(self, vm_ref):
         """Get the ESX host of given VM."""
@@ -461,8 +446,8 @@ class VMwareVolumeOps(object):
 
         # The volume has been moved from its original location.
         # Need to consolidate the VMDK files.
-        LOG.info(_LI("The volume's backing has been relocated to %s. Need to "
-                     "consolidate backing disk file."), current_device_path)
+        LOG.info("The volume's backing has been relocated to %s. Need to "
+                 "consolidate backing disk file.", current_device_path)
 
         # Pick the host and resource pool on which the instance resides.
         # Move the volume to the datastore where the new VMDK file is present.
@@ -475,23 +460,29 @@ class VMwareVolumeOps(object):
                   {'backing': volume_ref, 'rp': res_pool, 'ds': datastore,
                    'host': host})
         try:
-            self._relocate_vmdk_volume(volume_ref, res_pool, datastore, host)
+            vm_util.relocate_vm(self._session, volume_ref, res_pool, datastore,
+                                host)
         except oslo_vmw_exceptions.FileNotFoundException:
             # Volume's vmdk was moved; remove the device so that we can
             # relocate the volume.
-            LOG.warning(_LW("Virtual disk: %s of volume's backing not found."),
-                     original_device_path, exc_info=True)
+            LOG.warning("Virtual disk: %s of volume's backing not found.",
+                        original_device_path, exc_info=True)
             LOG.debug("Removing disk device of volume's backing and "
                       "reattempting relocate.")
             self.detach_disk_from_vm(volume_ref, instance, original_device)
             detached = True
-            self._relocate_vmdk_volume(volume_ref, res_pool, datastore, host)
+            vm_util.relocate_vm(self._session, volume_ref, res_pool, datastore,
+                                host)
 
         # Volume's backing is relocated now; detach the old vmdk if not done
         # already.
         if not detached:
-            self.detach_disk_from_vm(volume_ref, instance, original_device,
-                                     destroy_disk=True)
+            try:
+                self.detach_disk_from_vm(volume_ref, instance,
+                                         original_device, destroy_disk=True)
+            except oslo_vmw_exceptions.FileNotFoundException:
+                LOG.debug("Original volume backing %s is missing, no need "
+                          "to detach it", original_device.backing.fileName)
 
         # Attach the current volume to the volume_ref
         self.attach_disk_to_vm(volume_ref, instance,
@@ -532,7 +523,7 @@ class VMwareVolumeOps(object):
         # IDE does not support disk hotplug
         if vmdk.adapter_type == constants.ADAPTER_TYPE_IDE:
             state = vm_util.get_vm_state(self._session, instance)
-            if state.lower() != 'poweredoff':
+            if state != power_state.SHUTDOWN:
                 raise exception.Invalid(_('%s does not support disk '
                                           'hotplug.') % vmdk.adapter_type)
 
@@ -599,6 +590,6 @@ class VMwareVolumeOps(object):
             # Pick the resource pool on which the instance resides. Move the
             # volume to the datastore of the instance.
             res_pool = self._get_res_pool_of_vm(vm_ref)
-            self._relocate_vmdk_volume(volume_ref, res_pool, datastore)
+            vm_util.relocate_vm(self._session, volume_ref, res_pool, datastore)
 
         self.attach_volume(connection_info, instance, adapter_type)

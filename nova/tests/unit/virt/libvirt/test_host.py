@@ -83,27 +83,6 @@ class HostTestCase(test.NoDBTestCase):
         self.host.get_connection()
         self.assertTrue(self.close_callback)
 
-    @mock.patch.object(fakelibvirt.virConnect, "registerCloseCallback")
-    def test_close_callback_bad_signature(self, mock_close):
-        '''Validates that a connection to libvirt exist,
-           even when registerCloseCallback method has a different
-           number of arguments in the libvirt python library.
-        '''
-        mock_close.side_effect = TypeError('dd')
-        connection = self.host.get_connection()
-        self.assertTrue(connection)
-
-    @mock.patch.object(fakelibvirt.virConnect, "registerCloseCallback")
-    def test_close_callback_not_defined(self, mock_close):
-        '''Validates that a connection to libvirt exist,
-           even when registerCloseCallback method missing from
-           the libvirt python library.
-        '''
-        mock_close.side_effect = AttributeError('dd')
-
-        connection = self.host.get_connection()
-        self.assertTrue(connection)
-
     @mock.patch.object(fakelibvirt.virConnect, "getLibVersion")
     def test_broken_connection(self, mock_ver):
         for (error, domain) in (
@@ -421,17 +400,18 @@ class HostTestCase(test.NoDBTestCase):
         self.assertTrue(self.host.has_version(lv_ver, None, hv_type))
         self.assertTrue(self.host.has_version(None, hv_ver, hv_type))
 
-    @mock.patch.object(fakelibvirt.virConnect, "lookupByName")
+    @mock.patch.object(fakelibvirt.virConnect, "lookupByUUIDString")
     def test_get_domain(self, fake_lookup):
+        uuid = uuidutils.generate_uuid()
         dom = fakelibvirt.virDomain(self.host.get_connection(),
                                     "<domain id='7'/>")
-        instance = objects.Instance(id="124")
+        instance = objects.Instance(id="124", uuid=uuid)
         fake_lookup.return_value = dom
 
         self.assertEqual(dom, self.host.get_domain(instance))
-        fake_lookup.assert_called_once_with("instance-0000007c")
+        fake_lookup.assert_called_once_with(uuid)
 
-    @mock.patch.object(fakelibvirt.virConnect, "lookupByName")
+    @mock.patch.object(fakelibvirt.virConnect, "lookupByUUIDString")
     def test_get_domain_raises(self, fake_lookup):
         instance = objects.Instance(uuid=uuids.instance,
                                     vm_state=vm_states.ACTIVE)
@@ -446,19 +426,20 @@ class HostTestCase(test.NoDBTestCase):
 
         fake_lookup.assert_called_once_with(uuids.instance)
 
-    @mock.patch.object(fakelibvirt.virConnect, "lookupByName")
+    @mock.patch.object(fakelibvirt.virConnect, "lookupByUUIDString")
     def test_get_guest(self, fake_lookup):
+        uuid = uuidutils.generate_uuid()
         dom = fakelibvirt.virDomain(self.host.get_connection(),
                                     "<domain id='7'/>")
 
         fake_lookup.return_value = dom
-        instance = objects.Instance(id="124")
+        instance = objects.Instance(id="124", uuid=uuid)
 
         guest = self.host.get_guest(instance)
         self.assertEqual(dom, guest._domain)
         self.assertIsInstance(guest, libvirt_guest.Guest)
 
-        fake_lookup.assert_called_once_with("instance-0000007c")
+        fake_lookup.assert_called_once_with(uuid)
 
     @mock.patch.object(fakelibvirt.Connection, "listAllDomains")
     def test_list_instance_domains(self, mock_list_all):

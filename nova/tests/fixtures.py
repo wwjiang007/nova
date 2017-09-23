@@ -30,8 +30,13 @@ from oslo_concurrency import lockutils
 from oslo_config import cfg
 import oslo_messaging as messaging
 from oslo_messaging import conffixture as messaging_conffixture
+from oslo_privsep import daemon as privsep_daemon
+from requests import adapters
+from wsgi_intercept import interceptor
 
+from nova.api.openstack.compute import tenant_networks
 from nova.api.openstack.placement import deploy as placement_deploy
+from nova.api.openstack import wsgi_app
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
 from nova.db import migration
@@ -41,6 +46,7 @@ from nova.network import model as network_model
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
+from nova import quota as nova_quota
 from nova import rpc
 from nova import service
 from nova.tests.functional.api import client
@@ -287,6 +293,9 @@ class SingleCellSimple(fixtures.Fixture):
             'nova.objects.InstanceMapping._get_by_instance_uuid_from_db',
             self._fake_instancemapping_get))
         self.useFixture(fixtures.MonkeyPatch(
+            'nova.objects.InstanceMappingList._get_by_instance_uuids_from_db',
+            self._fake_instancemapping_get_uuids))
+        self.useFixture(fixtures.MonkeyPatch(
             'nova.objects.InstanceMapping._save_in_db',
             self._fake_instancemapping_get))
         self.useFixture(fixtures.MonkeyPatch(
@@ -308,12 +317,16 @@ class SingleCellSimple(fixtures.Fixture):
             'id': 1,
             'updated_at': None,
             'created_at': None,
-            'instance_uuid': uuidsentinel.instance,
+            'instance_uuid': args[-1],
             'cell_id': (self.instances_created and 1 or None),
             'project_id': 'project',
             'cell_mapping': (
                 self.instances_created and self._fake_cell_get() or None),
         }
+
+    def _fake_instancemapping_get_uuids(self, *args):
+        return [self._fake_instancemapping_get(uuid)
+                for uuid in args[-1]]
 
     def _fake_cell_get(self, *args):
         return self._fake_cell_list()[0]
@@ -440,6 +453,10 @@ class CellDatabases(fixtures.Fixture):
         # NOTE(melwitt): This is a hack to try to deal with
         # local accesses i.e. non target_cell accesses.
         with self._cell_lock.read_lock():
+            # FIXME(mriedem): This is actually misleading and means we don't
+            # catch things like bug 1717000 where a context should be targeted
+            # to a cell but it's not, and the fixture here just returns the
+            # last targeted context that was used.
             return self._last_ctxt_mgr
 
     def _wrap_get_server(self, target, endpoints, serializer=None):
@@ -622,6 +639,11 @@ class DefaultFlavorsFixture(fixtures.Fixture):
         ctxt = context.get_admin_context()
         defaults = {'rxtx_factor': 1.0, 'disabled': False, 'is_public': True,
                     'ephemeral_gb': 0, 'swap': 0}
+        extra_specs = {
+            "hw:cpu_model": "SandyBridge",
+            "hw:mem_page_size": "2048",
+            "hw:cpu_policy": "dedicated"
+        }
         default_flavors = [
             objects.Flavor(context=ctxt, memory_mb=512, vcpus=1,
                            root_gb=1, flavorid='1', name='m1.tiny',
@@ -638,6 +660,9 @@ class DefaultFlavorsFixture(fixtures.Fixture):
             objects.Flavor(context=ctxt, memory_mb=16384, vcpus=8,
                            root_gb=160, flavorid='5', name='m1.xlarge',
                            **defaults),
+            objects.Flavor(context=ctxt, memory_mb=512, vcpus=1,
+                           root_gb=1, flavorid='6', name='m1.tiny.specs',
+                           extra_specs=extra_specs, **defaults),
             ]
         for flavor in default_flavors:
             flavor.create()
@@ -663,7 +688,7 @@ class RPCFixture(fixtures.Fixture):
         # one of the many transports we're multplexing here.
         if url not in self._buses:
             exmods = rpc.get_allowed_exmods()
-            self._buses[url] = messaging.get_transport(
+            self._buses[url] = messaging.get_rpc_transport(
                 CONF,
                 url=url,
                 allowed_remote_exmods=exmods)
@@ -700,6 +725,21 @@ class WarningsFixture(fixtures.Fixture):
         warnings.filterwarnings('ignore',
                                 message='With-statements now directly support'
                                         ' multiple context managers')
+        # NOTE(sdague): nova does not use pkg_resources directly, this
+        # is all very long standing deprecations about other tools
+        # using it. None of this is useful to Nova development.
+        warnings.filterwarnings('ignore',
+            module='pkg_resources')
+        # NOTE(sdague): this remains an unresolved item around the way
+        # forward on is_admin, the deprecation is definitely really premature.
+        warnings.filterwarnings('ignore',
+            message='Policy enforcement is depending on the value of is_admin.'
+                    ' This key is deprecated. Please update your policy '
+                    'file to use the standard policy values.')
+        # NOTE(sdague): mox3 is on life support, don't really care
+        # about any deprecations coming from it
+        warnings.filterwarnings('ignore',
+            module='mox3.mox')
 
         self.addCleanup(warnings.resetwarnings)
 
@@ -774,26 +814,44 @@ class OSAPIFixture(fixtures.Fixture):
 
     def setUp(self):
         super(OSAPIFixture, self).setUp()
-        # in order to run these in tests we need to bind only to local
-        # host, and dynamically allocate ports
+        # A unique hostname for the wsgi-intercept.
+        hostname = uuidsentinel.osapi_host
+        port = 80
+        service_name = 'osapi_compute'
+        endpoint = 'http://%s:%s/' % (hostname, port)
         conf_overrides = {
-            'osapi_compute_listen': '127.0.0.1',
-            'osapi_compute_listen_port': 0,
+            'osapi_compute_listen': hostname,
+            'osapi_compute_listen_port': port,
             'debug': True,
         }
         self.useFixture(ConfPatcher(**conf_overrides))
 
-        self.osapi = service.WSGIService("osapi_compute")
-        self.osapi.start()
-        self.addCleanup(self.osapi.stop)
+        # Turn off manipulation of socket_options in TCPKeepAliveAdapter
+        # to keep wsgi-intercept happy. Replace it with the method
+        # from its superclass.
+        self.useFixture(fixtures.MonkeyPatch(
+                'keystoneauth1.session.TCPKeepAliveAdapter.init_poolmanager',
+                adapters.HTTPAdapter.init_poolmanager))
+
+        loader = wsgi.Loader().load_app(service_name)
+        app = lambda: loader
+
+        # re-use service setup code from wsgi_app to register
+        # service, which is looked for in some tests
+        wsgi_app._setup_service(CONF.host, service_name)
+        intercept = interceptor.RequestsInterceptor(app, url=endpoint)
+        intercept.install_intercept()
+        self.addCleanup(intercept.uninstall_intercept)
 
         self.auth_url = 'http://%(host)s:%(port)s/%(api_version)s' % ({
-            'host': self.osapi.host, 'port': self.osapi.port,
-            'api_version': self.api_version})
+            'host': hostname, 'port': port, 'api_version': self.api_version})
         self.api = client.TestOpenStackClient('fake', 'fake', self.auth_url,
                                               self.project_id)
         self.admin_api = client.TestOpenStackClient(
             'admin', 'admin', self.auth_url, self.project_id)
+        # Provide a way to access the wsgi application to tests using
+        # the fixture.
+        self.app = app
 
 
 class OSMetadataServer(fixtures.Fixture):
@@ -979,6 +1037,18 @@ class AllServicesCurrent(fixtures.Fixture):
 
     def _fake_minimum(self, *args, **kwargs):
         return service_obj.SERVICE_VERSION
+
+
+class RegisterNetworkQuota(fixtures.Fixture):
+    def setUp(self):
+        super(RegisterNetworkQuota, self).setUp()
+        # Quota resource registration modifies the global QUOTAS engine, so
+        # this fixture registers and unregisters network quota for a test.
+        tenant_networks._register_network_quota()
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        nova_quota.QUOTAS._resources.pop('networks', None)
 
 
 class NeutronFixture(fixtures.Fixture):
@@ -1245,13 +1315,13 @@ class CinderFixture(fixtures.Fixture):
                         },
                         'attach_status': 'attached'
                     })
-                return volume
+                    return volume
 
             # Check to see if the volume is attached.
             for instance_uuid, volumes in self.attachments.items():
                 if volume_id in volumes:
                     # The volume is attached.
-                    return {
+                    volume = {
                         'status': 'in-use',
                         'display_name': volume_id,
                         'attach_status': 'attached',
@@ -1264,15 +1334,23 @@ class CinderFixture(fixtures.Fixture):
                             }
                         }
                     }
+                    break
+            else:
+                # This is a test that does not care about the actual details.
+                volume = {
+                    'status': 'available',
+                    'display_name': 'TEST2',
+                    'attach_status': 'detached',
+                    'id': volume_id,
+                    'size': 1
+                }
 
-            # This is a test that does not care about the actual details.
-            return {
-                       'status': 'available',
-                       'display_name': 'TEST2',
-                       'attach_status': 'detached',
-                       'id': volume_id,
-                       'size': 1
-                   }
+            # update the status based on existing attachments
+            has_attachment = any(
+                [volume['id'] in attachments
+                 for attachments in self.attachments.values()])
+            volume['status'] = 'attached' if has_attachment else 'detached'
+            return volume
 
         def fake_initialize_connection(self, context, volume_id, connector):
             if volume_id == CinderFixture.SWAP_ERR_NEW_VOL:
@@ -1321,10 +1399,6 @@ class CinderFixture(fixtures.Fixture):
 
         self.test.stub_out('nova.volume.cinder.API.begin_detaching',
                            lambda *args, **kwargs: None)
-        self.test.stub_out('nova.volume.cinder.API.check_attach',
-                           lambda *args, **kwargs: None)
-        self.test.stub_out('nova.volume.cinder.API.check_detach',
-                           lambda *args, **kwargs: None)
         self.test.stub_out('nova.volume.cinder.API.get',
                            fake_get)
         self.test.stub_out('nova.volume.cinder.API.initialize_connection',
@@ -1340,6 +1414,14 @@ class CinderFixture(fixtures.Fixture):
                            lambda *args, **kwargs: None)
         self.test.stub_out('nova.volume.cinder.API.unreserve_volume',
                            fake_unreserve_volume)
+
+
+class PlacementApiClient(object):
+    def __init__(self, placement_fixture):
+        self.fixture = placement_fixture
+
+    def get(self, url):
+        return client.APIResponse(self.fixture._fake_get(None, url))
 
 
 class PlacementFixture(fixtures.Fixture):
@@ -1361,12 +1443,20 @@ class PlacementFixture(fixtures.Fixture):
         super(PlacementFixture, self).setUp()
 
         self.useFixture(ConfPatcher(group='api', auth_strategy='noauth2'))
-        app = placement_deploy.loadapp(CONF)
-        # in order to run these in tests we need to bind only to local
-        # host, and dynamically allocate ports
-        self.service = wsgi.Server('placement', app, host='127.0.0.1')
-        self.service.start()
-        self.addCleanup(self.service.stop)
+        loader = placement_deploy.loadapp(CONF)
+        app = lambda: loader
+        host = uuidsentinel.placement_host
+        self.endpoint = 'http://%s/placement' % host
+        intercept = interceptor.RequestsInterceptor(app, url=self.endpoint)
+        intercept.install_intercept()
+        self.addCleanup(intercept.uninstall_intercept)
+
+        # Turn off manipulation of socket_options in TCPKeepAliveAdapter
+        # to keep wsgi-intercept happy. Replace it with the method
+        # from its superclass.
+        self.useFixture(fixtures.MonkeyPatch(
+            'keystoneauth1.session.TCPKeepAliveAdapter.init_poolmanager',
+            adapters.HTTPAdapter.init_poolmanager))
 
         self._client = ks.Session(auth=None)
         # NOTE(sbauza): We need to mock the scheduler report client because
@@ -1385,25 +1475,31 @@ class PlacementFixture(fixtures.Fixture):
             'nova.scheduler.client.report.SchedulerReportClient.delete',
             self._fake_delete))
 
-    def _fake_get(self, *args, **kwargs):
-        (url,) = args[1:]
+        self.api = PlacementApiClient(self)
+
+    @staticmethod
+    def _update_headers_with_version(headers, **kwargs):
         version = kwargs.get("version")
-        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
-        # in case a token is not provided. We should change that by creating
-        # a fake token so we could remove adding the header below.
-        headers = {'x-auth-token': self.token}
         if version is not None:
             # TODO(mriedem): Perform some version discovery at some point.
             headers.update({
                 'OpenStack-API-Version': 'placement %s' % version
             })
+
+    def _fake_get(self, *args, **kwargs):
+        (url,) = args[1:]
+        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
+        # in case a token is not provided. We should change that by creating
+        # a fake token so we could remove adding the header below.
+        headers = {'x-auth-token': self.token}
+        self._update_headers_with_version(headers, **kwargs)
         return self._client.get(
             url,
-            endpoint_override="http://127.0.0.1:%s" % self.service.port,
+            endpoint_override=self.endpoint,
             headers=headers,
             raise_exc=False)
 
-    def _fake_post(self, *args):
+    def _fake_post(self, *args, **kwargs):
         (url, data) = args[1:]
         # NOTE(sdague): using json= instead of data= sets the
         # media type to application/json for us. Placement API is
@@ -1412,13 +1508,15 @@ class PlacementFixture(fixtures.Fixture):
         # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
         # in case a token is not provided. We should change that by creating
         # a fake token so we could remove adding the header below.
+        headers = {'x-auth-token': self.token}
+        self._update_headers_with_version(headers, **kwargs)
         return self._client.post(
             url, json=data,
-            endpoint_override="http://127.0.0.1:%s" % self.service.port,
-            headers={'x-auth-token': self.token},
+            endpoint_override=self.endpoint,
+            headers=headers,
             raise_exc=False)
 
-    def _fake_put(self, *args):
+    def _fake_put(self, *args, **kwargs):
         (url, data) = args[1:]
         # NOTE(sdague): using json= instead of data= sets the
         # media type to application/json for us. Placement API is
@@ -1427,10 +1525,12 @@ class PlacementFixture(fixtures.Fixture):
         # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
         # in case a token is not provided. We should change that by creating
         # a fake token so we could remove adding the header below.
+        headers = {'x-auth-token': self.token}
+        self._update_headers_with_version(headers, **kwargs)
         return self._client.put(
             url, json=data,
-            endpoint_override="http://127.0.0.1:%s" % self.service.port,
-            headers={'x-auth-token': self.token},
+            endpoint_override=self.endpoint,
+            headers=headers,
             raise_exc=False)
 
     def _fake_delete(self, *args):
@@ -1440,6 +1540,32 @@ class PlacementFixture(fixtures.Fixture):
         # a fake token so we could remove adding the header below.
         return self._client.delete(
             url,
-            endpoint_override="http://127.0.0.1:%s" % self.service.port,
+            endpoint_override=self.endpoint,
             headers={'x-auth-token': self.token},
             raise_exc=False)
+
+
+class UnHelperfulClientChannel(privsep_daemon._ClientChannel):
+    def __init__(self, context):
+        raise Exception('You have attempted to start a privsep helper. '
+                        'This is not allowed in the gate, and '
+                        'indicates a failure to have mocked your tests.')
+
+
+class PrivsepNoHelperFixture(fixtures.Fixture):
+    """A fixture to catch failures to mock privsep's rootwrap helper.
+
+    If you fail to mock away a privsep'd method in a unit test, then
+    you may well end up accidentally running the privsep rootwrap
+    helper. This will fail in the gate, but it fails in a way which
+    doesn't identify which test is missing a mock. Instead, we
+    raise an exception so that you at least know where you've missed
+    something.
+    """
+
+    def setUp(self):
+        super(PrivsepNoHelperFixture, self).setUp()
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'oslo_privsep.daemon.RootwrapClientChannel',
+            UnHelperfulClientChannel))

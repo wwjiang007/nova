@@ -21,7 +21,6 @@ from oslo_log import log as logging
 from oslo_utils import strutils
 
 from nova import exception
-from nova.i18n import _LI
 from nova.network import base_api
 from nova.network import floating_ips
 from nova.network import model as network_model
@@ -182,8 +181,8 @@ class API(base_api.NetworkAPI):
         if orig_instance_uuid:
             msg_dict = dict(address=floating_address,
                             instance_id=orig_instance_uuid)
-            LOG.info(_LI('re-assign floating IP %(address)s from '
-                         'instance %(instance_id)s'), msg_dict)
+            LOG.info('re-assign floating IP %(address)s from '
+                     'instance %(instance_id)s', msg_dict)
             orig_instance = objects.Instance.get_by_uuid(
                 context, orig_instance_uuid, expected_attrs=['flavor'])
 
@@ -216,7 +215,6 @@ class API(base_api.NetworkAPI):
     def allocate_for_instance(self, context, instance, vpn,
                               requested_networks, macs=None,
                               security_groups=None,
-                              dhcp_options=None,
                               bind_host_id=None):
         """Allocates all network structures for an instance.
 
@@ -230,11 +228,6 @@ class API(base_api.NetworkAPI):
             with requested_networks which is user supplied).
         :param security_groups: None or security groups to allocate for
             instance.
-        :param dhcp_options: None or a set of key/value pairs that should
-            determine the DHCP BOOTP response, eg. for PXE booting an instance
-            configured with the baremetal hypervisor. It is expected that these
-            are already formatted for the neutron v2 api.
-            See nova/virt/driver.py:dhcp_options_for_instance for an example.
         :param bind_host_id: ignored by this driver.
         :returns: network info as from get_instance_nw_info() below
         """
@@ -251,7 +244,6 @@ class API(base_api.NetworkAPI):
         args['host'] = instance.host
         args['rxtx_factor'] = flavor['rxtx_factor']
         args['macs'] = macs
-        args['dhcp_options'] = dhcp_options
 
         # Check to see if we're asked to 'auto' allocate networks because if
         # so we need to just null out the requested_networks value so the
@@ -301,7 +293,7 @@ class API(base_api.NetworkAPI):
     # NOTE(danms): Here for neutron compatibility
     def allocate_port_for_instance(self, context, instance, port_id,
                                    network_id=None, requested_ip=None,
-                                   bind_host_id=None):
+                                   bind_host_id=None, tag=None):
         raise NotImplementedError()
 
     # NOTE(danms): Here for neutron compatibility

@@ -89,7 +89,7 @@ class ServiceTestCase(test.NoDBTestCase):
     def setUp(self):
         super(ServiceTestCase, self).setUp()
         self.host = 'foo'
-        self.binary = 'nova-fake'
+        self.binary = 'nova-compute'
         self.topic = 'fake'
 
     def test_create(self):
@@ -109,7 +109,7 @@ class ServiceTestCase(test.NoDBTestCase):
                                self.binary,
                                self.topic,
                                'nova.tests.unit.test_service.FakeManager')
-        exp = "<Service: host=foo, binary=nova-fake, " \
+        exp = "<Service: host=foo, binary=nova-compute, " \
               "manager_class_name=nova.tests.unit.test_service.FakeManager>"
         self.assertEqual(exp, repr(serv))
 
@@ -118,7 +118,7 @@ class ServiceTestCase(test.NoDBTestCase):
     def test_init_and_start_hooks(self, mock_get_by_host_and_binary,
                                                         mock_create):
         mock_get_by_host_and_binary.return_value = None
-        mock_manager = mock.Mock()
+        mock_manager = mock.Mock(target=None)
         serv = service.Service(self.host,
                                self.binary,
                                self.topic,
@@ -195,7 +195,7 @@ class ServiceTestCase(test.NoDBTestCase):
                                       mock_get_by_host_and_binary,
                                       mock_create):
         mock_get_by_host_and_binary.return_value = None
-        mock_manager = mock.Mock()
+        mock_manager = mock.Mock(target=None)
         serv = service.Service(self.host,
                                self.binary,
                                self.topic,
@@ -218,7 +218,7 @@ class ServiceTestCase(test.NoDBTestCase):
     @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
     def test_parent_graceful_shutdown_with_cleanup_host(
             self, mock_svc_get_by_host_and_binary, mock_API):
-        mock_manager = mock.Mock()
+        mock_manager = mock.Mock(target=None)
 
         serv = service.Service(self.host,
                                self.binary,
@@ -340,7 +340,8 @@ class TestLauncher(test.NoDBTestCase):
         service.serve(mock.sentinel.service)
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
-                                            workers=None)
+                                            workers=None,
+                                            restart_method='mutate')
 
     @mock.patch.object(_service, 'launch')
     def test_launch_app_with_workers(self, mock_launch):
@@ -348,7 +349,8 @@ class TestLauncher(test.NoDBTestCase):
         service.serve(mock.sentinel.service, workers=mock.sentinel.workers)
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
-                                            workers=mock.sentinel.workers)
+                                            workers=mock.sentinel.workers,
+                                            restart_method='mutate')
 
     @mock.patch.object(_service, 'launch')
     def test_launch_app_more_than_once_raises(self, mock_launch):

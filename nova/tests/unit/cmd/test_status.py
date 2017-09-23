@@ -32,6 +32,7 @@ from nova import context
 # in the tests, we don't use them in the actual CLI.
 from nova import objects
 from nova.objects import fields
+from nova.objects import resource_provider as rp_obj
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests import uuidsentinel as uuids
@@ -210,7 +211,7 @@ class TestPlacementCheck(test.NoDBTestCase):
             "versions": [
                 {
                     "min_version": "1.0",
-                    "max_version": "1.4",
+                    "max_version": "1.10",
                     "id": "v1.0"
                 }
             ]
@@ -251,7 +252,7 @@ class TestPlacementCheck(test.NoDBTestCase):
         }
         res = self.cmd._check_placement()
         self.assertEqual(status.UpgradeCheckCode.FAILURE, res.code)
-        self.assertIn('Placement API version 1.4 needed, you have 0.9',
+        self.assertIn('Placement API version 1.10 needed, you have 0.9',
                       res.details)
 
 
@@ -548,12 +549,12 @@ class TestUpgradeCheckResourceProviders(test.NoDBTestCase):
         """Helper method to create a resource provider with inventory"""
         ctxt = context.get_admin_context()
         rp_uuid = uuidutils.generate_uuid()
-        rp = objects.ResourceProvider(
+        rp = rp_obj.ResourceProvider(
             context=ctxt,
             name=rp_uuid,
             uuid=rp_uuid)
         rp.create()
-        inventory = objects.Inventory(
+        inventory = rp_obj.Inventory(
             context=ctxt,
             resource_provider=rp,
             **inventory)

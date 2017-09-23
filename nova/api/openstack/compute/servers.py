@@ -51,6 +51,7 @@ from nova import exception
 from nova.i18n import _
 from nova.image import glance
 from nova import objects
+from nova.objects import service as service_obj
 from nova.policies import servers as server_policies
 from nova import utils
 
@@ -82,6 +83,7 @@ class ServersController(wsgi.Controller):
     schema_server_create_v232 = schema_servers.base_create_v232
     schema_server_create_v237 = schema_servers.base_create_v237
     schema_server_create_v242 = schema_servers.base_create_v242
+    schema_server_create_v252 = schema_servers.base_create_v252
 
     # NOTE(alex_xu): Please do not add more items into this list. This list
     # should be removed in the future.
@@ -125,15 +127,13 @@ class ServersController(wsgi.Controller):
         return robj
 
     def __init__(self, **kwargs):
-        # TODO(alex_xu): Remove this line when 'extension_info' won't be passed
-        # in when creating controller.
-        kwargs.pop('extension_info', None)
 
         super(ServersController, self).__init__(**kwargs)
         self.compute_api = compute.API()
 
         # TODO(alex_xu): The final goal is that merging all of
         # extended json-schema into server main json-schema.
+        self._create_schema(self.schema_server_create_v252, '2.52')
         self._create_schema(self.schema_server_create_v242, '2.42')
         self._create_schema(self.schema_server_create_v237, '2.37')
         self._create_schema(self.schema_server_create_v232, '2.32')
@@ -445,24 +445,17 @@ class ServersController(wsgi.Controller):
     @validation.schema(schema_server_create_v219, '2.19', '2.31')
     @validation.schema(schema_server_create_v232, '2.32', '2.36')
     @validation.schema(schema_server_create_v237, '2.37', '2.41')
-    @validation.schema(schema_server_create_v242, '2.42')
+    @validation.schema(schema_server_create_v242, '2.42', '2.51')
+    @validation.schema(schema_server_create_v252, '2.52')
     def create(self, req, body):
         """Creates a new server for a given user."""
-
         context = req.environ['nova.context']
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
         name = common.normalize_name(server_dict['name'])
-
+        description = name
         if api_version_request.is_supported(req, min_version='2.19'):
-            if 'description' in server_dict:
-                # This is allowed to be None
-                description = server_dict['description']
-            else:
-                # No default description
-                description = None
-        else:
-            description = name
+            description = server_dict.get('description')
 
         # Arguments to be passed to instance create function
         create_kwargs = {}
@@ -473,6 +466,9 @@ class ServersController(wsgi.Controller):
         self._create_by_func_list(server_dict, create_kwargs, body)
 
         availability_zone = create_kwargs.pop("availability_zone", None)
+
+        if api_version_request.is_supported(req, min_version='2.52'):
+            create_kwargs['tags'] = server_dict.get('tags')
 
         helpers.translate_attributes(helpers.CREATE,
                                      server_dict, create_kwargs)
@@ -494,8 +490,8 @@ class ServersController(wsgi.Controller):
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host', {})
 
-        min_compute_version = objects.Service.get_minimum_version(
-            nova_context.get_admin_context(), 'nova-compute')
+        min_compute_version = service_obj.get_minimum_version_all_cells(
+            nova_context.get_admin_context(), ['nova-compute'])
         supports_device_tagging = (min_compute_version >=
                                    DEVICE_TAGGING_MIN_COMPUTE_VERSION)
 
@@ -512,7 +508,7 @@ class ServersController(wsgi.Controller):
 
         image_uuid = self._image_from_req_data(server_dict, create_kwargs)
 
-        # NOTE(cyeoh): Although an extension can set
+        # NOTE(cyeoh): Although upper layer can set the value of
         # return_reservation_id in order to request that a reservation
         # id be returned to the client instead of the newly created
         # instance information we do not want to pass this parameter
@@ -653,12 +649,6 @@ class ServersController(wsgi.Controller):
         for func in self.server_create_func_list:
             func(server_dict, create_kwargs, req_body)
 
-    def _rebuild_extension_point(self, ext, rebuild_dict, rebuild_kwargs):
-        handler = ext.obj
-        LOG.debug("Running _rebuild_extension_point for %s", ext.obj)
-
-        handler.server_rebuild(rebuild_dict, rebuild_kwargs)
-
     def _create_schema(self, create_schema, version):
         for schema_func in self.schema_func_list:
             self._create_schema_by_func(create_schema, version, schema_func)
@@ -674,13 +664,6 @@ class ServersController(wsgi.Controller):
             create_schema['properties'].update(schema)
         else:
             create_schema['properties']['server']['properties'].update(schema)
-
-    def _rebuild_extension_schema(self, ext, rebuild_schema, version):
-        handler = ext.obj
-        LOG.debug("Running _rebuild_extension_schema for %s", ext.obj)
-
-        schema = handler.get_server_rebuild_schema(version)
-        rebuild_schema['properties']['rebuild']['properties'].update(schema)
 
     def _delete(self, context, req, instance_uuid):
         instance = self._get_server(context, req, instance_uuid)

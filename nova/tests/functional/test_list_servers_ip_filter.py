@@ -37,15 +37,17 @@ class TestListServersIpFilter(test.TestCase):
         # the image fake backend needed for image discovery
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
+        self.useFixture(nova_fixtures.PlacementFixture())
+
         self.start_service('conductor')
-        # Use the chance scheduler to bypass filtering and just pick the single
-        # compute host that we have.
-        self.flags(driver='chance_scheduler', group='scheduler')
+        self.flags(enabled_filters=['ComputeFilter'],
+                   group='filter_scheduler')
         self.start_service('scheduler')
         self.start_service('compute')
         self.start_service('consoleauth')
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(nova_fixtures.PlacementFixture())
 
         self.image_id = self.api.get_images()[0]['id']
         self.flavor_id = self.api.get_flavors()[0]['id']

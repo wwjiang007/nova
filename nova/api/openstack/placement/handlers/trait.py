@@ -23,7 +23,7 @@ from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
-from nova import objects
+from nova.objects import resource_provider as rp_obj
 
 TRAIT = {
     "type": "string",
@@ -103,7 +103,7 @@ def put_trait(req):
               '"CUSTOM_" and use following characters: "A"-"Z", "0"-"9" and '
               '"_"'))
 
-    trait = objects.Trait(context)
+    trait = rp_obj.Trait(context)
     trait.name = name
 
     try:
@@ -124,7 +124,7 @@ def get_trait(req):
     name = util.wsgi_path_item(req.environ, 'name')
 
     try:
-        objects.Trait.get_by_name(context, name)
+        rp_obj.Trait.get_by_name(context, name)
     except exception.TraitNotFound as ex:
         raise webob.exc.HTTPNotFound(
             explanation=ex.format_message())
@@ -141,7 +141,7 @@ def delete_trait(req):
     name = util.wsgi_path_item(req.environ, 'name')
 
     try:
-        trait = objects.Trait.get_by_name(context, name)
+        trait = rp_obj.Trait.get_by_name(context, name)
         trait.destroy()
     except exception.TraitNotFound as ex:
         raise webob.exc.HTTPNotFound(
@@ -183,7 +183,7 @@ def list_traits(req):
         filters['associated'] = (
             True if req.GET['associated'].lower() == 'true' else False)
 
-    traits = objects.TraitList.get_all(context, filters)
+    traits = rp_obj.TraitList.get_all(context, filters)
     req.response.status = 200
     req.response.body = encodeutils.to_utf8(
         jsonutils.dumps(_serialize_traits(traits)))
@@ -198,7 +198,7 @@ def list_traits_for_resource_provider(req):
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
 
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
     response_body = _serialize_traits(resource_provider.get_traits())
@@ -220,7 +220,7 @@ def update_traits_for_resource_provider(req):
     data = util.extract_json(req.body, SET_TRAITS_FOR_RP_SCHEMA)
     rp_gen = data['resource_provider_generation']
     traits = data['traits']
-    resource_provider = objects.ResourceProvider.get_by_uuid(
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
     if resource_provider.generation != rp_gen:
@@ -229,7 +229,7 @@ def update_traits_for_resource_provider(req):
               "the generation and try again."),
             json_formatter=util.json_error_formatter)
 
-    trait_objs = objects.TraitList.get_all(
+    trait_objs = rp_obj.TraitList.get_all(
         context, filters={'name_in': traits})
     traits_name = set([obj.name for obj in trait_objs])
     non_existed_trait = set(traits) - set(traits_name)
@@ -254,9 +254,9 @@ def delete_traits_for_resource_provider(req):
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
 
-    resource_provider = objects.ResourceProvider.get_by_uuid(context, uuid)
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(context, uuid)
     try:
-        resource_provider.set_traits(objects.TraitList(objects=[]))
+        resource_provider.set_traits(rp_obj.TraitList(objects=[]))
     except exception.ConcurrentUpdateDetected as e:
         raise webob.exc.HTTPConflict(explanation=e.format_message())
 

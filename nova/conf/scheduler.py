@@ -15,29 +15,6 @@
 
 from oslo_config import cfg
 
-default_opts = [
-    cfg.StrOpt("scheduler_topic",
-        default="scheduler",
-        deprecated_for_removal=True,
-        deprecated_since="15.0.0",
-        deprecated_reason="""
-There is no need to let users choose the RPC topic for all services - there
-is little gain from this. Furthermore, it makes it really easy to break Nova
-by using this option.
-""",
-        help="""
-Scheduler message queue topic.
-
-This is the message queue topic that the scheduler 'listens' on. It is used
-when the scheduler service is started up to configure the queue, and whenever
-an RPC call to the scheduler is made. There is almost never any reason to ever
-change this value.
-
-Possible values:
-
-* A valid AMQP topic name
-"""),
-]
 
 scheduler_group = cfg.OptGroup(name="scheduler",
                                title="Scheduler configuration")
@@ -57,25 +34,32 @@ uses. The options values are chosen from the entry points under the namespace
 """),
     cfg.StrOpt("driver",
         default="filter_scheduler",
-        choices=("filter_scheduler", "caching_scheduler",
-                 "chance_scheduler", "fake_scheduler"),
         deprecated_name="scheduler_driver",
         deprecated_group="DEFAULT",
         help="""
-The class of the driver used by the scheduler.
+The class of the driver used by the scheduler. This should be chosen from one
+of the entrypoints under the namespace 'nova.scheduler.driver' of file
+'setup.cfg'. If nothing is specified in this option, the 'filter_scheduler' is
+used.
 
-The options are chosen from the entry points under the namespace
-'nova.scheduler.driver' in 'setup.cfg'.
+Other options are:
+
+* 'caching_scheduler' which aggressively caches the system state for better
+  individual scheduler performance at the risk of more retries when running
+  multiple schedulers. [DEPRECATED]
+* 'chance_scheduler' which simply picks a host at random. [DEPRECATED]
+* 'fake_scheduler' which is used for testing.
 
 Possible values:
 
-* A string, where the string corresponds to the class name of a scheduler
-  driver. There are a number of options available:
-** 'caching_scheduler', which aggressively caches the system state for better
-   individual scheduler performance at the risk of more retries when running
-   multiple schedulers
-** 'chance_scheduler', which simply picks a host at random
-** 'fake_scheduler', which is used for testing
+* Any of the drivers included in Nova:
+** filter_scheduler
+** caching_scheduler
+** chance_scheduler
+** fake_scheduler
+* You may also set this to the entry point name of a custom scheduler driver,
+  but you will be responsible for creating and maintaining it in your setup.cfg
+  file.
 """),
     cfg.IntOpt("periodic_task_interval",
         default=60,
@@ -264,8 +248,6 @@ Related options:
         default=[
           "RetryFilter",
           "AvailabilityZoneFilter",
-          "RamFilter",
-          "DiskFilter",
           "ComputeFilter",
           "ComputeCapabilitiesFilter",
           "ImagePropertiesFilter",
@@ -278,8 +260,7 @@ Related options:
 Filters that the scheduler will use.
 
 An ordered list of filter class names that will be used for filtering
-hosts. Ignore the word 'default' in the name of this option: these filters will
-*always* be applied, and they will be applied in the order they are listed so
+hosts. These filters will be applied in the order they are listed so
 place your most restrictive filters first to make the filtering process more
 efficient.
 
@@ -310,6 +291,13 @@ Related options:
         ],
         deprecated_name="baremetal_scheduler_default_filters",
         deprecated_group="DEFAULT",
+        deprecated_for_removal=True,
+        deprecated_reason="""
+These filters were used to overcome some of the baremetal scheduling
+limitations in Nova prior to the use of the Placement API. Now scheduling will
+use the custom resource class defined for each baremetal node to make its
+selection.
+""",
         help="""
 Filters used for filtering baremetal hosts.
 
@@ -332,6 +320,13 @@ Related options:
     cfg.BoolOpt("use_baremetal_filters",
         deprecated_name="scheduler_use_baremetal_filters",
         deprecated_group="DEFAULT",
+        deprecated_for_removal=True,
+        deprecated_reason="""
+These filters were used to overcome some of the baremetal scheduling
+limitations in Nova prior to the use of the Placement API. Now scheduling will
+use the custom resource class defined for each baremetal node to make its
+selection.
+""",
         default=False,
         help="""
 Enable baremetal filters.
@@ -438,6 +433,25 @@ Possible values:
 * An integer or float value, where the value corresponds to the multipler
   ratio for this weigher.
 """),
+    cfg.FloatOpt("pci_weight_multiplier",
+        default=1.0,
+        min=0.0,
+        help="""
+PCI device affinity weight multiplier.
+
+The PCI device affinity weighter computes a weighting based on the number of
+PCI devices on the host and the number of PCI devices requested by the
+instance. The ``NUMATopologyFilter`` filter must be enabled for this to have
+any significance. For more information, refer to the filter documentation:
+
+    https://docs.openstack.org/nova/latest/user/filter-scheduler.html
+
+Possible values:
+
+* A positive integer or float value, where the value corresponds to the
+  multiplier ratio for this weigher.
+"""),
+    # TODO(sfinucan): Add 'min' parameter and remove warning in 'affinity.py'
     cfg.FloatOpt("soft_affinity_weight_multiplier",
         default=1.0,
         deprecated_group="DEFAULT",
@@ -903,8 +917,6 @@ Related options:
 
 
 def register_opts(conf):
-    conf.register_opts(default_opts)
-
     conf.register_group(scheduler_group)
     conf.register_opts(scheduler_opts, group=scheduler_group)
 

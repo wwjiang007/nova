@@ -94,7 +94,7 @@ def set_update_time_on_success(function):
         else:
             now = timeutils.utcnow()
             # NOTE(sbauza): Objects are UTC tz-aware by default
-            self.updated = now.replace(tzinfo=iso8601.iso8601.Utc())
+            self.updated = now.replace(tzinfo=iso8601.UTC)
         return return_value
 
     return decorated_function
@@ -109,6 +109,7 @@ class HostState(object):
     def __init__(self, host, node, cell_uuid):
         self.host = host
         self.nodename = node
+        self.uuid = None
         self._lock_name = (host, node)
 
         # Mutable available resources.
@@ -196,6 +197,8 @@ class HostState(object):
             return
         all_ram_mb = compute.memory_mb
 
+        self.uuid = compute.uuid
+
         # Assume virtual size is all consumed by instances if use qcow2 disk.
         free_gb = compute.free_disk_gb
         least_gb = compute.disk_available_least
@@ -222,7 +225,7 @@ class HostState(object):
         self.updated = compute.updated_at
         self.numa_topology = compute.numa_topology
         self.pci_stats = pci_stats.PciDeviceStats(
-            compute.pci_device_pools)
+            stats=compute.pci_device_pools)
 
         # All virt drivers report host_ip
         self.host_ip = compute.host_ip
@@ -261,7 +264,7 @@ class HostState(object):
         @set_update_time_on_success
         def _locked(self, spec_obj):
             # Scheduler API is inherently multi-threaded as every incoming RPC
-            # message will be dispatched in it's own green thread. So the
+            # message will be dispatched in its own green thread. So the
             # shared host state should be consumed in a consistent way to make
             # sure its data is valid under concurrent write operations.
             self._locked_consume_from_request(spec_obj)
@@ -423,9 +426,9 @@ class HostManager(object):
             if not computes_by_cell:
                 computes_by_cell = {}
                 for cell in self.cells:
-                    with context_module.target_cell(context, cell):
+                    with context_module.target_cell(context, cell) as cctxt:
                         cell_cns = objects.ComputeNodeList.get_all(
-                            context).objects
+                            cctxt).objects
                         computes_by_cell[cell] = cell_cns
                         count += len(cell_cns)
 
@@ -444,9 +447,9 @@ class HostManager(object):
                     filters = {"host": [curr_node.host
                                         for curr_node in curr_nodes],
                                "deleted": False}
-                    with context_module.target_cell(context, cell):
+                    with context_module.target_cell(context, cell) as cctxt:
                         result = objects.InstanceList.get_by_filters(
-                            context.elevated(), filters)
+                            cctxt.elevated(), filters)
                     instances = result.objects
                     LOG.debug("Adding %s instances for hosts %s-%s",
                               len(instances), start_node, end_node)
@@ -593,6 +596,14 @@ class HostManager(object):
     def _get_computes_for_cells(self, context, cells, compute_uuids=None):
         """Get a tuple of compute node and service information.
 
+        :param context: request context
+        :param cells: list of CellMapping objects
+        :param compute_uuids: list of ComputeNode UUIDs. If this is None, all
+            compute nodes from each specified cell will be returned, otherwise
+            only the ComputeNode objects with a UUID in the list of UUIDs in
+            any given cell is returned. If this is an empty list, the returned
+            compute_nodes tuple item will be an empty dict.
+
         Returns a tuple (compute_nodes, services) where:
          - compute_nodes is cell-uuid keyed dict of compute node lists
          - services is a dict of services indexed by hostname
@@ -603,19 +614,18 @@ class HostManager(object):
         for cell in cells:
             LOG.debug('Getting compute nodes and services for cell %(cell)s',
                       {'cell': cell.identity})
-            with context_module.target_cell(context, cell):
+            with context_module.target_cell(context, cell) as cctxt:
                 if compute_uuids is None:
                     compute_nodes[cell.uuid].extend(
-                        objects.ComputeNodeList.get_all(
-                            context))
+                        objects.ComputeNodeList.get_all(cctxt))
                 else:
                     compute_nodes[cell.uuid].extend(
                         objects.ComputeNodeList.get_all_by_uuids(
-                            context, compute_uuids))
+                            cctxt, compute_uuids))
                 services.update(
                     {service.host: service
                      for service in objects.ServiceList.get_by_binary(
-                             context, 'nova-compute',
+                             cctxt, 'nova-compute',
                              include_disabled=True)})
         return compute_nodes, services
 
@@ -707,9 +717,17 @@ class HostManager(object):
                 self.host_aggregates_map[host]]
 
     def _get_instances_by_host(self, context, host_name):
-        hm = objects.HostMapping.get_by_host(context, host_name)
-        with context_module.target_cell(context, hm.cell_mapping):
-            inst_list = objects.InstanceList.get_by_host(context, host_name)
+        try:
+            hm = objects.HostMapping.get_by_host(context, host_name)
+        except exception.HostMappingNotFound:
+            # It's possible to hit this when the compute service first starts
+            # up and casts to update_instance_info with an empty list but
+            # before the host is mapped in the API database.
+            LOG.info('Host mapping not found for host %s. Not tracking '
+                     'instance info for this host.', host_name)
+            return {}
+        with context_module.target_cell(context, hm.cell_mapping) as cctxt:
+            inst_list = objects.InstanceList.get_by_host(cctxt, host_name)
             return {inst.uuid: inst for inst in inst_list}
 
     def _get_instance_info(self, context, compute):

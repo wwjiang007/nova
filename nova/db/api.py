@@ -32,7 +32,6 @@ from oslo_log import log as logging
 
 from nova.cells import rpcapi as cells_rpcapi
 import nova.conf
-from nova.i18n import _LE
 
 
 CONF = nova.conf.CONF
@@ -781,6 +780,11 @@ def instance_get_all_by_filters_sort(context, filters, limit=None,
         context, filters, limit=limit, marker=marker,
         columns_to_join=columns_to_join, sort_keys=sort_keys,
         sort_dirs=sort_dirs)
+
+
+def instance_get_by_sort_filters(context, sort_keys, sort_dirs, values):
+    return IMPL.instance_get_by_sort_filters(context, sort_keys, sort_dirs,
+                                             values)
 
 
 def instance_get_active_by_window_joined(context, begin, end=None,
@@ -1787,7 +1791,7 @@ def bw_usage_update(context, uuid, mac, start_period, bw_in, bw_out,
                     uuid, mac, start_period, bw_in, bw_out,
                     last_ctr_in, last_ctr_out, last_refreshed)
         except Exception:
-            LOG.exception(_LE("Failed to notify cells of bw_usage update"))
+            LOG.exception("Failed to notify cells of bw_usage update")
     return rv
 
 

@@ -249,6 +249,11 @@ management network.
 Possible values:
 
 * A valid IP address or hostname, else None.
+
+Related options:
+
+* ``live_migration_tunnelled``: The live_migration_inbound_addr value is
+  ignored if tunneling is enabled.
 """),
     cfg.StrOpt('live_migration_uri',
                deprecated_for_removal=True,
@@ -266,22 +271,26 @@ on virt_type). Any included "%s" is replaced with the migration target
 hostname.
 
 If this option is set to None (which is the default), Nova will automatically
-generate the `live_migration_uri` value based on only 3 supported `virt_type`
+generate the `live_migration_uri` value based on only 4 supported `virt_type`
 in following list:
+
 * 'kvm': 'qemu+tcp://%s/system'
 * 'qemu': 'qemu+tcp://%s/system'
 * 'xen': 'xenmigr://%s/system'
+* 'parallels': 'parallels+tcp://%s/system'
 
 Related options:
+
 * ``live_migration_inbound_addr``: If ``live_migration_inbound_addr`` value
-  is not None, the ip/hostname address of target compute node is used instead
-  of ``live_migration_uri`` as the uri for live migration.
+  is not None and ``live_migration_tunnelled`` is False, the ip/hostname
+  address of target compute node is used instead of ``live_migration_uri`` as
+  the uri for live migration.
 * ``live_migration_scheme``: If ``live_migration_uri`` is not set, the scheme
   used for live migration is taken from ``live_migration_scheme`` instead.
 """),
     cfg.StrOpt('live_migration_scheme',
                help="""
-Schema used for live migration.
+URI scheme used for live migration.
 
 Override the default libvirt live migration scheme (which is dependent on
 virt_type). If this option is set to None, nova will automatically choose a
@@ -289,6 +298,7 @@ sensible default based on the hypervisor. It is not recommended that you change
 this unless you are very sure that hypervisor supports a particular scheme.
 
 Related options:
+
 * ``virt_type``: This option is meaningful only when ``virt_type`` is set to
   `kvm` or `qemu`.
 * ``live_migration_uri``: If ``live_migration_uri`` value is not None, the
@@ -305,15 +315,15 @@ VIR_MIGRATE_TUNNELLED migration flag, avoiding the need to configure
 the network to allow direct hypervisor to hypervisor communication.
 If False, use the native transport. If not set, Nova will choose a
 sensible default based on, for example the availability of native
-encryption support in the hypervisor. Enable this option will definitely
+encryption support in the hypervisor. Enabling this option will definitely
 impact performance massively.
 
 Note that this option is NOT compatible with use of block migration.
 
-Possible values:
+Related options:
 
-* Supersedes and (if set) overrides the deprecated 'live_migration_flag' and
-  'block_migration_flag' to enable tunneled migration.
+* ``live_migration_inbound_addr``: The live_migration_inbound_addr value is
+  ignored if tunneling is enabled.
 """),
     cfg.IntOpt('live_migration_bandwidth',
                default=0,
@@ -759,19 +769,6 @@ libvirt_vif_opts = [
 ]
 
 libvirt_volume_opts = [
-    cfg.ListOpt('qemu_allowed_storage_drivers',
-                default=[],
-                help="""
-Protocols listed here will be accessed directly from QEMU.
-
-If gluster is present in qemu_allowed_storage_drivers, glusterfs's backend will
-pass a disk configuration to QEMU. This allows QEMU to access the volume using
-libgfapi rather than mounting GlusterFS via fuse.
-
-Possible values:
-
-* [gluster]
-"""),
     cfg.BoolOpt('volume_use_multipath',
                 default=False,
                 deprecated_name='iscsi_use_multipath',
@@ -798,15 +795,6 @@ Number of times to rediscover AoE target to find volume.
 Nova provides support for block storage attaching to hosts via AOE (ATA over
 Ethernet). This option allows the user to specify the maximum number of retry
 attempts that can be made to discover the AoE device.
-""")
-]
-
-libvirt_volume_glusterfs_opts = [
-    cfg.StrOpt('glusterfs_mount_point_base',
-               default=paths.state_path_def('mnt'),
-               help="""
-Absolute path to the directory where the glusterfs volume is mounted on the
-compute node.
 """)
 ]
 
@@ -908,31 +896,6 @@ Possible values:
                help='Path to a Quobyte Client configuration file.'),
 ]
 
-libvirt_volume_scality_opts = [
-    cfg.StrOpt('scality_sofs_config',
-               help="""
-Path or URL to Scality SOFS(Scale-Out File Server) configuration file.
-
-The Scality SOFS provides OpenStack users the option of storing their
-data on a high capacity, replicated, highly available Scality Ring object
-storage cluster.
-"""),
-    cfg.StrOpt('scality_sofs_mount_point',
-               default='$state_path/scality',
-               help="""
-Base dir where Scality SOFS shall be mounted.
-
-The Scality volume driver in Nova mounts SOFS and lets the hypervisor access
-the volumes.
-
-Possible values:
-
-* $state_path/scality where state_path is a config option that specifies
-  the top-level directory for maintaining nova's state or Any string
-  containing the full directory path.
-"""),
-]
-
 libvirt_volume_smbfs_opts = [
     cfg.StrOpt('smbfs_mount_point_base',
                default=paths.state_path_def('mnt'),
@@ -1021,7 +984,7 @@ Related options:
 """
               ),
     cfg.StrOpt('vzstorage_log_path',
-               default='/var/log/pstorage/%(cluster_name)s/nova.log.gz',
+               default='/var/log/vstorage/%(cluster_name)s/nova.log.gz',
                help="""
 Path to vzstorage client log.
 
@@ -1086,13 +1049,11 @@ ALL_OPTS = list(itertools.chain(
     libvirt_vif_opts,
     libvirt_volume_opts,
     libvirt_volume_aoe_opts,
-    libvirt_volume_glusterfs_opts,
     libvirt_volume_iscsi_opts,
     libvirt_volume_iser_opts,
     libvirt_volume_net_opts,
     libvirt_volume_nfs_opts,
     libvirt_volume_quobyte_opts,
-    libvirt_volume_scality_opts,
     libvirt_volume_smbfs_opts,
     libvirt_remotefs_opts,
     libvirt_volume_vzstorage_opts,

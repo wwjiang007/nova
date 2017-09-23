@@ -400,7 +400,7 @@ class TestBoolean(TestField):
 class TestDateTime(TestField):
     def setUp(self):
         super(TestDateTime, self).setUp()
-        self.dt = datetime.datetime(1955, 11, 5, tzinfo=iso8601.iso8601.Utc())
+        self.dt = datetime.datetime(1955, 11, 5, tzinfo=iso8601.UTC)
         self.field = fields.DateTimeField()
         self.coerce_good_values = [(self.dt, self.dt),
                                    (utils.isotime(self.dt), self.dt)]
@@ -413,7 +413,7 @@ class TestDateTime(TestField):
             '1955-11-05T18:00:00Z',
             self.field.stringify(
                 datetime.datetime(1955, 11, 5, 18, 0, 0,
-                                  tzinfo=iso8601.iso8601.Utc())))
+                                  tzinfo=iso8601.UTC)))
 
 
 class TestDict(TestField):
@@ -640,28 +640,6 @@ class TestNotificationAction(TestField):
         self.assertRaises(ValueError, self.field.stringify, 'magic')
 
 
-class TestPCIAddress(TestField):
-    def setUp(self):
-        super(TestPCIAddress, self).setUp()
-        self.field = fields.Field(fields.PCIAddressField())
-        self.coerce_good_values = [('0000:00:02.0', '0000:00:02.0')]
-        self.coerce_bad_values = [
-            '000:00:02.0',
-            '0000:0:02.0',
-            '0000:00:2.0',
-            '0000:00:02.',
-            '-000:00:02.0',
-            '0000:0-:02.0',
-            '0000:00:-2.0',
-            '0000:00:02.-',
-            '000000:02.0',
-            '0000:0:02.0',
-            '0000:00:020',
-        ]
-        self.to_primitive_values = self.coerce_good_values
-        self.from_primitive_values = self.coerce_good_values
-
-
 class TestUSBAddress(TestField):
     def setUp(self):
         super(TestUSBAddress, self).setUp()
@@ -702,6 +680,20 @@ class TestIDEAddress(TestField):
             '0:2',
             '00',
             '0',
+        ]
+        self.to_primitive_values = self.coerce_good_values
+        self.from_primitive_values = self.coerce_good_values
+
+
+class TestXenAddress(TestField):
+    def setUp(self):
+        super(TestXenAddress, self).setUp()
+        self.field = fields.Field(fields.XenAddressField())
+        self.coerce_good_values = [('000100', '000100'),
+                                   ('768', '768')]
+        self.coerce_bad_values = [
+            '1',
+            '00100',
         ]
         self.to_primitive_values = self.coerce_good_values
         self.from_primitive_values = self.coerce_good_values

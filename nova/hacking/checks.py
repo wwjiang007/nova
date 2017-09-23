@@ -75,14 +75,6 @@ asse_true_false_with_in_or_not_in_spaces = re.compile(r"assert(True|False)"
                     r"[\[|'|\"](, .*)?\)")
 asse_raises_regexp = re.compile(r"assertRaisesRegexp\(")
 conf_attribute_set_re = re.compile(r"CONF\.[a-z0-9_.]+\s*=\s*\w")
-log_translation = re.compile(
-    r"(.)*LOG\.(audit|error|critical)\(\s*('|\")")
-log_translation_info = re.compile(
-    r"(.)*LOG\.(info)\(\s*(_\(|'|\")")
-log_translation_exception = re.compile(
-    r"(.)*LOG\.(exception)\(\s*(_\(|'|\")")
-log_translation_LW = re.compile(
-    r"(.)*LOG\.(warning|warn)\(\s*(_\(|'|\")")
 translated_log = re.compile(
     r"(.)*LOG\.(audit|error|info|critical|exception)"
     "\(\s*_\(\s*('|\")")
@@ -105,6 +97,7 @@ doubled_words_re = re.compile(
 log_remove_context = re.compile(
     r"(.)*LOG\.(.*)\(.*(context=[_a-zA-Z0-9].*)+.*\)")
 return_not_followed_by_space = re.compile(r"^\s*return(?:\(|{|\"|'|#).*$")
+uuid4_re = re.compile(r"uuid4\(\)($|[^\.]|\.hex)")
 
 
 class BaseASTChecker(ast.NodeVisitor):
@@ -787,10 +780,7 @@ def check_uuid4(logical_line):
     msg = ("N357: Use oslo_utils.uuidutils or uuidsentinel(in case of test "
            "cases) to generate UUID instead of uuid4().")
 
-    if "uuid4()." in logical_line:
-        return
-
-    if "uuid4()" in logical_line:
+    if uuid4_re.search(logical_line):
         yield (0, msg)
 
 

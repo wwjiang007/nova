@@ -16,37 +16,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-# Interactive shell based on Django:
-#
-# Copyright (c) 2005, the Lawrence Journal-World
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#
-#     1. Redistributions of source code must retain the above copyright notice,
-#        this list of conditions and the following disclaimer.
-#
-#     2. Redistributions in binary form must reproduce the above copyright
-#        notice, this list of conditions and the following disclaimer in the
-#        documentation and/or other materials provided with the distribution.
-#
-#     3. Neither the name of Django nor the names of its contributors may be
-#        used to endorse or promote products derived from this software without
-#        specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 
 """
   CLI interface for nova management.
@@ -56,7 +25,6 @@ from __future__ import print_function
 
 import argparse
 import functools
-import os
 import re
 import sys
 import traceback
@@ -76,7 +44,6 @@ import six.moves.urllib.parse as urlparse
 from sqlalchemy.engine import url as sqla_url
 
 from nova.api.ec2 import ec2utils
-from nova import availability_zones
 from nova.cmd import common as cmd_common
 import nova.conf
 from nova import config
@@ -87,10 +54,9 @@ from nova.db.sqlalchemy import api as sa_db
 from nova import exception
 from nova.i18n import _
 from nova import objects
-from nova.objects import aggregate as aggregate_obj
+from nova.objects import block_device as block_device_obj
 from nova.objects import build_request as build_request_obj
 from nova.objects import host_mapping as host_mapping_obj
-from nova.objects import instance as instance_obj
 from nova.objects import instance_group as instance_group_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
@@ -136,210 +102,12 @@ def mask_passwd_in_url(url):
     return urlparse.urlunparse(new_parsed)
 
 
-class ShellCommands(object):
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The shell commands are deprecated since '
-                   'Pike as they serve no useful purpose in modern nova. '
-                   'They will be removed in an upcoming release.')
-
-    def bpython(self):
-        """Runs a bpython shell.
-
-        Falls back to Ipython/python shell if unavailable
-        """
-        self.run('bpython')
-
-    def ipython(self):
-        """Runs an Ipython shell.
-
-        Falls back to Python shell if unavailable
-        """
-        self.run('ipython')
-
-    def python(self):
-        """Runs a python shell.
-
-        Falls back to Python shell if unavailable
-        """
-        self.run('python')
-
-    @args('--shell', metavar='<bpython|ipython|python >',
-            help='Python shell')
-    def run(self, shell=None):
-        """Runs a Python interactive interpreter."""
-        if not shell:
-            shell = 'bpython'
-
-        if shell == 'bpython':
-            try:
-                import bpython
-                bpython.embed()
-            except ImportError:
-                shell = 'ipython'
-        if shell == 'ipython':
-            try:
-                from IPython import embed
-                embed()
-            except ImportError:
-                try:
-                    # Ipython < 0.11
-                    # Explicitly pass an empty list as arguments, because
-                    # otherwise IPython would use sys.argv from this script.
-                    import IPython
-
-                    shell = IPython.Shell.IPShell(argv=[])
-                    shell.mainloop()
-                except ImportError:
-                    # no IPython module
-                    shell = 'python'
-
-        if shell == 'python':
-            import code
-            try:
-                # Try activating rlcompleter, because it's handy.
-                import readline
-            except ImportError:
-                pass
-            else:
-                # We don't have to wrap the following import in a 'try',
-                # because we already know 'readline' was imported successfully.
-                readline.parse_and_bind("tab:complete")
-            code.interact()
-
-    @args('--path', metavar='<path>', help='Script path')
-    def script(self, path):
-        """Runs the script from the specified path with flags set properly.
-
-        arguments: path
-        """
-        exec(compile(open(path).read(), path, 'exec'), locals(), globals())
-
-
 def _db_error(caught_exception):
     print(caught_exception)
     print(_("The above error may show that the database has not "
             "been created.\nPlease create a database using "
             "'nova-manage db sync' before running this command."))
     sys.exit(1)
-
-
-class QuotaCommands(object):
-    """Class for managing quotas."""
-
-    # TODO(melwitt): Remove this during the Queens cycle
-    description = ('DEPRECATED: The quota commands are deprecated since '
-                   'Pike as quota usage is counted from resources instead '
-                   'of being tracked separately. They will be removed in an '
-                   'upcoming release.')
-
-    @args('--project', dest='project_id', metavar='<Project Id>',
-            help='Project Id', required=True)
-    @args('--user', dest='user_id', metavar='<User Id>',
-            help='User Id')
-    @args('--key', metavar='<key>', help='Key')
-    def refresh(self, project_id, user_id=None, key=None):
-        """DEPRECATED: This command is deprecated and no longer does anything.
-        """
-        pass
-
-
-class ProjectCommands(object):
-    """Class for managing projects."""
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The project commands are deprecated since '
-                   'Pike as this information is available over the API. They '
-                   'will be removed in an upcoming release.')
-
-    @args('--project', dest='project_id', metavar='<Project name>',
-            help='Project name')
-    @args('--user', dest='user_id', metavar='<User name>',
-            help='User name')
-    @args('--key', metavar='<key>', help='Key')
-    @args('--value', metavar='<value>', help='Value')
-    def quota(self, project_id, user_id=None, key=None, value=None):
-        """Create, update or display quotas for project/user
-
-        If no quota key is provided, the quota will be displayed.
-        If a valid quota key is provided and it does not exist,
-        it will be created. Otherwise, it will be updated.
-        """
-
-        ctxt = context.get_admin_context()
-        if user_id:
-            quota = QUOTAS.get_user_quotas(ctxt, project_id, user_id)
-        else:
-            user_id = None
-            quota = QUOTAS.get_project_quotas(ctxt, project_id)
-        # if key is None, that means we need to show the quotas instead
-        # of updating them
-        if key:
-            settable_quotas = QUOTAS.get_settable_quotas(ctxt,
-                                                         project_id,
-                                                         user_id=user_id)
-            if key in quota:
-                minimum = settable_quotas[key]['minimum']
-                maximum = settable_quotas[key]['maximum']
-                if value.lower() == 'unlimited':
-                    value = -1
-                if int(value) < -1:
-                    print(_('Quota limit must be -1 or greater.'))
-                    return 2
-                if ((int(value) < minimum) and
-                   (maximum != -1 or (maximum == -1 and int(value) != -1))):
-                    print(_('Quota limit must be greater than %s.') % minimum)
-                    return 2
-                if maximum != -1 and int(value) > maximum:
-                    print(_('Quota limit must be less than %s.') % maximum)
-                    return 2
-                try:
-                    objects.Quotas.create_limit(ctxt, project_id, key, value,
-                                                user_id=user_id)
-                except exception.QuotaExists:
-                    objects.Quotas.update_limit(ctxt, project_id, key, value,
-                                                user_id=user_id)
-            else:
-                print(_('%(key)s is not a valid quota key. Valid options are: '
-                        '%(options)s.') % {'key': key,
-                                           'options': ', '.join(quota)})
-                return 2
-        print_format = "%-36s %-10s %-10s %-10s"
-        print(print_format % (
-                    _('Quota'),
-                    _('Limit'),
-                    _('In Use'),
-                    _('Reserved')))
-        # Retrieve the quota after update
-        if user_id:
-            quota = QUOTAS.get_user_quotas(ctxt, project_id, user_id)
-        else:
-            quota = QUOTAS.get_project_quotas(ctxt, project_id)
-        for key, value in quota.items():
-            if value['limit'] is None or value['limit'] < 0:
-                value['limit'] = 'unlimited'
-            print(print_format % (key, value['limit'], value['in_use'],
-                                  value['reserved']))
-
-    @args('--project', dest='project_id', metavar='<Project Id>',
-            help='Project Id', required=True)
-    @args('--user', dest='user_id', metavar='<User Id>',
-            help='User Id')
-    @args('--key', metavar='<key>', help='Key')
-    def quota_usage_refresh(self, project_id, user_id=None, key=None):
-        """DEPRECATED: This command is deprecated and no longer does anything.
-        """
-        # TODO(melwitt): Remove this during the Queens cycle
-        pass
-
-
-class AccountCommands(ProjectCommands):
-    """Class for managing projects."""
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The account commands are deprecated since '
-                   'Pike as this information is available over the API. They '
-                   'will be removed in an upcoming release.')
 
 
 class FloatingIpCommands(object):
@@ -610,48 +378,14 @@ class NetworkCommands(object):
         db.network_update(admin_context, network['id'], net)
 
 
-class HostCommands(object):
-    """List hosts."""
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The host commands are deprecated since '
-                   'Pike as this information is available over the API. They '
-                   'will be removed in an upcoming release.')
-
-    def list(self, zone=None):
-        """Show a list of all physical hosts. Filter by zone.
-        args: [zone]
-        """
-        print("%-25s\t%-15s" % (_('host'),
-                                _('zone')))
-        ctxt = context.get_admin_context()
-        services = db.service_get_all(ctxt)
-        services = availability_zones.set_availability_zones(ctxt, services)
-        if zone:
-            services = [s for s in services if s['availability_zone'] == zone]
-        hosts = []
-        for srv in services:
-            if not [h for h in hosts if h['host'] == srv['host']]:
-                hosts.append(srv)
-
-        for h in hosts:
-            print("%-25s\t%-15s" % (h['host'], h['availability_zone']))
-
-
 class DbCommands(object):
     """Class for managing the main database."""
 
     online_migrations = (
         # Added in Newton
-        instance_obj.migrate_instance_keypairs,
-        # Added in Newton
         request_spec.migrate_instances_add_request_spec,
         # Added in Newton
         keypair_obj.migrate_keypairs_to_api_db,
-        # Added in Newton
-        aggregate_obj.migrate_aggregates,
-        # Added in Newton
-        aggregate_obj.migrate_aggregate_reset_autoincrement,
         # Added in Newton
         instance_group_obj.migrate_instance_groups_to_api_db,
         # Added in Ocata
@@ -666,13 +400,15 @@ class DbCommands(object):
         quotas_obj.migrate_quota_classes_to_api_db,
         # Added in Queens
         sa_db.migration_migrate_to_uuid,
+        # Added in Queens
+        block_device_obj.BlockDeviceMapping.populate_uuids,
     )
 
     def __init__(self):
         pass
 
     @staticmethod
-    def print_dict(dct, dict_property="Property", dict_value='Value'):
+    def _print_dict(dct, dict_property="Property", dict_value='Value'):
         """Print a `dict` as a table of two columns.
 
         :param dct: `dict` to print
@@ -743,15 +479,15 @@ Error: %s""") % six.text_type(e))
         """Print the current database version."""
         print(migration.db_version())
 
-    @args('--max_rows', type=int, metavar='<number>', default=1000,
-          help='Maximum number of deleted rows to archive')
+    @args('--max_rows', type=int, metavar='<number>', dest='max_rows',
+          help='Maximum number of deleted rows to archive. Defaults to 1000.')
     @args('--verbose', action='store_true', dest='verbose', default=False,
           help='Print how many rows were archived per table.')
     @args('--until-complete', action='store_true', dest='until_complete',
           default=False,
           help=('Run continuously until all deleted rows are archived. Use '
                 'max_rows as a batch size for each iteration.'))
-    def archive_deleted_rows(self, max_rows, verbose=False,
+    def archive_deleted_rows(self, max_rows=1000, verbose=False,
                              until_complete=False):
         """Move deleted rows from production tables to shadow tables.
 
@@ -769,11 +505,12 @@ Error: %s""") % six.text_type(e))
             return 2
 
         table_to_rows_archived = {}
+        deleted_instance_uuids = []
         if until_complete and verbose:
             sys.stdout.write(_('Archiving') + '..')  # noqa
         while True:
             try:
-                run = db.archive_deleted_rows(max_rows)
+                run, deleted_instance_uuids = db.archive_deleted_rows(max_rows)
             except KeyboardInterrupt:
                 run = {}
                 if until_complete and verbose:
@@ -782,6 +519,16 @@ Error: %s""") % six.text_type(e))
             for k, v in run.items():
                 table_to_rows_archived.setdefault(k, 0)
                 table_to_rows_archived[k] += v
+            if deleted_instance_uuids:
+                table_to_rows_archived.setdefault('instance_mappings', 0)
+                table_to_rows_archived.setdefault('request_specs', 0)
+                ctxt = context.get_admin_context()
+                deleted_mappings = objects.InstanceMappingList.destroy_bulk(
+                                            ctxt, deleted_instance_uuids)
+                table_to_rows_archived['instance_mappings'] += deleted_mappings
+                deleted_specs = objects.RequestSpec.destroy_bulk(
+                                            ctxt, deleted_instance_uuids)
+                table_to_rows_archived['request_specs'] += deleted_specs
             if not until_complete:
                 break
             elif not run:
@@ -792,8 +539,8 @@ Error: %s""") % six.text_type(e))
                 sys.stdout.write('.')
         if verbose:
             if table_to_rows_archived:
-                self.print_dict(table_to_rows_archived, _('Table'),
-                                dict_value=_('Number of Rows Archived'))
+                self._print_dict(table_to_rows_archived, _('Table'),
+                                 dict_value=_('Number of Rows Archived'))
             else:
                 print(_('Nothing was archived.'))
         # NOTE(danms): Return nonzero if we archived something
@@ -1013,153 +760,6 @@ class ApiDbCommands(object):
         print(migration.db_version(database='api'))
 
 
-class AgentBuildCommands(object):
-    """Class for managing agent builds."""
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The agent commands are deprecated since '
-                   'Pike as this information is available over the API. They '
-                   'will be removed in an upcoming release.')
-
-    @args('--os', metavar='<os>', help='os')
-    @args('--architecture', dest='architecture',
-            metavar='<architecture>', help='architecture')
-    @args('--version', metavar='<version>', help='version')
-    @args('--url', metavar='<url>', help='url')
-    @args('--md5hash', metavar='<md5hash>', help='md5hash')
-    @args('--hypervisor', metavar='<hypervisor>',
-            help='hypervisor(default: xen)')
-    def create(self, os, architecture, version, url, md5hash,
-                hypervisor='xen'):
-        """Creates a new agent build."""
-        ctxt = context.get_admin_context()
-        db.agent_build_create(ctxt, {'hypervisor': hypervisor,
-                                     'os': os,
-                                     'architecture': architecture,
-                                     'version': version,
-                                     'url': url,
-                                     'md5hash': md5hash})
-
-    @args('--os', metavar='<os>', help='os')
-    @args('--architecture', dest='architecture',
-            metavar='<architecture>', help='architecture')
-    @args('--hypervisor', metavar='<hypervisor>',
-            help='hypervisor(default: xen)')
-    def delete(self, os, architecture, hypervisor='xen'):
-        """Deletes an existing agent build."""
-        ctxt = context.get_admin_context()
-        agent_build_ref = db.agent_build_get_by_triple(ctxt,
-                                  hypervisor, os, architecture)
-        db.agent_build_destroy(ctxt, agent_build_ref['id'])
-
-    @args('--hypervisor', metavar='<hypervisor>',
-            help='hypervisor(default: None)')
-    def list(self, hypervisor=None):
-        """Lists all agent builds.
-
-        arguments: <none>
-        """
-        fmt = "%-10s  %-8s  %12s  %s"
-        ctxt = context.get_admin_context()
-        by_hypervisor = {}
-        for agent_build in db.agent_build_get_all(ctxt):
-            buildlist = by_hypervisor.get(agent_build.hypervisor)
-            if not buildlist:
-                buildlist = by_hypervisor[agent_build.hypervisor] = []
-
-            buildlist.append(agent_build)
-
-        for key, buildlist in by_hypervisor.items():
-            if hypervisor and key != hypervisor:
-                continue
-
-            print(_('Hypervisor: %s') % key)
-            print(fmt % ('-' * 10, '-' * 8, '-' * 12, '-' * 32))
-            for agent_build in buildlist:
-                print(fmt % (agent_build.os, agent_build.architecture,
-                             agent_build.version, agent_build.md5hash))
-                print('    %s' % agent_build.url)
-
-            print()
-
-    @args('--os', metavar='<os>', help='os')
-    @args('--architecture', dest='architecture',
-            metavar='<architecture>', help='architecture')
-    @args('--version', metavar='<version>', help='version')
-    @args('--url', metavar='<url>', help='url')
-    @args('--md5hash', metavar='<md5hash>', help='md5hash')
-    @args('--hypervisor', metavar='<hypervisor>',
-            help='hypervisor(default: xen)')
-    def modify(self, os, architecture, version, url, md5hash,
-               hypervisor='xen'):
-        """Update an existing agent build."""
-        ctxt = context.get_admin_context()
-        agent_build_ref = db.agent_build_get_by_triple(ctxt,
-                                  hypervisor, os, architecture)
-        db.agent_build_update(ctxt, agent_build_ref['id'],
-                              {'version': version,
-                               'url': url,
-                               'md5hash': md5hash})
-
-
-class GetLogCommands(object):
-    """Get logging information."""
-
-    # TODO(stephenfin): Remove this during the Queens cycle
-    description = ('DEPRECATED: The log commands are deprecated since '
-                   'Pike as they are not maintained. They will be removed '
-                   'in an upcoming release.')
-
-    def errors(self):
-        """Get all of the errors from the log files."""
-        error_found = 0
-        if CONF.log_dir:
-            logs = [x for x in os.listdir(CONF.log_dir) if x.endswith('.log')]
-            for file in logs:
-                log_file = os.path.join(CONF.log_dir, file)
-                lines = [line.strip() for line in open(log_file, "r")]
-                lines.reverse()
-                print_name = 0
-                for index, line in enumerate(lines):
-                    if line.find(" ERROR ") > 0:
-                        error_found += 1
-                        if print_name == 0:
-                            print(log_file + ":-")
-                            print_name = 1
-                        linenum = len(lines) - index
-                        print((_('Line %(linenum)d : %(line)s') %
-                               {'linenum': linenum, 'line': line}))
-        if error_found == 0:
-            print(_('No errors in logfiles!'))
-
-    @args('--num_entries', metavar='<number of entries>',
-            help='number of entries(default: 10)')
-    def syslog(self, num_entries=10):
-        """Get <num_entries> of the nova syslog events."""
-        entries = int(num_entries)
-        count = 0
-        log_file = ''
-        if os.path.exists('/var/log/syslog'):
-            log_file = '/var/log/syslog'
-        elif os.path.exists('/var/log/messages'):
-            log_file = '/var/log/messages'
-        else:
-            print(_('Unable to find system log file!'))
-            return 1
-        lines = [line.strip() for line in open(log_file, "r")]
-        lines.reverse()
-        print(_('Last %s nova syslog entries:-') % (entries))
-        for line in lines:
-            if line.find("nova") > 0:
-                count += 1
-                print("%s" % (line))
-            if count == entries:
-                break
-
-        if count == 0:
-            print(_('No nova entries in syslog!'))
-
-
 class CellCommands(object):
     """Commands for managing cells v1 functionality."""
 
@@ -1170,7 +770,7 @@ class CellCommands(object):
                    'release.')
 
     @staticmethod
-    def parse_server_string(server_str):
+    def _parse_server_string(server_str):
         """Parses the given server_string and returns a tuple of host and port.
         If it's not a combination of host part and port, the port element is an
         empty string. If the input is invalid expression, return a tuple of two
@@ -1208,7 +808,7 @@ class CellCommands(object):
             hosts = broker_hosts.split(',')
             for host in hosts:
                 host = host.strip()
-                broker_hostname, broker_port = self.parse_server_string(host)
+                broker_hostname, broker_port = self._parse_server_string(host)
                 if not broker_port:
                     msg = _('Invalid broker_hosts value: %s. It should be'
                             ' in hostname:port format') % host
@@ -1323,6 +923,21 @@ class CellV2Commands(object):
                   'is not set in the configuration file.')
         return transport_url
 
+    def _non_unique_transport_url_database_connection_checker(self, ctxt,
+                            cell_mapping, transport_url, database_connection):
+        for cell in objects.CellMappingList.get_all(ctxt):
+            if cell_mapping and cell.uuid == cell_mapping.uuid:
+                # If we're looking for a specific cell, then don't check
+                # that one for same-ness to allow idempotent updates
+                continue
+            if (cell.database_connection == database_connection or
+                cell.transport_url == transport_url):
+                print(_('The specified transport_url and/or '
+                        'database_connection combination already exists '
+                        'for another cell with uuid %s.') % cell.uuid)
+                return True
+        return False
+
     @args('--transport-url', metavar='<transport_url>', dest='transport_url',
           help='The transport url for the cell message queue')
     def simple_cell_setup(self, transport_url=None):
@@ -1422,10 +1037,11 @@ class CellV2Commands(object):
 
     def _get_and_map_instances(self, ctxt, cell_mapping, limit, marker):
         filters = {}
-        instances = objects.InstanceList.get_by_filters(
-                ctxt.elevated(read_deleted='yes'), filters,
-                sort_key='created_at', sort_dir='asc', limit=limit,
-                marker=marker)
+        with context.target_cell(ctxt, cell_mapping) as cctxt:
+            instances = objects.InstanceList.get_by_filters(
+                    cctxt.elevated(read_deleted='yes'), filters,
+                    sort_key='created_at', sort_dir='asc', limit=limit,
+                    marker=marker)
 
         for instance in instances:
             try:
@@ -1444,17 +1060,21 @@ class CellV2Commands(object):
             marker = instances[-1].uuid
         return marker
 
-    @args('--cell_uuid', metavar='<cell_uuid>', required=True,
-            help='Unmigrated instances will be mapped to the cell with the '
-                 'uuid provided.')
-    @args('--max-count', metavar='<max_count>',
-          help='Maximum number of instances to map')
+    @args('--cell_uuid', metavar='<cell_uuid>', dest='cell_uuid',
+          required=True,
+          help='Unmigrated instances will be mapped to the cell with the '
+               'uuid provided.')
+    @args('--max-count', metavar='<max_count>', dest='max_count',
+          help='Maximum number of instances to map. If not set, all instances '
+               'in the cell will be mapped in batches of 50. If you have a '
+               'large number of instances, consider specifying a custom value '
+               'and run the command until it exits with 0.')
     def map_instances(self, cell_uuid, max_count=None):
         """Map instances into the provided cell.
 
-        This assumes that Nova on this host is still configured to use the nova
-        database not just the nova-api database. Instances in the nova database
-        will be queried from oldest to newest and mapped to the provided cell.
+        Instances in the nova database of the provided cell (nova database
+        info is obtained from the nova-api database) will be queried from
+        oldest to newest and if unmapped, will be mapped to the provided cell.
         A max-count can be set on the number of instance to map in a single
         run. Repeated runs of the command will start from where the last run
         finished so it is not necessary to increase max-count to finish. An
@@ -1596,14 +1216,15 @@ class CellV2Commands(object):
 
         This prints one of three strings (and exits with a code) indicating
         whether the instance is successfully mapped to a cell (0), is unmapped
-        due to an incomplete upgrade (1), or unmapped due to normally transient
-        state (2).
+        due to an incomplete upgrade (1), unmapped due to normally transient
+        state (2), it is a deleted instance which has instance mapping (3),
+        or it is an archived instance which still has an instance mapping (4).
         """
         def say(string):
             if not quiet:
                 print(string)
 
-        ctxt = context.RequestContext()
+        ctxt = context.get_admin_context()
         try:
             mapping = objects.InstanceMapping.get_by_instance_uuid(
                 ctxt, uuid)
@@ -1616,6 +1237,28 @@ class CellV2Commands(object):
             say('Instance %s is not mapped to a cell' % uuid)
             return 2
         else:
+            with context.target_cell(ctxt, mapping.cell_mapping) as cctxt:
+                try:
+                    instance = objects.Instance.get_by_uuid(cctxt, uuid)
+                except exception.InstanceNotFound:
+                    try:
+                        el_ctx = cctxt.elevated(read_deleted='yes')
+                        instance = objects.Instance.get_by_uuid(el_ctx, uuid)
+                        # instance is deleted
+                        if instance:
+                            say('The instance with uuid %s has been deleted.'
+                                % uuid)
+                            say('Execute `nova-manage db archive_deleted_rows`'
+                                'command to archive this deleted instance and'
+                                'remove its instance_mapping.')
+                            return 3
+                    except exception.InstanceNotFound:
+                        # instance is archived
+                        say('The instance with uuid %s has been archived.'
+                            % uuid)
+                        say('However its instance_mapping remains.')
+                        return 4
+            # instance is alive and mapped to a cell
             say('Instance %s is in cell: %s (%s)' % (
                 uuid,
                 mapping.cell_mapping.name,
@@ -1675,11 +1318,8 @@ class CellV2Commands(object):
                     'if [database]/connection is not set '
                     'in the configuration file.'))
             return 1
-        if any(cell.database_connection == database_connection
-               and cell.transport_url == transport_url
-               for cell in objects.CellMappingList.get_all(ctxt)):
-            print(_('Cell with the specified transport_url '
-                    'and database_connection combination already exists'))
+        if (self._non_unique_transport_url_database_connection_checker(ctxt,
+            None, transport_url, database_connection)):
             return 2
         cell_mapping_uuid = uuidutils.generate_uuid()
         cell_mapping = objects.CellMapping(
@@ -1719,15 +1359,29 @@ class CellV2Commands(object):
         print(t)
         return 0
 
+    @args('--force', action='store_true', default=False,
+          help=_('Delete hosts and instance_mappings that belong '
+                 'to the cell as well.'))
     @args('--cell_uuid', metavar='<cell_uuid>', dest='cell_uuid',
           required=True, help=_('The uuid of the cell to delete.'))
-    def delete_cell(self, cell_uuid):
+    def delete_cell(self, cell_uuid, force=False):
         """Delete an empty cell by the given uuid.
 
-        If the cell is not found by uuid or it is not empty (it has host or
-        instance mappings) this command will return a non-zero exit code.
+        This command will return a non-zero exit code in the following cases.
 
-        Returns 0 if the empty cell is found and deleted successfully.
+        * The cell is not found by uuid.
+        * It has hosts and force is False.
+        * It has instance mappings and force is False.
+
+        If force is True and the cell has hosts and/or instance_mappings, they
+        are deleted as well (as long as there are no living instances).
+
+        Returns 0 in the following cases.
+
+        * The empty cell is found and deleted successfully.
+        * The cell has hosts and force is True then the cell, hosts and
+          instance_mappings are deleted successfully; if there are no
+          living instances.
         """
         ctxt = context.get_admin_context()
         # Find the CellMapping given the uuid.
@@ -1740,7 +1394,7 @@ class CellV2Commands(object):
         # Check to see if there are any HostMappings for this cell.
         host_mappings = objects.HostMappingList.get_by_cell_id(
             ctxt, cell_mapping.id)
-        if host_mappings:
+        if host_mappings and not force:
             print(_('There are existing hosts mapped to cell with uuid %s.') %
                   cell_uuid)
             return 2
@@ -1749,9 +1403,31 @@ class CellV2Commands(object):
         instance_mappings = objects.InstanceMappingList.get_by_cell_id(
             ctxt, cell_mapping.id)
         if instance_mappings:
-            print(_('There are existing instances mapped to cell with '
-                    'uuid %s.') % cell_uuid)
-            return 3
+            with context.target_cell(ctxt, cell_mapping) as cctxt:
+                instances = objects.InstanceList.get_all(cctxt)
+            if instances:
+                # There are instances in the cell.
+                print(_('There are existing instances mapped to cell with '
+                        'uuid %s.') % cell_uuid)
+                return 3
+            else:
+                if not force:
+                    # There are no instances in the cell but the records remain
+                    # in the 'instance_mappings' table.
+                    print(_("There are instance mappings to cell with uuid "
+                            "%s, but all instances have been deleted "
+                            "in the cell.") % cell_uuid)
+                    print(_("So execute 'nova-manage db archive_deleted_rows' "
+                            "to delete the instance mappings."))
+                    return 4
+
+        # Delete instance_mappings of the deleted instances
+        for instance_mapping in instance_mappings:
+            instance_mapping.destroy()
+
+        # Delete hosts mapped to the cell.
+        for host_mapping in host_mappings:
+            host_mapping.destroy()
 
         # There are no hosts or instances mapped to the cell so delete it.
         cell_mapping.destroy()
@@ -1773,7 +1449,9 @@ class CellV2Commands(object):
         """Updates the properties of a cell by the given uuid.
 
         If the cell is not found by uuid, this command will return an exit
-        code of 1. If the properties cannot be set, this will return 2.
+        code of 1. If the provided transport_url or/and database_connection
+        is/are same as another cell, this command will return an exit code
+        of 3. If the properties cannot be set, this will return 2.
         Otherwise, the exit code will be 0.
 
         NOTE: Updating the transport_url or database_connection fields on
@@ -1791,10 +1469,17 @@ class CellV2Commands(object):
             cell_mapping.name = name
 
         transport_url = transport_url or CONF.transport_url
+        db_connection = db_connection or CONF.database.connection
+
+        if (self._non_unique_transport_url_database_connection_checker(ctxt,
+                cell_mapping, transport_url, db_connection)):
+                # We use the return code 3 before 2 to avoid changing the
+                # semantic meanings of return codes.
+                return 3
+
         if transport_url:
             cell_mapping.transport_url = transport_url
 
-        db_connection = db_connection or CONF.database.connection
         if db_connection:
             cell_mapping.database_connection = db_connection
 
@@ -1806,21 +1491,93 @@ class CellV2Commands(object):
 
         return 0
 
+    @args('--cell_uuid', metavar='<cell_uuid>', dest='cell_uuid',
+          help=_('The uuid of the cell.'))
+    def list_hosts(self, cell_uuid=None):
+        """Lists the hosts in one or all v2 cells."""
+        ctxt = context.get_admin_context()
+        if cell_uuid:
+            # Find the CellMapping given the uuid.
+            try:
+                cell_mapping = objects.CellMapping.get_by_uuid(ctxt, cell_uuid)
+            except exception.CellMappingNotFound:
+                print(_('Cell with uuid %s was not found.') % cell_uuid)
+                return 1
+
+            host_mappings = objects.HostMappingList.get_by_cell_id(
+                ctxt, cell_mapping.id)
+        else:
+            host_mappings = objects.HostMappingList.get_all(ctxt)
+
+        field_names = [_('Cell Name'), _('Cell UUID'), _('Hostname')]
+
+        t = prettytable.PrettyTable(field_names)
+        for host in sorted(host_mappings, key=lambda _host: _host.host):
+            fields = [host.cell_mapping.name, host.cell_mapping.uuid,
+                      host.host]
+            t.add_row(fields)
+        print(t)
+        return 0
+
+    @args('--cell_uuid', metavar='<cell_uuid>', dest='cell_uuid',
+          required=True, help=_('The uuid of the cell.'))
+    @args('--host', metavar='<host>', dest='host',
+          required=True, help=_('The host to delete.'))
+    def delete_host(self, cell_uuid, host):
+        """Delete a host in a cell (host mappings) by the given host name
+
+        This command will return a non-zero exit code in the following cases.
+
+        * The cell is not found by uuid.
+        * The host is not found by host name.
+        * The host is not in the cell.
+        * The host has instances.
+
+        Returns 0 if the host is deleted successfully.
+        """
+        ctxt = context.get_admin_context()
+        # Find the CellMapping given the uuid.
+        try:
+            cell_mapping = objects.CellMapping.get_by_uuid(ctxt, cell_uuid)
+        except exception.CellMappingNotFound:
+            print(_('Cell with uuid %s was not found.') % cell_uuid)
+            return 1
+
+        try:
+            host_mapping = objects.HostMapping.get_by_host(ctxt, host)
+        except exception.HostMappingNotFound:
+            print(_('The host %s was not found.') % host)
+            return 2
+
+        if host_mapping.cell_mapping.uuid != cell_mapping.uuid:
+            print(_('The host %(host)s was not found '
+                    'in the cell %(cell_uuid)s.') % {'host': host,
+                                                     'cell_uuid': cell_uuid})
+            return 3
+
+        with context.target_cell(ctxt, cell_mapping) as cctxt:
+            instances = objects.InstanceList.get_by_host(cctxt, host)
+            nodes = objects.ComputeNodeList.get_all_by_host(cctxt, host)
+
+        if instances:
+            print(_('There are instances on the host %s.') % host)
+            return 4
+
+        for node in nodes:
+            node.mapped = 0
+            node.save()
+
+        host_mapping.destroy()
+        return 0
+
 
 CATEGORIES = {
-    'account': AccountCommands,
-    'agent': AgentBuildCommands,
     'api_db': ApiDbCommands,
     'cell': CellCommands,
     'cell_v2': CellV2Commands,
     'db': DbCommands,
     'floating': FloatingIpCommands,
-    'host': HostCommands,
-    'logs': GetLogCommands,
     'network': NetworkCommands,
-    'project': ProjectCommands,
-    'shell': ShellCommands,
-    'quota': QuotaCommands,
 }
 
 

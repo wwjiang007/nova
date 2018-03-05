@@ -92,7 +92,7 @@ class ExtraSpecs(object):
     def __init__(self, cpu_limits=None, hw_version=None,
                  storage_policy=None, cores_per_socket=None,
                  memory_limits=None, disk_io_limits=None,
-                 vif_limits=None):
+                 vif_limits=None, firmware=None):
         """ExtraSpecs object holds extra_specs for the instance."""
         self.cpu_limits = cpu_limits or Limits()
         self.memory_limits = memory_limits or Limits()
@@ -101,6 +101,7 @@ class ExtraSpecs(object):
         self.hw_version = hw_version
         self.storage_policy = storage_policy
         self.cores_per_socket = cores_per_socket
+        self.firmware = firmware
 
 
 def vm_refs_cache_reset():
@@ -242,6 +243,9 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
         config_spec.memoryAllocation = _get_allocation_info(
             client_factory, extra_specs.memory_limits,
             'ns0:ResourceAllocationInfo')
+
+    if extra_specs.firmware:
+        config_spec.firmware = extra_specs.firmware
 
     devices = []
     for vif_info in vif_infos:
@@ -1159,7 +1163,10 @@ def get_vm_state(session, instance):
 def get_stats_from_cluster(session, cluster):
     """Get the aggregate resource stats of a cluster."""
     vcpus = 0
-    mem_info = {'total': 0, 'free': 0}
+    max_vcpus_per_host = 0
+    used_mem_mb = 0
+    total_mem_mb = 0
+    max_mem_mb_per_host = 0
     # Get the Host and Resource Pool Managed Object Refs
     prop_dict = session._call_method(vutil,
                                      "get_object_properties_dict",
@@ -1172,27 +1179,29 @@ def get_stats_from_cluster(session, cluster):
             result = session._call_method(vim_util,
                          "get_properties_for_a_collection_of_objects",
                          "HostSystem", host_mors,
-                         ["summary.hardware", "summary.runtime"])
+                         ["summary.hardware", "summary.runtime",
+                          "summary.quickStats"])
             for obj in result.objects:
-                hardware_summary = obj.propSet[0].val
-                runtime_summary = obj.propSet[1].val
+                host_props = propset_dict(obj.propSet)
+                hardware_summary = host_props['summary.hardware']
+                runtime_summary = host_props['summary.runtime']
+                stats_summary = host_props['summary.quickStats']
                 if (runtime_summary.inMaintenanceMode is False and
                     runtime_summary.connectionState == "connected"):
                     # Total vcpus is the sum of all pCPUs of individual hosts
                     # The overcommitment ratio is factored in by the scheduler
-                    vcpus += hardware_summary.numCpuThreads
-
-        res_mor = prop_dict.get('resourcePool')
-        if res_mor:
-            res_usage = session._call_method(vutil, "get_object_property",
-                                             res_mor, "summary.runtime.memory")
-            if res_usage:
-                # maxUsage is the memory limit of the cluster available to VM's
-                mem_info['total'] = int(res_usage.maxUsage / units.Mi)
-                # overallUsage is the hypervisor's view of memory usage by VM's
-                consumed = int(res_usage.overallUsage / units.Mi)
-                mem_info['free'] = mem_info['total'] - consumed
-    stats = {'vcpus': vcpus, 'mem': mem_info}
+                    threads = hardware_summary.numCpuThreads
+                    vcpus += threads
+                    max_vcpus_per_host = max(max_vcpus_per_host, threads)
+                    used_mem_mb += stats_summary.overallMemoryUsage
+                    mem_mb = hardware_summary.memorySize // units.Mi
+                    total_mem_mb += mem_mb
+                    max_mem_mb_per_host = max(max_mem_mb_per_host, mem_mb)
+    stats = {'cpu': {'vcpus': vcpus,
+                     'max_vcpus_per_host': max_vcpus_per_host},
+             'mem': {'total': total_mem_mb,
+                     'free': total_mem_mb - used_mem_mb,
+                     'max_mem_mb_per_host': max_mem_mb_per_host}}
     return stats
 
 

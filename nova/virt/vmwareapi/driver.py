@@ -19,10 +19,12 @@
 A connection to the VMware vCenter platform.
 """
 
+import os
 import re
 
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import units
 from oslo_utils import versionutils as v_utils
 from oslo_vmware import api
 from oslo_vmware import exceptions as vexc
@@ -32,11 +34,15 @@ from oslo_vmware import vim_util
 
 from nova.compute import power_state
 from nova.compute import task_states
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova.objects import fields as obj_fields
+import nova.privsep.path
 from nova.virt import driver
 from nova.virt.vmwareapi import constants
+from nova.virt.vmwareapi import ds_util
 from nova.virt.vmwareapi import error_util
 from nova.virt.vmwareapi import host
 from nova.virt.vmwareapi import vim_util as nova_vim_util
@@ -49,6 +55,7 @@ LOG = logging.getLogger(__name__)
 CONF = nova.conf.CONF
 
 TIME_BETWEEN_API_CALL_RETRIES = 1.0
+MAX_CONSOLE_BYTES = 100 * units.Ki
 
 
 class VMwareVCDriver(driver.ComputeDriver):
@@ -58,7 +65,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         "has_imagecache": True,
         "supports_recreate": False,
         "supports_migrate_to_same_host": True,
-        "supports_attach_interface": True
+        "supports_attach_interface": True,
+        "supports_multiattach": False
     }
 
     # Legacy nodename is of the form: <mo id>(<cluster name>)
@@ -179,16 +187,23 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def _register_openstack_extension(self):
         # Register an 'OpenStack' extension in vCenter
-        LOG.debug('Registering extension %s with vCenter',
-                  constants.EXTENSION_KEY)
         os_extension = self._session._call_method(vim_util, 'find_extension',
                                                   constants.EXTENSION_KEY)
         if os_extension is None:
-            LOG.debug('Extension does not exist. Registering type %s.',
-                      constants.EXTENSION_TYPE_INSTANCE)
-            self._session._call_method(vim_util, 'register_extension',
-                                       constants.EXTENSION_KEY,
-                                       constants.EXTENSION_TYPE_INSTANCE)
+            try:
+                self._session._call_method(vim_util, 'register_extension',
+                                           constants.EXTENSION_KEY,
+                                           constants.EXTENSION_TYPE_INSTANCE)
+                LOG.info('Registered extension %s with vCenter',
+                         constants.EXTENSION_KEY)
+            except vexc.VimFaultException as e:
+                with excutils.save_and_reraise_exception() as ctx:
+                    if 'InvalidArgument' in e.fault_list:
+                        LOG.debug('Extension %s already exists.',
+                                  constants.EXTENSION_KEY)
+                        ctx.reraise = False
+        else:
+            LOG.debug('Extension %s already exists.', constants.EXTENSION_KEY)
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, migrate_data=None, destroy_vifs=True):
@@ -259,6 +274,21 @@ class VMwareVCDriver(driver.ComputeDriver):
     def get_mks_console(self, context, instance):
         return self._vmops.get_mks_console(instance)
 
+    def get_console_output(self, context, instance):
+        if not CONF.vmware.serial_log_dir:
+            LOG.error("The 'serial_log_dir' config option is not set!")
+            return
+        fname = instance.uuid.replace('-', '')
+        path = os.path.join(CONF.vmware.serial_log_dir, fname)
+        if not os.path.exists(path):
+            LOG.warning('The console log is missing. Check your VSPC '
+                        'configuration', instance=instance)
+            return b""
+        with open(path, 'rb') as fp:
+            read_log_data, remaining = nova.privsep.path.last_bytes(
+                fp, MAX_CONSOLE_BYTES)
+            return read_log_data
+
     def _get_vcenter_uuid(self):
         """Retrieves the vCenter UUID."""
 
@@ -316,8 +346,47 @@ class VMwareVCDriver(driver.ComputeDriver):
         """
         return [self._nodename]
 
+    def get_inventory(self, nodename):
+        """Return a dict, keyed by resource class, of inventory information for
+        the supplied node.
+        """
+        stats = vm_util.get_stats_from_cluster(self._session,
+                                               self._cluster_ref)
+        datastores = ds_util.get_available_datastores(self._session,
+                                                      self._cluster_ref,
+                                                      self._datastore_regex)
+        total_disk_capacity = sum([ds.capacity for ds in datastores])
+        max_free_space = max([ds.freespace for ds in datastores])
+        reserved_disk_gb = compute_utils.convert_mb_to_ceil_gb(
+            CONF.reserved_host_disk_mb)
+        result = {
+            obj_fields.ResourceClass.VCPU: {
+                'total': stats['cpu']['vcpus'],
+                'reserved': CONF.reserved_host_cpus,
+                'min_unit': 1,
+                'max_unit': stats['cpu']['max_vcpus_per_host'],
+                'step_size': 1,
+            },
+            obj_fields.ResourceClass.MEMORY_MB: {
+                'total': stats['mem']['total'],
+                'reserved': CONF.reserved_host_memory_mb,
+                'min_unit': 1,
+                'max_unit': stats['mem']['max_mem_mb_per_host'],
+                'step_size': 1,
+            },
+            obj_fields.ResourceClass.DISK_GB: {
+                'total': total_disk_capacity // units.Gi,
+                'reserved': reserved_disk_gb,
+                'min_unit': 1,
+                'max_unit': max_free_space // units.Gi,
+                'step_size': 1,
+            },
+        }
+        return result
+
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         """Create VM instance."""
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
@@ -427,8 +496,7 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def power_off(self, instance, timeout=0, retry_interval=0):
         """Power off the specified instance."""
-        # TODO(PhilDay): Add support for timeout (clean shutdown)
-        self._vmops.power_off(instance)
+        self._vmops.power_off(instance, timeout, retry_interval)
 
     def power_on(self, context, instance, network_info,
                  block_device_info=None):
@@ -512,7 +580,8 @@ class VMwareAPISession(api.VMwareAPISession):
                  retry_count=CONF.vmware.api_retry_count,
                  scheme="https",
                  cacert=CONF.vmware.ca_file,
-                 insecure=CONF.vmware.insecure):
+                 insecure=CONF.vmware.insecure,
+                 pool_size=CONF.vmware.connection_pool_size):
         super(VMwareAPISession, self).__init__(
                 host=host_ip,
                 port=host_port,
@@ -523,7 +592,8 @@ class VMwareAPISession(api.VMwareAPISession):
                 scheme=scheme,
                 create_session=True,
                 cacert=cacert,
-                insecure=insecure)
+                insecure=insecure,
+                pool_size=pool_size)
 
     def _is_vim_object(self, module):
         """Check if the module is a VIM Object instance."""

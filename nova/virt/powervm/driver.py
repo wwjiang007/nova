@@ -31,10 +31,12 @@ from nova import conf as cfg
 from nova.console import type as console_type
 from nova import exception as exc
 from nova import image
+from nova.virt import configdrive
 from nova.virt import driver
 from nova.virt.powervm.disk import ssp
 from nova.virt.powervm import host as pvm_host
 from nova.virt.powervm.tasks import base as tf_base
+from nova.virt.powervm.tasks import network as tf_net
 from nova.virt.powervm.tasks import storage as tf_stg
 from nova.virt.powervm.tasks import vm as tf_vm
 from nova.virt.powervm import vm
@@ -139,7 +141,8 @@ class PowerVMDriver(driver.ComputeDriver):
         return data
 
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
@@ -157,6 +160,9 @@ class PowerVMDriver(driver.ComputeDriver):
             The metadata of the image of the instance.
         :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in instance.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
@@ -174,7 +180,11 @@ class PowerVMDriver(driver.ComputeDriver):
         flow_spawn.add(tf_vm.Create(
             self.adapter, self.host_wrapper, instance, stg_ftsk))
 
-        # TODO(thorst, efried) Plug the VIFs
+        # Create a flow for the IO
+        flow_spawn.add(tf_net.PlugVifs(
+            self.virtapi, self.adapter, instance, network_info))
+        flow_spawn.add(tf_net.PlugMgmtVif(
+            self.adapter, instance))
 
         # Create the boot image.
         flow_spawn.add(tf_stg.CreateDiskForImg(
@@ -183,7 +193,12 @@ class PowerVMDriver(driver.ComputeDriver):
         flow_spawn.add(tf_stg.AttachDisk(
             self.disk_dvr, instance, stg_ftsk=stg_ftsk))
 
-        # TODO(thorst, efried) Add the config drive
+        # If the config drive is needed, add those steps.  Should be done
+        # after all the other I/O.
+        if configdrive.required_by(instance):
+            flow_spawn.add(tf_stg.CreateAndConnectCfgDrive(
+                self.adapter, instance, injected_files, network_info,
+                stg_ftsk, admin_pass=admin_password))
 
         # Add the transaction manager flow at the end of the 'I/O
         # connection' tasks. This will run all the connections in parallel.
@@ -222,12 +237,29 @@ class PowerVMDriver(driver.ComputeDriver):
             # hard shutdown.
             flow.add(tf_vm.PowerOff(self.adapter, instance,
                                     force_immediate=destroy_disks))
-            # TODO(thorst, efried) Add unplug vifs task
-            # TODO(thorst, efried) Add config drive tasks
+
+            # The FeedTask accumulates storage disconnection tasks to be run in
+            # parallel.
+            stg_ftsk = pvm_par.build_active_vio_feed_task(
+                self.adapter, xag=[pvm_const.XAG.VIO_SMAP])
+
+            # Call the unplug VIFs task.  While CNAs get removed from the LPAR
+            # directly on the destroy, this clears up the I/O Host side.
+            flow.add(tf_net.UnplugVifs(self.adapter, instance, network_info))
+
+            # Add the disconnect/deletion of the vOpt to the transaction
+            # manager.
+            if configdrive.required_by(instance):
+                flow.add(tf_stg.DeleteVOpt(
+                    self.adapter, instance, stg_ftsk=stg_ftsk))
+
             # TODO(thorst, efried) Add volume disconnect tasks
 
             # Detach the disk storage adapters
             flow.add(tf_stg.DetachDisk(self.disk_dvr, instance))
+
+            # Accumulated storage disconnection tasks next
+            flow.add(stg_ftsk)
 
             # Delete the storage disks
             if destroy_disks:
@@ -325,3 +357,11 @@ class PowerVMDriver(driver.ComputeDriver):
                 if e.response.status == 404:
                     sare.reraise = False
                     raise exc.InstanceNotFound(instance_id=instance.uuid)
+
+    def deallocate_networks_on_reschedule(self, instance):
+        """Does the driver want networks deallocated on reschedule?
+
+        :param instance: the instance object.
+        :returns: Boolean value. If True deallocate networks on reschedule.
+        """
+        return True

@@ -37,7 +37,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: get-resource_provider-traits.json
+.. literalinclude:: ./samples/resource_provider_traits/get-resource_provider-traits.json
    :language: javascript
 
 Update resource provider traits
@@ -70,7 +70,7 @@ Request
 Request example
 ---------------
 
-.. literalinclude:: update-resource_provider-traits-request.json
+.. literalinclude:: ./samples/resource_provider_traits/update-resource_provider-traits-request.json
    :language: javascript
 
 Response
@@ -84,7 +84,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: update-resource_provider-traits.json
+.. literalinclude:: ./samples/resource_provider_traits/update-resource_provider-traits.json
    :language: javascript
 
 
@@ -101,6 +101,12 @@ Error response codes: itemNotFound(404), conflict(409)
 
 * `409 Conflict` if the provider's traits are updated by another
   thread while attempting the operation.
+
+.. note:: Since this request does not accept the resource provider generation,
+          it is not safe to use when multiple threads are managing traits for
+          a single provider.  In such situations, use the
+          ``PUT /resource_providers/{uuid}/traits`` API with an empty
+          ``traits`` list.
 
 Request
 -------

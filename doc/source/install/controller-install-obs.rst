@@ -192,7 +192,9 @@ databases, service credentials, and API endpoints.
 
    .. code-block:: console
 
-      $ openstack service create --name placement --description "Placement API" placement
+      $ openstack service create --name placement \
+        --description "Placement API" placement
+
       +-------------+----------------------------------+
       | Field       | Value                            |
       +-------------+----------------------------------+
@@ -207,7 +209,9 @@ databases, service credentials, and API endpoints.
 
    .. code-block:: console
 
-      $ openstack endpoint create --region RegionOne placement public http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement public http://controller:8780
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -219,10 +223,12 @@ databases, service credentials, and API endpoints.
       | service_id   | 2d1a27022e6e4185b86adac4444c495f |
       | service_name | placement                        |
       | service_type | placement                        |
-      | url          | http://controller:8778           |
+      | url          | http://controller:8780           |
       +--------------+----------------------------------+
 
-      $ openstack endpoint create --region RegionOne placement internal http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement internal http://controller:8780
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -234,10 +240,12 @@ databases, service credentials, and API endpoints.
       | service_id   | 2d1a27022e6e4185b86adac4444c495f |
       | service_name | placement                        |
       | service_type | placement                        |
-      | url          | http://controller:8778           |
+      | url          | http://controller:8780           |
       +--------------+----------------------------------+
 
-      $ openstack endpoint create --region RegionOne placement admin http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement admin http://controller:8780
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -249,7 +257,7 @@ databases, service credentials, and API endpoints.
       | service_id   | 2d1a27022e6e4185b86adac4444c495f |
       | service_name | placement                        |
       | service_type | placement                        |
-      | url          | http://controller:8778           |
+      | url          | http://controller:8780           |
       +--------------+----------------------------------+
 
 Install and configure components

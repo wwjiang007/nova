@@ -22,7 +22,7 @@ notifications_group = cfg.OptGroup(
     help="""
 Most of the actions in Nova which manipulate the system state generate
 notifications which are posted to the messaging component (e.g. RabbitMQ) and
-can be consumed by any service outside the Openstack. More technical details
+can be consumed by any service outside the OpenStack. More technical details
 at https://docs.openstack.org/nova/latest/reference/notifications.html
 """)
 
@@ -32,27 +32,22 @@ ALL_OPTS = [
         choices=(None, 'vm_state', 'vm_and_task_state'),
         deprecated_group='DEFAULT',
         help="""
-If set, send compute.instance.update notifications on instance state
-changes.
+If set, send compute.instance.update notifications on
+instance state changes.
 
-Please refer to https://wiki.openstack.org/wiki/SystemUsageData for
+Please refer to
+https://docs.openstack.org/nova/latest/reference/notifications.html for
 additional information on notifications.
 
 Possible values:
 
 * None - no notifications
-* "vm_state" - notifications on VM state changes
-* "vm_and_task_state" - notifications on VM and task state changes
-"""),
-
-    cfg.BoolOpt(
-        'notify_on_api_faults',
-        default=False,
-        deprecated_group='DEFAULT',
-        deprecated_name='notify_api_faults',
-        help="""
-If enabled, send api.fault notifications on caught exceptions in the
-API service.
+* "vm_state" - notifications are sent with VM state transition information in
+  the ``old_state`` and ``state`` fields. The ``old_task_state`` and
+  ``new_task_state`` fields will be set to the current task_state of the
+  instance.
+* "vm_and_task_state" - notifications are sent with VM and task state
+  transition information.
 """),
 
     cfg.StrOpt(

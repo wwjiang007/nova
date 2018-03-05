@@ -11,74 +11,20 @@
 #    under the License.
 """Placement API handlers for resource providers."""
 
-import copy
-
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import webob
 
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.schemas import resource_provider as rp_schema
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
 from nova.objects import resource_provider as rp_obj
-
-
-POST_RESOURCE_PROVIDER_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "maxLength": 200
-        },
-        "uuid": {
-            "type": "string",
-            "format": "uuid"
-        }
-    },
-    "required": [
-        "name"
-     ],
-    "additionalProperties": False,
-}
-# Remove uuid to create the schema for PUTting a resource provider
-PUT_RESOURCE_PROVIDER_SCHEMA = copy.deepcopy(POST_RESOURCE_PROVIDER_SCHEMA)
-PUT_RESOURCE_PROVIDER_SCHEMA['properties'].pop('uuid')
-
-# Represents the allowed query string parameters to the GET /resource_providers
-# API call
-GET_RPS_SCHEMA_1_0 = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string"
-        },
-        "uuid": {
-            "type": "string",
-            "format": "uuid"
-        }
-    },
-    "additionalProperties": False,
-}
-
-# Placement API microversion 1.3 adds support for a member_of attribute
-GET_RPS_SCHEMA_1_3 = copy.deepcopy(GET_RPS_SCHEMA_1_0)
-GET_RPS_SCHEMA_1_3['properties']['member_of'] = {
-    "type": "string"
-}
-
-# Placement API microversion 1.4 adds support for requesting resource providers
-# having some set of capacity for some resources. The query string is a
-# comma-delimited set of "$RESOURCE_CLASS_NAME:$AMOUNT" strings. The validation
-# of the string is left up to the helper code in the
-# normalize_resources_qs_param() function.
-GET_RPS_SCHEMA_1_4 = copy.deepcopy(GET_RPS_SCHEMA_1_3)
-GET_RPS_SCHEMA_1_4['properties']['resources'] = {
-    "type": "string"
-}
 
 
 def _serialize_links(environ, resource_provider):
@@ -90,27 +36,37 @@ def _serialize_links(environ, resource_provider):
         rel_types.append('aggregates')
     if want_version >= (1, 6):
         rel_types.append('traits')
+    if want_version >= (1, 11):
+        rel_types.append('allocations')
     for rel in rel_types:
         links.append({'rel': rel, 'href': '%s/%s' % (url, rel)})
     return links
 
 
-def _serialize_provider(environ, resource_provider):
+def _serialize_provider(environ, resource_provider, want_version):
     data = {
         'uuid': resource_provider.uuid,
         'name': resource_provider.name,
         'generation': resource_provider.generation,
         'links': _serialize_links(environ, resource_provider)
     }
+    if want_version.matches((1, 14)):
+        data['parent_provider_uuid'] = resource_provider.parent_provider_uuid
+        data['root_provider_uuid'] = resource_provider.root_provider_uuid
     return data
 
 
-def _serialize_providers(environ, resource_providers):
+def _serialize_providers(environ, resource_providers, want_version):
     output = []
+    last_modified = None
+    get_last_modified = want_version.matches((1, 15))
     for provider in resource_providers:
-        provider_data = _serialize_provider(environ, provider)
+        if get_last_modified:
+            last_modified = util.pick_last_modified(last_modified, provider)
+        provider_data = _serialize_provider(environ, provider, want_version)
         output.append(provider_data)
-    return {"resource_providers": output}
+    last_modified = last_modified or timeutils.utcnow(with_timezone=True)
+    return ({"resource_providers": output}, last_modified)
 
 
 @wsgi_wrapper.PlacementWsgify
@@ -122,12 +78,15 @@ def create_resource_provider(req):
     header pointing to the newly created resource provider.
     """
     context = req.environ['placement.context']
-    data = util.extract_json(req.body, POST_RESOURCE_PROVIDER_SCHEMA)
+    schema = rp_schema.POST_RESOURCE_PROVIDER_SCHEMA
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
+    if want_version.matches((1, 14)):
+        schema = rp_schema.POST_RP_SCHEMA_V1_14
+    data = util.extract_json(req.body, schema)
 
     try:
-        uuid = data.get('uuid', uuidutils.generate_uuid())
-        resource_provider = rp_obj.ResourceProvider(
-            context, name=data['name'], uuid=uuid)
+        uuid = data.setdefault('uuid', uuidutils.generate_uuid())
+        resource_provider = rp_obj.ResourceProvider(context, **data)
         resource_provider.create()
     except db_exc.DBDuplicateEntry as exc:
         # Whether exc.columns has one or two entries (in the event
@@ -140,8 +99,9 @@ def create_resource_provider(req):
             {'duplicate': duplicate})
     except exception.ObjectActionError as exc:
         raise webob.exc.HTTPBadRequest(
-            _('Unable to create resource provider %(rp_uuid)s: %(error)s') %
-            {'rp_uuid': uuid, 'error': exc})
+            _('Unable to create resource provider "%(name)s", %(rp_uuid)s: '
+              '%(error)s') %
+            {'name': data['name'], 'rp_uuid': uuid, 'error': exc})
 
     req.response.location = util.resource_provider_url(
         req.environ, resource_provider)
@@ -183,6 +143,7 @@ def get_resource_provider(req):
     On success return a 200 with an application/json body representing
     the resource provider.
     """
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     # The containing application will catch a not found here.
     context = req.environ['placement.context']
@@ -190,10 +151,15 @@ def get_resource_provider(req):
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
-    req.response.body = encodeutils.to_utf8(jsonutils.dumps(
-        _serialize_provider(req.environ, resource_provider)))
-    req.response.content_type = 'application/json'
-    return req.response
+    response = req.response
+    response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_provider(req.environ, resource_provider, want_version)))
+    response.content_type = 'application/json'
+    if want_version.matches((1, 15)):
+        modified = util.pick_last_modified(None, resource_provider)
+        response.last_modified = modified
+        response.cache_control = 'no-cache'
+    return response
 
 
 @wsgi_wrapper.PlacementWsgify
@@ -207,16 +173,21 @@ def list_resource_providers(req):
     context = req.environ['placement.context']
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
-    schema = GET_RPS_SCHEMA_1_0
-    if want_version == (1, 3):
-        schema = GET_RPS_SCHEMA_1_3
-    if want_version >= (1, 4):
-        schema = GET_RPS_SCHEMA_1_4
+    schema = rp_schema.GET_RPS_SCHEMA_1_0
+    if want_version.matches((1, 18)):
+        schema = rp_schema.GET_RPS_SCHEMA_1_18
+    elif want_version.matches((1, 14)):
+        schema = rp_schema.GET_RPS_SCHEMA_1_14
+    elif want_version.matches((1, 4)):
+        schema = rp_schema.GET_RPS_SCHEMA_1_4
+    elif want_version.matches((1, 3)):
+        schema = rp_schema.GET_RPS_SCHEMA_1_3
 
     util.validate_query_params(req, schema)
 
     filters = {}
-    for attr in ['uuid', 'name', 'member_of']:
+    qpkeys = ('uuid', 'name', 'member_of', 'in_tree', 'resources', 'required')
+    for attr in qpkeys:
         if attr in req.GET:
             value = req.GET[attr]
             # special case member_of to always make its value a
@@ -235,10 +206,11 @@ def list_resource_providers(req):
                         raise webob.exc.HTTPBadRequest(
                             _('Invalid uuid value: %(uuid)s') %
                             {'uuid': aggr_uuid})
+            elif attr == 'resources':
+                value = util.normalize_resources_qs_param(value)
+            elif attr == 'required':
+                value = util.normalize_traits_qs_param(value)
             filters[attr] = value
-    if 'resources' in req.GET:
-        resources = util.normalize_resources_qs_param(req.GET['resources'])
-        filters['resources'] = resources
     try:
         resource_providers = rp_obj.ResourceProviderList.get_all_by_filters(
             context, filters)
@@ -246,11 +218,19 @@ def list_resource_providers(req):
         raise webob.exc.HTTPBadRequest(
             _('Invalid resource class in resources parameter: %(error)s') %
             {'error': exc})
+    except exception.TraitNotFound as exc:
+        raise webob.exc.HTTPBadRequest(
+            _('Invalid trait(s) in "required" parameter: %(error)s') %
+            {'error': exc})
 
     response = req.response
-    response.body = encodeutils.to_utf8(
-        jsonutils.dumps(_serialize_providers(req.environ, resource_providers)))
+    output, last_modified = _serialize_providers(
+        req.environ, resource_providers, want_version)
+    response.body = encodeutils.to_utf8(jsonutils.dumps(output))
     response.content_type = 'application/json'
+    if want_version.matches((1, 15)):
+        response.last_modified = last_modified
+        response.cache_control = 'no-cache'
     return response
 
 
@@ -264,14 +244,21 @@ def update_resource_provider(req):
     """
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     context = req.environ['placement.context']
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
     # The containing application will catch a not found here.
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
-    data = util.extract_json(req.body, PUT_RESOURCE_PROVIDER_SCHEMA)
+    schema = rp_schema.PUT_RESOURCE_PROVIDER_SCHEMA
+    if want_version.matches((1, 14)):
+        schema = rp_schema.PUT_RP_SCHEMA_V1_14
 
-    resource_provider.name = data['name']
+    data = util.extract_json(req.body, schema)
+
+    for field in rp_obj.ResourceProvider.SETTABLE_FIELDS:
+        if field in data:
+            setattr(resource_provider, field, data[field])
 
     try:
         resource_provider.save()
@@ -284,8 +271,12 @@ def update_resource_provider(req):
             _('Unable to save resource provider %(rp_uuid)s: %(error)s') %
             {'rp_uuid': uuid, 'error': exc})
 
-    req.response.body = encodeutils.to_utf8(jsonutils.dumps(
-        _serialize_provider(req.environ, resource_provider)))
-    req.response.status = 200
-    req.response.content_type = 'application/json'
-    return req.response
+    response = req.response
+    response.status = 200
+    response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_provider(req.environ, resource_provider, want_version)))
+    response.content_type = 'application/json'
+    if want_version.matches((1, 15)):
+        response.last_modified = resource_provider.updated_at
+        response.cache_control = 'no-cache'
+    return response

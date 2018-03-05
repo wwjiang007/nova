@@ -152,7 +152,7 @@ class TestNeutronDriver(test.NoDBTestCase):
         with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
                                return_value=expected_sg_id):
             observed_sg = sg_api.get(self.context, name=sg_name)
-        expected_sg['security_group']['project_id'] = self.context.tenant
+        expected_sg['security_group']['project_id'] = self.context.project_id
         del expected_sg['security_group']['tenant_id']
         self.assertEqual(expected_sg['security_group'], observed_sg)
         self.mocked_client.show_security_group.assert_called_once_with(
@@ -394,6 +394,45 @@ class TestNeutronDriver(test.NoDBTestCase):
         self.assertEqual([], result)
         self.mocked_client.list_ports.assert_called_once_with(
             device_id=[uuids.instance])
+
+    def test_add_to_instance(self):
+        sg_name = 'web_server'
+        sg_id = '85cc3048-abc3-43cc-89b3-377341426ac5'
+        port_id = 1
+        port_list = {'ports': [{'id': port_id, 'device_id': uuids.instance,
+                     'fixed_ips': [{'ip_address': '10.0.0.1'}],
+                     'port_security_enabled': True, 'security_groups': []}]}
+        self.mocked_client.list_ports.return_value = port_list
+        sg_api = neutron_driver.SecurityGroupAPI()
+        with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
+                               return_value=sg_id):
+            sg_api.add_to_instance(
+                self.context, objects.Instance(uuid=uuids.instance), sg_name)
+        self.mocked_client.list_ports.assert_called_once_with(
+            device_id=uuids.instance)
+        self.mocked_client.update_port.assert_called_once_with(
+            port_id, {'port': {'security_groups': [sg_id]}})
+
+    def test_add_to_instance_with_bad_request(self):
+        sg_name = 'web_server'
+        sg_id = '85cc3048-abc3-43cc-89b3-377341426ac5'
+        port_id = 1
+        port_list = {'ports': [{'id': port_id, 'device_id': uuids.instance,
+                     'fixed_ips': [{'ip_address': '10.0.0.1'}],
+                     'port_security_enabled': True, 'security_groups': []}]}
+        self.mocked_client.list_ports.return_value = port_list
+        sg_api = neutron_driver.SecurityGroupAPI()
+        self.mocked_client.update_port.side_effect = (
+            n_exc.BadRequest(message='error'))
+        with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
+                               return_value=sg_id):
+            self.assertRaises(exception.SecurityGroupCannotBeApplied,
+                              sg_api.add_to_instance, self.context,
+                              objects.Instance(uuid=uuids.instance), sg_name)
+        self.mocked_client.list_ports.assert_called_once_with(
+            device_id=uuids.instance)
+        self.mocked_client.update_port.assert_called_once_with(
+            port_id, {'port': {'security_groups': [sg_id]}})
 
 
 class TestNeutronDriverWithoutMock(test.NoDBTestCase):

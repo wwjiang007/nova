@@ -15,6 +15,8 @@
 
 from cinderclient import api_versions as cinder_api_versions
 from cinderclient import exceptions as cinder_exception
+from cinderclient.v2 import limits as cinder_limits
+from keystoneauth1 import loading as ks_loading
 from keystoneclient import exceptions as keystone_exception
 import mock
 from oslo_utils import timeutils
@@ -117,7 +119,7 @@ class CinderApiTestCase(test.NoDBTestCase):
 
         self.api.get(self.ctx, volume_id)
 
-        mock_cinderclient.assert_called_once_with(self.ctx)
+        mock_cinderclient.assert_called_once_with(self.ctx, microversion=None)
         mock_volumes.get.assert_called_once_with(volume_id)
 
     @mock.patch('nova.volume.cinder.cinderclient')
@@ -143,6 +145,35 @@ class CinderApiTestCase(test.NoDBTestCase):
 
         self.assertRaises(exception.CinderConnectionFailed,
                   self.api.get, self.ctx, 'id1')
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_get_with_shared_targets(self, mock_cinderclient):
+        """Tests getting a volume at microversion 3.48 which includes the
+        shared_targets and service_uuid parameters in the volume response body.
+        """
+        mock_volume = mock.MagicMock(
+            shared_targets=False, service_uuid=uuids.service_uuid)
+        mock_volumes = mock.MagicMock()
+        mock_volumes.get.return_value = mock_volume
+        mock_cinderclient.return_value = mock.MagicMock(volumes=mock_volumes)
+        vol = self.api.get(self.ctx, uuids.volume_id, microversion='3.48')
+        mock_cinderclient.assert_called_once_with(
+            self.ctx, microversion='3.48')
+        mock_volumes.get.assert_called_once_with(uuids.volume_id)
+        self.assertIn('shared_targets', vol)
+        self.assertFalse(vol['shared_targets'])
+        self.assertEqual(uuids.service_uuid, vol['service_uuid'])
+
+    @mock.patch('nova.volume.cinder.cinderclient',
+                side_effect=exception.CinderAPIVersionNotAvailable(
+                    version='3.48'))
+    def test_get_microversion_not_supported(self, mock_cinderclient):
+        """Tests getting a volume at microversion 3.48 but that version
+        is not available.
+        """
+        self.assertRaises(exception.CinderAPIVersionNotAvailable,
+                          self.api.get, self.ctx, uuids.volume_id,
+                          microversion='3.48')
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_create(self, mock_cinderclient):
@@ -300,7 +331,9 @@ class CinderApiTestCase(test.NoDBTestCase):
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_attachment_create(self, mock_cinderclient):
-        """Tests the happy path for creating a volume attachment."""
+        """Tests the happy path for creating a volume attachment without a
+        mountpoint.
+        """
         attachment_ref = {'id': uuids.attachment_id,
                           'connection_info': {}}
         expected_attachment_ref = {'id': uuids.attachment_id,
@@ -312,6 +345,30 @@ class CinderApiTestCase(test.NoDBTestCase):
         self.assertEqual(expected_attachment_ref, result)
         mock_cinderclient.return_value.attachments.create.\
             assert_called_once_with(uuids.volume_id, None, uuids.instance_id)
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_attachment_create_with_mountpoint(self, mock_cinderclient):
+        """Tests the happy path for creating a volume attachment with a
+        mountpoint.
+        """
+        attachment_ref = {'id': uuids.attachment_id,
+                          'connection_info': {}}
+        expected_attachment_ref = {'id': uuids.attachment_id,
+                                   'connection_info': {}}
+        mock_cinderclient.return_value.attachments.create.return_value = (
+            attachment_ref)
+        original_connector = {'host': 'fake-host'}
+        updated_connector = dict(original_connector, mountpoint='/dev/vdb')
+        result = self.api.attachment_create(
+            self.ctx, uuids.volume_id, uuids.instance_id,
+            connector=original_connector, mountpoint='/dev/vdb')
+        self.assertEqual(expected_attachment_ref, result)
+        # Make sure the original connector wasn't modified.
+        self.assertNotIn('mountpoint', original_connector)
+        # Make sure the mountpoint was passed through via the connector.
+        mock_cinderclient.return_value.attachments.create.\
+            assert_called_once_with(uuids.volume_id, updated_connector,
+                                    uuids.instance_id)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_attachment_create_volume_not_found(self, mock_cinderclient):
@@ -337,15 +394,17 @@ class CinderApiTestCase(test.NoDBTestCase):
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_attachment_update(self, mock_cinderclient):
-        """Tests the happy path for updating a volume attachment."""
+        """Tests the happy path for updating a volume attachment without
+        a mountpoint.
+        """
         fake_attachment = FakeAttachment()
+        connector = {'host': 'fake-host'}
         expected_attachment_ref = {
              'id': uuids.attachment_id,
              'volume_id': fake_attachment.volume_id,
              'connection_info': {
                  'attach_mode': 'rw',
                  'attached_at': fake_attachment.attached_at,
-                 'connector': {'host': 'fake-host'},
                  'data': {'foo': 'bar', 'target_lun': '1'},
                  'detached_at': None,
                  'driver_volume_type': 'fake_type',
@@ -355,8 +414,44 @@ class CinderApiTestCase(test.NoDBTestCase):
         mock_cinderclient.return_value.attachments.update.return_value = (
             fake_attachment)
         result = self.api.attachment_update(
-            self.ctx, uuids.attachment_id, connector={'host': 'fake-host'})
+            self.ctx, uuids.attachment_id, connector=connector)
         self.assertEqual(expected_attachment_ref, result)
+        # Make sure the connector wasn't modified.
+        self.assertNotIn('mountpoint', connector)
+        mock_cinderclient.return_value.attachments.update.\
+            assert_called_once_with(uuids.attachment_id, connector)
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_attachment_update_with_mountpoint(self, mock_cinderclient):
+        """Tests the happy path for updating a volume attachment with
+        a mountpoint.
+        """
+        fake_attachment = FakeAttachment()
+        original_connector = {'host': 'fake-host'}
+        updated_connector = dict(original_connector, mountpoint='/dev/vdb')
+        expected_attachment_ref = {
+             'id': uuids.attachment_id,
+             'volume_id': fake_attachment.volume_id,
+             'connection_info': {
+                 'attach_mode': 'rw',
+                 'attached_at': fake_attachment.attached_at,
+                 'data': {'foo': 'bar', 'target_lun': '1'},
+                 'detached_at': None,
+                 'driver_volume_type': 'fake_type',
+                 'instance': fake_attachment.instance,
+                 'status': 'attaching',
+                 'volume_id': fake_attachment.volume_id}}
+        mock_cinderclient.return_value.attachments.update.return_value = (
+            fake_attachment)
+        result = self.api.attachment_update(
+            self.ctx, uuids.attachment_id, connector=original_connector,
+            mountpoint='/dev/vdb')
+        self.assertEqual(expected_attachment_ref, result)
+        # Make sure the original connector wasn't modified.
+        self.assertNotIn('mountpoint', original_connector)
+        # Make sure the mountpoint was passed through via the connector.
+        mock_cinderclient.return_value.attachments.update.\
+            assert_called_once_with(uuids.attachment_id, updated_connector)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_attachment_update_attachment_not_found(self, mock_cinderclient):
@@ -505,7 +600,7 @@ class CinderApiTestCase(test.NoDBTestCase):
 
         self.api.detach(self.ctx, 'id1', instance_uuid='fake_uuid')
 
-        mock_cinderclient.assert_called_with(self.ctx)
+        mock_cinderclient.assert_called_with(self.ctx, microversion=None)
         mock_volumes.detach.assert_called_once_with('id1', None)
 
     @mock.patch('nova.volume.cinder.cinderclient')
@@ -522,8 +617,50 @@ class CinderApiTestCase(test.NoDBTestCase):
 
         self.api.detach(self.ctx, 'id1', instance_uuid='fake_uuid')
 
-        mock_cinderclient.assert_called_with(self.ctx)
+        mock_cinderclient.assert_called_with(self.ctx, microversion=None)
         mock_volumes.detach.assert_called_once_with('id1', 'fakeid')
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_attachment_get(self, mock_cinderclient):
+        mock_attachment = mock.MagicMock()
+        mock_cinderclient.return_value = \
+            mock.MagicMock(attachments=mock_attachment)
+
+        attachment_id = uuids.attachment
+        self.api.attachment_get(self.ctx, attachment_id)
+
+        mock_cinderclient.assert_called_once_with(self.ctx, '3.44',
+                                                  skip_version_check=True)
+        mock_attachment.show.assert_called_once_with(attachment_id)
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_attachment_get_failed(self, mock_cinderclient):
+        mock_cinderclient.return_value.attachments.show.side_effect = (
+                cinder_exception.NotFound(404, '404'))
+
+        attachment_id = uuids.attachment
+        ex = self.assertRaises(exception.VolumeAttachmentNotFound,
+                               self.api.attachment_get,
+                               self.ctx,
+                               attachment_id)
+
+        self.assertEqual(404, ex.code)
+        self.assertIn(attachment_id, six.text_type(ex))
+
+    @mock.patch('nova.volume.cinder.cinderclient',
+                side_effect=exception.CinderAPIVersionNotAvailable(
+                    version='3.44'))
+    def test_attachment_get_unsupported_api_version(self, mock_cinderclient):
+        """Tests that CinderAPIVersionNotAvailable is passed back.
+
+        If microversion 3.44 isn't available that should result in a
+        CinderAPIVersionNotAvailable exception.
+        """
+        self.assertRaises(exception.CinderAPIVersionNotAvailable,
+                          self.api.attachment_get,
+                          self.ctx, uuids.attachment_id)
+        mock_cinderclient.assert_called_once_with(self.ctx, '3.44',
+                                                  skip_version_check=True)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_initialize_connection(self, mock_cinderclient):
@@ -615,6 +752,36 @@ class CinderApiTestCase(test.NoDBTestCase):
     def test_update(self):
         self.assertRaises(NotImplementedError,
                           self.api.update, self.ctx, '', '')
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_get_absolute_limits_forbidden(self, cinderclient):
+        """Tests to make sure we gracefully handle a Forbidden error raised
+        from python-cinderclient when getting limits.
+        """
+        cinderclient.return_value.limits.get.side_effect = (
+            cinder_exception.Forbidden(403))
+        self.assertRaises(
+            exception.Forbidden, self.api.get_absolute_limits, self.ctx)
+
+    @mock.patch('nova.volume.cinder.cinderclient')
+    def test_get_absolute_limits(self, cinderclient):
+        """Tests the happy path of getting the absolute limits."""
+        expected_limits = {
+            "totalSnapshotsUsed": 0,
+            "maxTotalBackups": 10,
+            "maxTotalVolumeGigabytes": 1000,
+            "maxTotalSnapshots": 10,
+            "maxTotalBackupGigabytes": 1000,
+            "totalBackupGigabytesUsed": 0,
+            "maxTotalVolumes": 10,
+            "totalVolumesUsed": 0,
+            "totalBackupsUsed": 0,
+            "totalGigabytesUsed": 0
+        }
+        limits_obj = cinder_limits.Limits(None, {'absolute': expected_limits})
+        cinderclient.return_value.limits.get.return_value = limits_obj
+        actual_limits = self.api.get_absolute_limits(self.ctx)
+        self.assertDictEqual(expected_limits, actual_limits)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_get_snapshot(self, mock_cinderclient):
@@ -892,3 +1059,18 @@ class CinderClientTestCase(test.NoDBTestCase):
                          client.api_version)
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
+
+    @mock.patch.object(ks_loading, 'load_auth_from_conf_options')
+    def test_load_auth_plugin_failed(self, mock_load_from_conf):
+        mock_load_from_conf.return_value = None
+        self.assertRaises(cinder_exception.Unauthorized,
+                          cinder._load_auth_plugin, CONF)
+
+    @mock.patch('nova.volume.cinder._ADMIN_AUTH')
+    def test_admin_context_without_token(self,
+                                         mock_admin_auth):
+
+        mock_admin_auth.return_value = '_FAKE_ADMIN_AUTH'
+        admin_ctx = context.get_admin_context()
+        params = cinder._get_cinderclient_parameters(admin_ctx)
+        self.assertEqual(params[0], mock_admin_auth)

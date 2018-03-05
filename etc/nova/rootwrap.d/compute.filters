@@ -2,36 +2,6 @@
 # This file should be owned by (and only-writeable by) the root user
 
 [Filters]
-# nova/virt/disk/mount/api.py: 'kpartx', '-a', device
-# nova/virt/disk/mount/api.py: 'kpartx', '-d', device
-kpartx: CommandFilter, kpartx, root
-
-# nova/virt/xenapi/vm_utils.py: tune2fs, -O ^has_journal, part_path
-# nova/virt/xenapi/vm_utils.py: tune2fs, -j, partition_path
-tune2fs: CommandFilter, tune2fs, root
-
-# nova/virt/disk/mount/api.py: 'mount', mapped_device
-# nova/virt/disk/api.py: 'mount', '-o', 'bind', src, target
-# nova/virt/xenapi/vm_utils.py: 'mount', '-t', 'ext2,ext3,ext4,reiserfs'..
-# nova/virt/configdrive.py: 'mount', device, mountdir
-mount: CommandFilter, mount, root
-
-# nova/virt/disk/mount/api.py: 'umount', mapped_device
-# nova/virt/disk/api.py: 'umount' target
-# nova/virt/xenapi/vm_utils.py: 'umount', dev_path
-# nova/virt/configdrive.py: 'umount', mountdir
-umount: CommandFilter, umount, root
-
-# nova/virt/disk/mount/nbd.py: 'qemu-nbd', '-c', device, image
-# nova/virt/disk/mount/nbd.py: 'qemu-nbd', '-d', device
-qemu-nbd: CommandFilter, qemu-nbd, root
-
-# nova/virt/disk/mount/loop.py: 'losetup', '--find', '--show', image
-# nova/virt/disk/mount/loop.py: 'losetup', '--detach', device
-losetup: CommandFilter, losetup, root
-
-# nova/virt/disk/vfs/localfs.py: 'blkid', '-o', 'value', '-s', 'TYPE', device
-blkid: CommandFilter, blkid, root
 
 # nova/virt/libvirt/utils.py: 'blockdev', '--getsize64', path
 # nova/virt/disk/mount/nbd.py: 'blockdev', '--flushbufs', device
@@ -73,20 +43,8 @@ ovs-vsctl: CommandFilter, ovs-vsctl, root
 # nova/network/linux_net.py: 'ivs-ctl', ....
 ivs-ctl: CommandFilter, ivs-ctl, root
 
-# nova/virt/libvirt/vif.py: 'vrouter-port-control', ...
-vrouter-port-control: CommandFilter, vrouter-port-control, root
-
-# nova/virt/libvirt/vif.py: 'ebrctl', ...
-ebrctl: CommandFilter, ebrctl, root
-
-# nova/virt/libvirt/vif.py: 'mm-ctl', ...
-mm-ctl: CommandFilter, mm-ctl, root
-
 # nova/network/linux_net.py: 'ovs-ofctl', ....
 ovs-ofctl: CommandFilter, ovs-ofctl, root
-
-# nova/virt/libvirt/driver.py: 'dd', if=%s % virsh_output, ...
-dd: CommandFilter, dd, root
 
 # nova/virt/xenapi/volume_utils.py: 'iscsiadm', '-m', ...
 iscsiadm: CommandFilter, iscsiadm, root
@@ -95,10 +53,6 @@ iscsiadm: CommandFilter, iscsiadm, root
 # nova/virt/libvirt/volume/aoe.py: 'aoe-discover'
 aoe-revalidate: CommandFilter, aoe-revalidate, root
 aoe-discover: CommandFilter, aoe-discover, root
-
-# nova/virt/xenapi/vm_utils.py: parted, --script, ...
-# nova/virt/xenapi/vm_utils.py: 'parted', '--script', dev_path, ..*.
-parted: CommandFilter, parted, root
 
 # nova/virt/xenapi/vm_utils.py: 'pygrub', '-qn', dev_path
 pygrub: CommandFilter, pygrub, root
@@ -152,9 +106,6 @@ brctl: CommandFilter, brctl, root
 # nova/virt/xenapi/vm_utils.py: 'mkswap'
 mkswap: CommandFilter, mkswap, root
 
-# nova/virt/libvirt/utils.py: 'nova-idmapshift'
-nova-idmapshift: CommandFilter, nova-idmapshift, root
-
 # nova/virt/xenapi/vm_utils.py: 'mkfs'
 # nova/utils.py: 'mkfs', fs, path, label
 mkfs: CommandFilter, mkfs, root
@@ -166,18 +117,6 @@ qemu-img: CommandFilter, qemu-img, root
 mkfs.ext3: CommandFilter, mkfs.ext3, root
 mkfs.ext4: CommandFilter, mkfs.ext4, root
 mkfs.ntfs: CommandFilter, mkfs.ntfs, root
-
-# nova/virt/libvirt/driver.py:
-lvremove: CommandFilter, lvremove, root
-
-# nova/virt/libvirt/utils.py:
-lvcreate: CommandFilter, lvcreate, root
-
-# nova/virt/libvirt/utils.py:
-lvs: CommandFilter, lvs, root
-
-# nova/virt/libvirt/utils.py:
-vgs: CommandFilter, vgs, root
 
 # os-brick needed commands
 read_initiator: ReadFileFilter, /etc/iscsi/initiatorname.iscsi
@@ -209,24 +148,11 @@ xenstore-read: CommandFilter, xenstore-read, root
 # nova/virt/libvirt/utils.py:
 rbd: CommandFilter, rbd, root
 
-# nova/virt/libvirt/utils.py: 'shred', '-n3', '-s%d' % volume_size, path
-shred: CommandFilter, shred, root
-
 # nova/virt/libvirt/volume/volume.py: 'cp', '/dev/stdin', delete_control..
 cp: CommandFilter, cp, root
 
 # nova/virt/xenapi/vm_utils.py:
 sync: CommandFilter, sync, root
-
-# nova/virt/libvirt/imagebackend.py:
-ploop: RegExpFilter, ploop, root, ploop, restore-descriptor, .*
-prl_disk_tool: RegExpFilter, prl_disk_tool, root, prl_disk_tool, resize, --size, .*M$, --resize_partition, --hdd, .*
-
-# nova/virt/libvirt/utils.py:
-ploop: RegExpFilter, ploop, root, ploop, init, -s, .*, -f, .*, -t, .*, .*
-
-# nova/virt/libvirt/utils.py: 'xend', 'status'
-xend: CommandFilter, xend, root
 
 # nova/virt/libvirt/volume/vzstorage.py
 pstorage-mount: CommandFilter, pstorage-mount, root

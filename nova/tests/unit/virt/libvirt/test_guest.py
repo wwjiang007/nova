@@ -19,6 +19,7 @@ import sys
 import mock
 from oslo_utils import encodeutils
 import six
+import testtools
 
 from nova import context
 from nova import exception
@@ -644,7 +645,16 @@ class GuestTestCase(test.NoDBTestCase):
         self.guest.migrate('an-uri', domain_xml='</xml>',
                            params={'p1': 'v1'}, flags=1, bandwidth=2)
         self.domain.migrateToURI3.assert_called_once_with(
-            'an-uri', flags=1, params={'p1': 'v1'})
+            'an-uri', flags=1, params={'p1': 'v1', 'bandwidth': 2})
+
+    @testtools.skipIf(not six.PY2, 'libvirt python3 bindings accept unicode')
+    def test_migrate_v3_unicode(self):
+        self.guest.migrate('an-uri', domain_xml=u'</xml>',
+                           params={'p1': u'v1', 'p2': 'v2', 'p3': 3},
+                           flags=1, bandwidth=2)
+        self.domain.migrateToURI3.assert_called_once_with(
+                'an-uri', flags=1, params={'p1': 'v1', 'p2': 'v2', 'p3': 3,
+                                           'bandwidth': 2})
 
     def test_abort_job(self):
         self.guest.abort_job()
@@ -653,6 +663,10 @@ class GuestTestCase(test.NoDBTestCase):
     def test_migrate_configure_max_downtime(self):
         self.guest.migrate_configure_max_downtime(1000)
         self.domain.migrateSetMaxDowntime.assert_called_once_with(1000)
+
+    def test_migrate_configure_max_speed(self):
+        self.guest.migrate_configure_max_speed(1000)
+        self.domain.migrateSetMaxSpeed.assert_called_once_with(1000)
 
 
 class GuestBlockTestCase(test.NoDBTestCase):

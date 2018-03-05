@@ -47,6 +47,7 @@ def _fake_resources():
 
 
 class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_terminate_volume_connections')
     @mock.patch.object(nova.virt.fake.SmallFakeDriver, 'power_off')
@@ -58,7 +59,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     def _shelve_instance(self, shelved_offload_time, mock_notify,
                          mock_notify_instance_usage, mock_get_power_state,
                          mock_snapshot, mock_power_off, mock_terminate,
-                         clean_shutdown=True):
+                         mock_get_bdms, clean_shutdown=True):
         mock_get_power_state.return_value = 123
 
         CONF.set_override('shelved_offload_time', shelved_offload_time)
@@ -69,6 +70,11 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         self.useFixture(utils_fixture.TimeFixture())
         instance.task_state = task_states.SHELVING
         instance.save()
+
+        fake_bdms = None
+        if shelved_offload_time == 0:
+            fake_bdms = objects.BlockDeviceMappingList()
+            mock_get_bdms.return_value = fake_bdms
 
         tracking = {'last_state': instance.vm_state}
 
@@ -119,9 +125,9 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                                          clean_shutdown=clean_shutdown)
             mock_notify.assert_has_calls([
                 mock.call(self.context, instance, 'fake-mini',
-                          action='shelve', phase='start'),
+                          action='shelve', phase='start', bdms=fake_bdms),
                 mock.call(self.context, instance, 'fake-mini',
-                          action='shelve', phase='end')])
+                          action='shelve', phase='end', bdms=fake_bdms)])
 
         # prepare expect call lists
         mock_notify_instance_usage_call_list = [
@@ -184,6 +190,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         instance = self._shelve_offload(clean_shutdown=False)
         mock_power_off.assert_called_once_with(instance, 0, 0)
 
+    @mock.patch.object(compute_utils, 'EventReporter')
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_terminate_volume_connections')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
@@ -197,22 +205,26 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     def _shelve_offload(self, mock_notify, mock_notify_instance_usage,
                         mock_get_power_state, mock_update_resource_tracker,
-                        mock_delete_alloc, mock_terminate,
-                        clean_shutdown=True):
+                        mock_delete_alloc, mock_terminate, mock_get_bdms,
+                        mock_event, clean_shutdown=True):
         host = 'fake-mini'
         instance = self._create_fake_instance_obj(params={'host': host})
         instance.task_state = task_states.SHELVING
         instance.save()
         self.useFixture(utils_fixture.TimeFixture())
+        fake_bdms = objects.BlockDeviceMappingList()
+        mock_get_bdms.return_value = fake_bdms
 
         with mock.patch.object(instance, 'save'):
             self.compute.shelve_offload_instance(self.context, instance,
                                                  clean_shutdown=clean_shutdown)
             mock_notify.assert_has_calls([
                 mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='start'),
+                          action='shelve_offload', phase='start',
+                          bdms=fake_bdms),
                 mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='end')])
+                          action='shelve_offload', phase='end',
+                          bdms=fake_bdms)])
 
         self.assertEqual(vm_states.SHELVED_OFFLOADED, instance.vm_state)
         self.assertIsNone(instance.task_state)
@@ -232,10 +244,14 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.context, instance)
         mock_update_resource_tracker.assert_called_once_with(self.context,
                                                              instance)
-        mock_delete_alloc.assert_called_once_with(instance)
+        mock_delete_alloc.assert_called_once_with(self.context, instance)
+        mock_event.assert_called_once_with(self.context,
+                                           'compute_shelve_offload_instance',
+                                           instance.uuid)
 
         return instance
 
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_notify_about_instance_usage')
@@ -248,7 +264,10 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     def test_unshelve(self, mock_setup_network,
                       mock_get_power_state, mock_spawn,
                       mock_prep_block_device, mock_notify_instance_usage,
-                      mock_notify_instance_action):
+                      mock_notify_instance_action,
+                      mock_get_bdms):
+        mock_bdms = mock.Mock()
+        mock_get_bdms.return_value = mock_bdms
         instance = self._create_fake_instance_obj()
         instance.task_state = task_states.UNSHELVING
         instance.save()
@@ -312,9 +331,9 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
-                      action='unshelve', phase='start'),
+                      action='unshelve', phase='start', bdms=mock_bdms),
             mock.call(self.context, instance, 'fake-mini',
-                      action='unshelve', phase='end')])
+                      action='unshelve', phase='end', bdms=mock_bdms)])
 
         # prepare expect call lists
         mock_notify_instance_usage_call_list = [
@@ -329,8 +348,10 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                                                    self.compute.host)
         mock_spawn.assert_called_once_with(self.context, instance,
                 test.MatchType(objects.ImageMeta), injected_files=[],
-                admin_password=None, network_info=[],
+                admin_password=None, allocations={}, network_info=[],
                 block_device_info='fake_bdm')
+        self.mock_get_allocs.assert_called_once_with(self.context,
+                                                     instance.uuid)
         mock_get_power_state.assert_called_once_with(self.context, instance)
 
         self.assertNotIn('shelved_at', instance.system_metadata)
@@ -346,6 +367,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         self.assertEqual(self.compute.host, instance.host)
         self.assertFalse(instance.auto_disk_config)
 
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch.object(nova.compute.resource_tracker.ResourceTracker,
                        'instance_claim')
@@ -363,7 +385,10 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                                     mock_prep_block_device, mock_spawn,
                                     mock_get_power_state,
                                     mock_setup_network, mock_instance_claim,
-                                    mock_notify_instance_action):
+                                    mock_notify_instance_action,
+                                    mock_get_bdms):
+        mock_bdms = mock.Mock()
+        mock_get_bdms.return_value = mock_bdms
         instance = self._create_fake_instance_obj()
         node = test_compute.NODENAME
         limits = {}
@@ -405,9 +430,9 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
-                      action='unshelve', phase='start'),
+                      action='unshelve', phase='start', bdms=mock_bdms),
             mock.call(self.context, instance, 'fake-mini',
-                      action='unshelve', phase='end')])
+                      action='unshelve', phase='end', bdms=mock_bdms)])
 
         # prepare expect call lists
         mock_notify_instance_usage_call_list = [
@@ -426,9 +451,95 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_spawn.assert_called_once_with(self.context, instance,
                 test.MatchType(objects.ImageMeta),
                 injected_files=[], admin_password=None,
-                network_info=[],
-                block_device_info='fake_bdm')
+                allocations={}, network_info=[], block_device_info='fake_bdm')
+        self.mock_get_allocs.assert_called_once_with(self.context,
+                                                     instance.uuid)
         mock_get_power_state.assert_called_once_with(self.context, instance)
+
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
+    @mock.patch.object(nova.compute.resource_tracker.ResourceTracker,
+                       'instance_claim')
+    @mock.patch.object(neutron_api.API, 'setup_instance_network_on_host')
+    @mock.patch.object(nova.virt.fake.SmallFakeDriver, 'spawn',
+                       side_effect=test.TestingException('oops!'))
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_prep_block_device', return_value='fake_bdm')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_notify_about_instance_usage')
+    @mock.patch('nova.utils.get_image_from_system_metadata')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_terminate_volume_connections')
+    def test_unshelve_spawn_fails_cleanup_volume_connections(
+            self, mock_terminate_volume_connections, mock_image_meta,
+            mock_notify_instance_usage, mock_prep_block_device, mock_spawn,
+            mock_setup_network, mock_instance_claim,
+            mock_notify_instance_action, mock_get_bdms):
+        """Tests error handling when a instance fails to unshelve and makes
+        sure that volume connections are cleaned up from the host
+        and that the host/node values are unset on the instance.
+        """
+        mock_bdms = mock.Mock()
+        mock_get_bdms.return_value = mock_bdms
+        instance = self._create_fake_instance_obj()
+        node = test_compute.NODENAME
+        limits = {}
+        filter_properties = {'limits': limits}
+        instance.task_state = task_states.UNSHELVING
+        instance.save()
+        image_meta = {'properties': {'base_image_ref': uuids.image_id}}
+        mock_image_meta.return_value = image_meta
+
+        tracking = {'last_state': instance.task_state}
+
+        def fake_claim(context, instance, node, limits):
+            instance.host = self.compute.host
+            instance.node = node
+            requests = objects.InstancePCIRequests(requests=[])
+            return claims.Claim(context, instance, node,
+                                self.rt, _fake_resources(),
+                                requests, limits=limits)
+        mock_instance_claim.side_effect = fake_claim
+
+        def check_save(expected_task_state=None):
+            if tracking['last_state'] == task_states.UNSHELVING:
+                # This is before we've failed.
+                self.assertEqual(task_states.SPAWNING, instance.task_state)
+                tracking['last_state'] = instance.task_state
+            elif tracking['last_state'] == task_states.SPAWNING:
+                # This is after we've failed.
+                self.assertIsNone(instance.host)
+                self.assertIsNone(instance.node)
+                self.assertIsNone(instance.task_state)
+                tracking['last_state'] = instance.task_state
+            else:
+                self.fail('Unexpected save!')
+
+        with mock.patch.object(instance, 'save') as mock_save:
+            mock_save.side_effect = check_save
+            self.assertRaises(test.TestingException,
+                              self.compute.unshelve_instance,
+                              self.context, instance, image=None,
+                              filter_properties=filter_properties, node=node)
+
+        mock_notify_instance_action.assert_called_once_with(
+            self.context, instance, 'fake-mini', action='unshelve',
+            phase='start', bdms=mock_bdms)
+        mock_notify_instance_usage.assert_called_once_with(
+            self.context, instance, 'unshelve.start')
+        mock_prep_block_device.assert_called_once_with(
+            self.context, instance, mock_bdms)
+        mock_setup_network.assert_called_once_with(self.context, instance,
+                                                   self.compute.host)
+        mock_instance_claim.assert_called_once_with(self.context, instance,
+                                                    test_compute.NODENAME,
+                                                    limits)
+        mock_spawn.assert_called_once_with(
+            self.context, instance, test.MatchType(objects.ImageMeta),
+            injected_files=[], admin_password=None,
+            allocations={}, network_info=[], block_device_info='fake_bdm')
+        mock_terminate_volume_connections.assert_called_once_with(
+            self.context, instance, mock_bdms)
 
     @mock.patch.object(objects.InstanceList, 'get_by_filters')
     def test_shelved_poll_none_offloaded(self, mock_get_by_filters):
@@ -644,9 +755,10 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         with test.nested(
             mock.patch.object(fake_instance, 'save'),
             mock.patch.object(self.compute_api.compute_rpcapi,
-                              'shelve_offload_instance')
+                              'shelve_offload_instance'),
+            mock.patch('nova.compute.api.API._record_action_start')
         ) as (
-            instance_save, rpcapi_shelve_offload_instance
+            instance_save, rpcapi_shelve_offload_instance, record
         ):
             self.compute_api.shelve_offload(self.context, fake_instance,
                                             clean_shutdown=clean_shutdown)
@@ -657,6 +769,8 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
             rpcapi_shelve_offload_instance.assert_called_once_with(
                     self.context, instance=fake_instance,
                     clean_shutdown=clean_shutdown)
+            record.assert_called_once_with(self.context, fake_instance,
+                                           instance_actions.SHELVE_OFFLOAD)
 
     def test_shelve_offload(self):
         self._test_shelve_offload()

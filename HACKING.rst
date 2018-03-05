@@ -2,7 +2,7 @@ Nova Style Commandments
 =======================
 
 - Step 1: Read the OpenStack Style Commandments
-  http://docs.openstack.org/developer/hacking/
+  https://docs.openstack.org/hacking/latest/
 - Step 2: Read on
 
 Nova Specific Commandments
@@ -66,6 +66,7 @@ Nova Specific Commandments
 - [N357] Use oslo_utils.uuidutils or uuidsentinel(in case of test cases) to
   generate UUID instead of uuid4().
 - [N358] Return must always be followed by a space when returning a value.
+- [N359] Check for redundant import aliases.
 
 Creating Unit Tests
 -------------------
@@ -81,17 +82,17 @@ infrastructure in OpenStack Nova, please read ``nova/tests/unit/README.rst``.
 
 Running Tests
 -------------
-The testing system is based on a combination of tox and testr. The canonical
+The testing system is based on a combination of tox and stestr. The canonical
 approach to running tests is to simply run the command ``tox``. This will
 create virtual environments, populate them with dependencies and run all of
 the tests that OpenStack CI systems run. Behind the scenes, tox is running
-``testr run --parallel``, but is set up such that you can supply any additional
-testr arguments that are needed to tox. For example, you can run:
-``tox -- --analyze-isolation`` to cause tox to tell testr to add
+``stestr run``, but is set up such that you can supply any additional
+stestr arguments that are needed to tox. For example, you can run:
+``tox -- --analyze-isolation`` to cause tox to tell stestr to add
 --analyze-isolation to its argument list.
 
 Python packages may also have dependencies that are outside of tox's ability
-to install. Please refer to ``doc/source/development.environment.rst`` for
+to install. Please refer to `Development Quickstart`_ for
 a list of those packages on Ubuntu, Fedora and Mac OS X.
 
 To run a single or restricted set of tests, pass a regex that matches
@@ -104,11 +105,13 @@ classes.
 
 It is also possible to run the tests inside of a virtual environment
 you have created, or it is possible that you have all of the dependencies
-installed locally already. In this case, you can interact with the testr
-command directly. Running ``testr run`` will run the entire test suite. ``testr
-run --parallel`` will run it in parallel (this is the default incantation tox
-uses.) More information about testr can be found at:
-http://wiki.openstack.org/testr
+installed locally already. In this case, you can interact with the stestr
+command directly. Running ``stestr run`` will run the entire test suite.
+``stestr run --concurrency=1`` will run tests serially (by default, stestr runs
+tests in parallel). More information about stestr can be found at:
+http://stestr.readthedocs.io/
+
+.. _Development Quickstart: https://docs.openstack.org/nova/latest/contributor/development-environment.html
 
 Building Docs
 -------------

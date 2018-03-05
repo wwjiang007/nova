@@ -80,6 +80,13 @@ same time.
 
 #. During maintenance window:
 
+   * Several nova services rely on the external placement service, and while
+     efforts are made for the nova code to work with older versions of the
+     placement API, it is generally best to upgrade placement before any nova
+     services. See the
+     :ref:`placement upgrade notes <placement-upgrade-notes>` for more
+     details on upgrading the placement service.
+
    * For maximum safety (no failed API operations), gracefully shutdown all
      the services (i.e. SIG_TERM) except nova-compute.
 
@@ -181,7 +188,9 @@ An example of online data migrations are the flavor migrations done as part
 of Nova object version 1.18. This included a transient migration of flavor
 storage from one database location to another.
 
-:emphasis:`Note: Database downgrades are not supported.`
+.. note::
+
+  Database downgrades are not supported.
 
 Migration policy:
 '''''''''''''''''
@@ -279,8 +288,11 @@ Graceful service shutdown
     new workers before the graceful shutdown of the old workers. In the case
     of singleton services, like nova-compute, some actions could be delayed
     during the restart, but ideally no actions should fail due to the restart.
-    NOTE: while this is true for the RabbitMQ RPC backend, we need to confirm
-    what happens for other RPC backends.
+
+    .. note::
+
+      While this is true for the RabbitMQ RPC backend, we need to confirm
+      what happens for other RPC backends.
 
 API load balancer draining
     When upgrading API nodes, you can make your load balancer only send new

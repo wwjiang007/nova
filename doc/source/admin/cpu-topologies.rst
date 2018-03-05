@@ -96,12 +96,28 @@ also should be local. Finally, PCI devices are directly associated with
 specific NUMA nodes for the purposes of DMA. Instances that use PCI or SR-IOV
 devices should be placed on the NUMA node associated with these devices.
 
+NUMA topology can exist on both the physical hardware of the host and the
+virtual hardware of the instance. In OpenStack, when booting a process, the
+hypervisor driver looks at the NUMA topology field of both the instance and
+the host it is being booted on, and uses that information to generate an
+appropriate configuration.
+
 By default, an instance floats across all NUMA nodes on a host. NUMA awareness
 can be enabled implicitly through the use of huge pages or pinned CPUs or
-explicitly through the use of flavor extra specs or image metadata.  In all
-cases, the ``NUMATopologyFilter`` filter must be enabled. Details on this
-filter are provided in :doc:`/admin/configuration/schedulers` in Nova
-configuration guide.
+explicitly through the use of flavor extra specs or image metadata. If the
+instance has requested a specific NUMA topology, compute will try to pin the
+vCPUs of different NUMA cells on the instance to the corresponding NUMA cells
+on the host. It will also expose the NUMA topology of the instance to the
+guest OS.
+
+If you want compute to pin a particular vCPU as part of this process,
+set the ``vcpu_pin_set`` parameter in the ``nova.conf`` configuration
+file. For more information about the ``vcpu_pin_set`` parameter, see the
+:doc:`/configuration/config`.
+
+In all cases where NUMA awareness is used, the ``NUMATopologyFilter``
+filter must be enabled. Details on this filter are provided in
+:doc:`/admin/configuration/schedulers`.
 
 .. caution::
 
@@ -163,7 +179,8 @@ memory mapping between the two nodes, run:
     driver will not spawn instances with such topologies.
 
 For more information about the syntax for ``hw:numa_nodes``, ``hw:numa_cpus.N``
-and ``hw:num_mem.N``, refer to the :doc:`/admin/flavors` guide.
+and ``hw:num_mem.N``, refer to the :ref:`NUMA
+topology <extra-specs-numa-topology>` guide.
 
 Customizing instance CPU pinning policies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -276,6 +293,14 @@ Customizing instance CPU topologies
    The functionality described below is currently only supported by the
    libvirt/KVM driver.
 
+.. note::
+   Currently it also works with libvirt/QEMU driver but we don't recommend
+   it in production use cases. This is because vCPUs are actually running
+   in one thread on host in qemu TCG (Tiny Code Generator), which is the
+   backend for libvirt/QEMU driver. Work to enable full multi-threading
+   support for TCG (a.k.a. MTTCG) is on going in QEMU community. Please see
+   this `MTTCG project`_ page for detail.
+
 In addition to configuring how an instance is scheduled on host CPUs, it is
 possible to configure how CPUs are represented in the instance itself. By
 default, when instance NUMA placement is not specified, a topology of N
@@ -317,13 +342,13 @@ and ``hw:cpu_threads``, refer to the :doc:`/admin/flavors` guide.
 It is also possible to set upper limits on the number of sockets, cores, and
 threads used. Unlike the hard values above, it is not necessary for this exact
 number to used because it only provides a limit. This can be used to provide
-some flexibility in scheduling, while ensuring certains limits are not
+some flexibility in scheduling, while ensuring certain limits are not
 exceeded. For example, to ensure no more than two sockets are defined in the
 instance topology, run:
 
 .. code-block:: console
 
-   $ openstack flavor set m1.large --property=hw:cpu_max_sockets=2
+   $ openstack flavor set m1.large --property hw:cpu_max_sockets=2
 
 For more information about the syntax for ``hw:cpu_max_sockets``,
 ``hw:cpu_max_cores``, and ``hw:cpu_max_threads``, refer to the
@@ -350,7 +375,7 @@ maximum of one thread, run:
      --property hw_cpu_max_sockets=2 \
      --property hw_cpu_max_threads=1
 
-The value specified in the flavor is treated as the abolute limit.  The image
+The value specified in the flavor is treated as the absolute limit.  The image
 limits are not permitted to exceed the flavor limits, they can only be equal
 to or lower than what the flavor defines. By setting a ``max`` value for
 sockets, cores, or threads, administrators can prevent users configuring
@@ -362,3 +387,4 @@ guide.
 .. Links
 .. _`Image metadata`: https://docs.openstack.org/image-guide/image-metadata.html
 .. _`discussion`: http://lists.openstack.org/pipermail/openstack-dev/2016-March/090367.html
+.. _`MTTCG project`: http://wiki.qemu.org/Features/tcg-multithread

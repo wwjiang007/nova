@@ -15,6 +15,7 @@
 #    under the License.
 #
 
+import copy
 import time
 
 from keystoneauth1 import loading as ks_loading
@@ -41,6 +42,7 @@ from nova.pci import whitelist as pci_whitelist
 from nova.policies import servers as servers_policies
 from nova import profiler
 from nova import service_auth
+from nova import utils
 
 CONF = nova.conf.CONF
 
@@ -127,7 +129,7 @@ class ClientWrapper(clientv20.Client):
                           "admin credential located in nova.conf")
                 raise exception.NeutronAdminCredentialConfigurationInvalid()
             except neutron_client_exc.Forbidden as e:
-                raise exception.Forbidden(e)
+                raise exception.Forbidden(six.text_type(e))
             return ret
         return wrapper
 
@@ -159,13 +161,35 @@ def get_client(context, admin=False):
         # an admin token so log an error
         raise exception.Unauthorized()
 
-    return ClientWrapper(
-        clientv20.Client(session=_SESSION,
-                         auth=auth_plugin,
-                         endpoint_override=CONF.neutron.url,
-                         region_name=CONF.neutron.region_name,
-                         global_request_id=context.global_id),
-        admin=admin or context.is_admin)
+    client_args = dict(session=_SESSION,
+                       auth=auth_plugin,
+                       global_request_id=context.global_request_id)
+
+    if CONF.neutron.url:
+        # TODO(efried): Remove in Rocky
+        client_args = dict(client_args,
+                           endpoint_override=CONF.neutron.url,
+                           # NOTE(efried): The legacy behavior was to default
+                           # region_name in the conf.
+                           region_name=CONF.neutron.region_name or 'RegionOne')
+    else:
+        # The new way
+        # NOTE(efried): We build an adapter
+        #               to pull conf options
+        #               to pass to neutronclient
+        #               which uses them to build an Adapter.
+        # This should be unwound at some point.
+        adap = utils.get_ksa_adapter(
+            'network', ksa_auth=auth_plugin, ksa_session=_SESSION)
+        client_args = dict(client_args,
+                           service_type=adap.service_type,
+                           service_name=adap.service_name,
+                           interface=adap.interface,
+                           region_name=adap.region_name,
+                           endpoint_override=adap.endpoint_override)
+
+    return ClientWrapper(clientv20.Client(**client_args),
+                         admin=admin or context.is_admin)
 
 
 def _is_not_duplicate(item, items, items_list_name, instance):
@@ -508,14 +532,38 @@ class API(base_api.NetworkAPI):
                 continue
             port_req_body = {'port': {'device_id': '', 'device_owner': ''}}
             port_req_body['port'][BINDING_HOST_ID] = None
-            port_req_body['port'][BINDING_PROFILE] = {}
+            try:
+                port = self._show_port(context, port_id,
+                                       neutron_client=neutron,
+                                       fields=BINDING_PROFILE)
+            except exception.PortNotFound:
+                LOG.debug('Unable to show port %s as it no longer '
+                          'exists.', port_id)
+                return
+            except Exception:
+                # NOTE: In case we can't retrieve the binding:profile assume
+                # that they are empty
+                LOG.exception("Unable to get binding:profile for port '%s'",
+                              port_id)
+                port_profile = {}
+            else:
+                port_profile = port.get(BINDING_PROFILE, {})
+
+            # NOTE: We're doing this to remove the binding information
+            # for the physical device but don't want to overwrite the other
+            # information in the binding profile.
+            for profile_key in ('pci_vendor_info', 'pci_slot'):
+                if profile_key in port_profile:
+                    del port_profile[profile_key]
+            port_req_body['port'][BINDING_PROFILE] = port_profile
             if self._has_dns_extension():
                 port_req_body['port']['dns_name'] = ''
+
             try:
                 port_client.update_port(port_id, port_req_body)
             except neutron_client_exc.PortNotFoundClient:
-                LOG.debug('Unable to unbind port %s as it no longer exists.',
-                          port_id)
+                LOG.debug('Unable to unbind port %s as it no longer '
+                          'exists.', port_id)
             except Exception:
                 LOG.exception("Unable to clear device ID for port '%s'",
                               port_id)
@@ -903,7 +951,7 @@ class API(base_api.NetworkAPI):
             created_port_ids = self._update_ports_for_instance(
                 context, instance,
                 neutron, admin_client, requests_and_created_ports, nets,
-                bind_host_id, available_macs)
+                bind_host_id, available_macs, requested_ports_dict)
 
         #
         # Perform a full update of the network_info_cache,
@@ -928,7 +976,7 @@ class API(base_api.NetworkAPI):
 
     def _update_ports_for_instance(self, context, instance, neutron,
             admin_client, requests_and_created_ports, nets,
-            bind_host_id, available_macs):
+            bind_host_id, available_macs, requested_ports_dict):
         """Update ports from network_requests.
 
         Updates the pre-existing ports and the ones created in
@@ -946,6 +994,8 @@ class API(base_api.NetworkAPI):
         :param nets: a dict of network_id to networks returned from neutron
         :param bind_host_id: a string for port['binding:host_id']
         :param available_macs: a list of available mac addresses
+        :param requested_ports_dict: dict, keyed by port ID, of ports requested
+            by the user
         :returns: tuple with the following::
 
             * list of network dicts in their requested order
@@ -980,6 +1030,11 @@ class API(base_api.NetworkAPI):
             zone = 'compute:%s' % instance.availability_zone
             port_req_body = {'port': {'device_id': instance.uuid,
                                       'device_owner': zone}}
+            if (requested_ports_dict and
+                request.port_id in requested_ports_dict and
+                requested_ports_dict[request.port_id].get(BINDING_PROFILE)):
+                port_req_body['port'][BINDING_PROFILE] = (
+                    requested_ports_dict[request.port_id][BINDING_PROFILE])
             try:
                 self._populate_neutron_extension_values(
                     context, instance, request.pci_request_id, port_req_body,
@@ -1057,6 +1112,10 @@ class API(base_api.NetworkAPI):
         self._refresh_neutron_extensions_cache(context, neutron=neutron)
         return constants.QOS_QUEUE in self.extensions
 
+    def has_substr_port_filtering_extension(self, context):
+        self._refresh_neutron_extensions_cache(context)
+        return constants.SUBSTR_PORT_FILTERING in self.extensions
+
     def _get_pci_device_profile(self, pci_dev):
         dev_spec = self.pci_whitelist.get_devspec(pci_dev)
         if dev_spec:
@@ -1077,7 +1136,10 @@ class API(base_api.NetworkAPI):
         if pci_request_id:
             pci_dev = pci_manager.get_instance_pci_devs(
                 instance, pci_request_id).pop()
-            profile = self._get_pci_device_profile(pci_dev)
+            if port_req_body['port'].get(BINDING_PROFILE) is None:
+                port_req_body['port'][BINDING_PROFILE] = {}
+            profile = copy.deepcopy(port_req_body['port'][BINDING_PROFILE])
+            profile.update(self._get_pci_device_profile(pci_dev))
             port_req_body['port'][BINDING_PROFILE] = profile
 
     @staticmethod
@@ -2445,9 +2507,11 @@ class API(base_api.NetworkAPI):
         """Create a private DNS domain with optional nova project."""
         raise NotImplementedError()
 
-    def setup_instance_network_on_host(self, context, instance, host):
+    def setup_instance_network_on_host(self, context, instance, host,
+                                       migration=None):
         """Setup network for specified instance on host."""
-        self._update_port_binding_for_instance(context, instance, host)
+        self._update_port_binding_for_instance(context, instance, host,
+                                               migration)
 
     def cleanup_instance_network_on_host(self, context, instance, host):
         """Cleanup network for specified instance on host."""

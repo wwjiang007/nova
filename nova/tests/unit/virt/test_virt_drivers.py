@@ -82,14 +82,11 @@ class _FakeDriverBackendTestCase(object):
         else:
             self.saved_libvirt = None
 
-        import nova.tests.unit.virt.libvirt.fake_imagebackend as \
-            fake_imagebackend
-        import nova.tests.unit.virt.libvirt.fake_libvirt_utils as \
-            fake_libvirt_utils
-        import nova.tests.unit.virt.libvirt.fakelibvirt as fakelibvirt
+        from nova.tests.unit.virt.libvirt import fake_imagebackend
+        from nova.tests.unit.virt.libvirt import fake_libvirt_utils
+        from nova.tests.unit.virt.libvirt import fakelibvirt
 
-        import nova.tests.unit.virt.libvirt.fake_os_brick_connector as \
-            fake_os_brick_connector
+        from nova.tests.unit.virt.libvirt import fake_os_brick_connector
 
         self.useFixture(fake_imagebackend.ImageBackendFixture())
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
@@ -247,7 +244,7 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
             '1.1.1.1'
         image_meta = test_utils.get_test_image_object(None, instance_ref)
         self.connection.spawn(self.ctxt, instance_ref, image_meta,
-                              [], 'herp', network_info=network_info)
+                              [], 'herp', {}, network_info=network_info)
         return instance_ref, network_info
 
     @catch_notimplementederror
@@ -454,6 +451,7 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertIn('ip', result)
         self.assertIn('initiator', result)
         self.assertIn('host', result)
+        return result
 
     @catch_notimplementederror
     def test_get_volume_connector_storage_ip(self):
@@ -494,7 +492,7 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                           instance_ref,
                                           '/dev/sda'))
         self.assertIsNone(
-            self.connection.swap_volume({'driver_volume_type': 'fake',
+            self.connection.swap_volume(None, {'driver_volume_type': 'fake',
                                          'data': {}},
                                         {'driver_volume_type': 'fake',
                                          'data': {}},
@@ -981,3 +979,11 @@ class LibvirtConnTestCase(_VirtDriverTestCase, test.TestCase):
             "hw_qemu_guest_agent": "yes"}}
         instance, network_info = self._get_running_instance(obj=True)
         self.connection.set_admin_password(instance, 'p4ssw0rd')
+
+    def test_get_volume_connector(self):
+        for multipath in (True, False):
+            self.flags(volume_use_multipath=multipath, group='libvirt')
+            result = super(LibvirtConnTestCase,
+                           self).test_get_volume_connector()
+            self.assertIn('multipath', result)
+            self.assertEqual(multipath, result['multipath'])

@@ -231,20 +231,23 @@ to distinguish its place and purpose from the per-cell conductor nodes.
     conductor -> mq2
   }
 
-It is important to note that services in the lower cell boxes do not
-have the ability to call back to the API-layer services via RPC, nor
-do they have access to the API database for global visibility of
-resources across the cloud. This is intentional and provides security
-and failure domain isolation benefits, but also has impacts on some
-things that would otherwise require this any-to-any communication
-style. Check the release notes for the version of Nova you are using
-for the most up-to-date information about any caveats that may be
-present due to this limitation.
+It is important to note that services in the lower cell boxes only
+have the ability to call back to the placement API but cannot access
+any other API-layer services via RPC, nor do they have access to the
+API database for global visibility of resources across the cloud.
+This is intentional and provides security and failure domain
+isolation benefits, but also has impacts on some things that would
+otherwise require this any-to-any communication style. Check the
+release notes for the version of Nova you are using for the most
+up-to-date information about any caveats that may be present due to
+this limitation.
 
 Caveats of a Multi-Cell deployment
 ----------------------------------
 
-.. note: This information is correct as of the Pike release.
+.. note:: This information is correct as of the Pike release. Where
+          improvements have been made or issues fixed, they are noted per
+          item.
 
 Cross-cell instance migrations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -269,6 +272,8 @@ independent of the actual cell being reachable.
 
 Performance of listing instances
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. note:: This has been resolved in the Queens release [#]_.
 
 With multiple cells, the instance list operation may not sort and
 paginate results properly when crossing multiple cell
@@ -316,9 +321,12 @@ implement some features without such connectivity. Thus, anything that
 requires a so-called "upcall" will not function. This impacts the
 following:
 
-#. Instance reschedules during boot
+#. Instance reschedules during boot and resize
+
+   .. note:: This has been resolved in the Queens release [#]_.
+
 #. Instance affinity reporting from the compute nodes to scheduler
-#. The late anti-affinity check
+#. The late anti-affinity check during server create and evacuate
 #. Querying host aggregates from the cell
 #. Attaching a volume and ``[cinder]/cross_az_attach=False``
 
@@ -331,7 +339,7 @@ affect you. To ensure you do not make futile attempts at rescheduling,
 you should set ``[scheduler]/max_attempts=1`` in ``nova.conf``.
 
 The second two are related. The summary is that some of the facilities
-that Nova has for ensuring that affinty/anti-affinity is preserved
+that Nova has for ensuring that affinity/anti-affinity is preserved
 between instances does not function in Pike with a multi-cell
 layout. If you don't use affinity operations, then this will not
 affect you. To make sure you don't make futile attempts at the
@@ -358,3 +366,6 @@ case of boot from volume where the *nova-compute* service itself creates the
 volume and must tell Cinder in which availability zone to create the volume.
 Long-term, volume creation during boot from volume should be moved to the
 top-level superconductor which would eliminate this AZ up-call check problem.
+
+.. [#] https://blueprints.launchpad.net/nova/+spec/efficient-multi-cell-instance-list-and-sort
+.. [#] https://specs.openstack.org/openstack/nova-specs/specs/queens/approved/return-alternate-hosts.html

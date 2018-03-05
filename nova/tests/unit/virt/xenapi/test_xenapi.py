@@ -25,7 +25,6 @@ import re
 import mock
 from mox3 import mox
 from os_xenapi.client import host_management
-from os_xenapi.client import session as xenapi_session
 from os_xenapi.client import XenAPI
 from oslo_concurrency import lockutils
 from oslo_config import fixture as config_fixture
@@ -143,8 +142,7 @@ IMAGE_FIXTURES = {
 
 
 def get_session():
-    return xenapi_session.XenAPISession(
-        'http://localhost', 'root', 'test_pass')
+    return xenapi_fake.SessionBase('http://localhost', 'root', 'test_pass')
 
 
 def set_image_fixtures():
@@ -766,7 +764,7 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
         image_meta = objects.ImageMeta.from_dict(
             IMAGE_FIXTURES[image_ref]["image_meta"])
         self.conn.spawn(self.context, instance, image_meta, injected_files,
-                        'herp', network_info, block_device_info)
+                        'herp', {}, network_info, block_device_info)
         self.create_vm_record(self.conn, os_type, instance['name'])
         self.check_vm_record(self.conn, instance_type_id, check_injection)
         self.assertEqual(instance['os_type'], os_type)
@@ -906,7 +904,8 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
                          os_type="linux", architecture="x86-64")
         self.check_vm_params_for_linux()
 
-    def test_spawn_vhd_glance_windows(self):
+    @mock.patch('nova.privsep.fs.mkfs')
+    def test_spawn_vhd_glance_windows(self, fake_mkfs):
         self._test_spawn(IMAGE_VHD, None, None,
                          os_type="windows", architecture="i386",
                          instance_type_id=5)
@@ -953,8 +952,10 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
     @mock.patch.object(nova.privsep.path, 'makedirs')
     @mock.patch.object(nova.privsep.path, 'chown')
     @mock.patch.object(nova.privsep.path, 'chmod')
-    def test_spawn_netinject_file(self, chmod, chown, mkdir, write_file,
-                                  read_link):
+    @mock.patch.object(nova.privsep.fs, 'mount', return_value=(None, None))
+    @mock.patch.object(nova.privsep.fs, 'umount')
+    def test_spawn_netinject_file(self, umount, mount, chmod, chown, mkdir,
+                                  write_file, read_link):
         self.flags(flat_injected=True)
         db_fakes.stub_out_db_instance_api(self, injected=True)
 
@@ -1022,7 +1023,7 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
         self.mox.ReplayAll()
         image_meta = objects.ImageMeta.from_dict(
             IMAGE_FIXTURES[IMAGE_MACHINE]["image_meta"])
-        self.conn.spawn(self.context, instance, image_meta, [], 'herp', '')
+        self.conn.spawn(self.context, instance, image_meta, [], 'herp', {}, '')
 
     def test_spawn_vlanmanager(self):
         self.flags(network_manager='nova.network.manager.VlanManager',
@@ -1427,7 +1428,7 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
                 return [test_aggregate.fake_aggregate]
             else:
                 return []
-        self.stub_out('nova.db.aggregate_get_by_host',
+        self.stub_out('nova.objects.aggregate._get_by_host_from_db',
                       fake_aggregate_get)
 
         def fake_host_find(context, session, src, dst):
@@ -1528,7 +1529,7 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
              'disk_format': 'vhd'})
         if spawn:
             self.conn.spawn(self.context, instance, image_meta, [], 'herp',
-                            network_info)
+                            {}, network_info)
         if obj:
             return instance
         return base.obj_to_primitive(instance)
@@ -2228,12 +2229,14 @@ class XenAPIHostTestCase(stubs.XenAPITestBase):
 
     @mock.patch.object(host.HostState, 'get_disk_used')
     @mock.patch.object(host.HostState, '_get_passthrough_devices')
+    @mock.patch.object(host.HostState, '_get_vgpu_stats')
     @mock.patch.object(jsonutils, 'loads')
     @mock.patch.object(vm_utils, 'list_vms')
     @mock.patch.object(vm_utils, 'scan_default_sr')
     @mock.patch.object(host_management, 'get_host_data')
     def test_update_stats_caches_hostname(self, mock_host_data, mock_scan_sr,
                                           mock_list_vms, mock_loads,
+                                          mock_vgpus_stats,
                                           mock_devices, mock_dis_used):
         data = {'disk_total': 0,
                 'disk_used': 0,
@@ -2264,10 +2267,12 @@ class XenAPIHostTestCase(stubs.XenAPITestBase):
             self.assertEqual(2, mock_host_data.call_count)
             self.assertEqual(2, mock_scan_sr.call_count)
             self.assertEqual(2, mock_devices.call_count)
+            self.assertEqual(2, mock_vgpus_stats.call_count)
             mock_loads.assert_called_with(data)
             mock_host_data.assert_called_with(self.conn._session)
             mock_scan_sr.assert_called_with(self.conn._session)
             mock_devices.assert_called_with()
+            mock_vgpus_stats.assert_called_with()
 
 
 @mock.patch.object(host.HostState, 'update_status')
@@ -3734,7 +3739,9 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
         self.stubs.Set(self.conn._vmops._session, "call_xenapi",
                        fake_call_xenapi)
 
-        def recover_method(context, instance, destination_hostname):
+        def recover_method(context, instance, destination_hostname,
+                           migrate_data=None):
+            self.assertIsNotNone(migrate_data, 'migrate_data should be passed')
             recover_method.called = True
         migrate_data = objects.XenapiLiveMigrateData(
             destination_sr_ref="foo",
@@ -3802,7 +3809,9 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
 
         self._add_default_live_migrate_stubs(self.conn)
 
-        def recover_method(context, instance, destination_hostname):
+        def recover_method(context, instance, destination_hostname,
+                           migrate_data=None):
+            self.assertIsNotNone(migrate_data, 'migrate_data should be passed')
             recover_method.called = True
         # pass block_migration = True and migrate data
         migrate_data = objects.XenapiLiveMigrateData(

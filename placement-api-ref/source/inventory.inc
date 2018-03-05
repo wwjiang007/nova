@@ -40,7 +40,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: get-inventory.json
+.. literalinclude:: ./samples/inventories/get-inventory.json
    :language: javascript
 
 Update resource provider inventory
@@ -63,17 +63,17 @@ Request
   - uuid: resource_provider_uuid_path
   - resource_class: resource_class_path
   - resource_provider_generation: resource_provider_generation
+  - total: total
   - allocation_ratio: allocation_ratio_opt
   - max_unit: max_unit_opt
   - min_unit: min_unit_opt
   - reserved: reserved_opt
   - step_size: step_size_opt
-  - total: total
 
 Request example
 ---------------
 
-.. literalinclude:: update-inventory-request.json
+.. literalinclude:: ./samples/inventories/update-inventory-request.json
    :language: javascript
 
 Response
@@ -92,7 +92,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: update-inventory.json
+.. literalinclude:: ./samples/inventories/update-inventory.json
    :language: javascript
 
 Delete resource provider inventory

@@ -98,6 +98,7 @@ log_remove_context = re.compile(
     r"(.)*LOG\.(.*)\(.*(context=[_a-zA-Z0-9].*)+.*\)")
 return_not_followed_by_space = re.compile(r"^\s*return(?:\(|{|\"|'|#).*$")
 uuid4_re = re.compile(r"uuid4\(\)($|[^\.]|\.hex)")
+redundant_import_alias_re = re.compile(r"import (?:.*\.)?(.+) as \1$")
 
 
 class BaseASTChecker(ast.NodeVisitor):
@@ -604,7 +605,7 @@ def check_config_option_in_central_place(logical_line, filename):
     conf_exceptions = [
         # CLI opts are allowed to be outside of nova/conf directory
         'nova/cmd/manage.py',
-        'nova/cmd/policy_check.py',
+        'nova/cmd/policy.py',
         'nova/cmd/status.py',
         # config options should not be declared in tests, but there is
         # another checker for it (N320)
@@ -801,6 +802,21 @@ def return_followed_by_space(logical_line):
                "N357: Return keyword should be followed by a space.")
 
 
+def no_redundant_import_alias(logical_line):
+    """Check for redundant import aliases.
+
+    Imports should not be in the forms below.
+
+    from x import y as y
+    import x as x
+    import x.y as y
+
+    N359
+    """
+    if re.search(redundant_import_alias_re, logical_line):
+        yield (0, "N359: Import alias should not be redundant.")
+
+
 def factory(register):
     register(import_no_db_in_virt)
     register(no_db_session_in_public_api)
@@ -842,3 +858,4 @@ def factory(register):
     register(no_assert_true_false_is_not)
     register(check_uuid4)
     register(return_followed_by_space)
+    register(no_redundant_import_alias)

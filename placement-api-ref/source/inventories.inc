@@ -40,7 +40,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: get-inventories.json
+.. literalinclude:: ./samples/inventories/get-inventories.json
    :language: javascript
 
 Update resource provider inventories
@@ -62,17 +62,17 @@ Request
   - uuid: resource_provider_uuid_path
   - resource_provider_generation: resource_provider_generation
   - inventories: inventories
+  - total: total
   - allocation_ratio: allocation_ratio_opt
   - max_unit: max_unit_opt
   - min_unit: min_unit_opt
   - reserved: reserved_opt
   - step_size: step_size_opt
-  - total: total
 
 Request example
 ---------------
 
-.. literalinclude:: update-inventories-request.json
+.. literalinclude:: ./samples/inventories/update-inventories-request.json
    :language: javascript
 
 Response
@@ -92,7 +92,7 @@ Response
 Response Example
 ----------------
 
-.. literalinclude:: update-inventories.json
+.. literalinclude:: ./samples/inventories/update-inventories.json
    :language: javascript
 
 
@@ -114,6 +114,12 @@ thread while attempting the operation.
 Normal Response Codes: 204
 
 Error response codes: itemNotFound(404), conflict(409)
+
+.. note:: Since this request does not accept the resource provider generation,
+          it is not safe to use when multiple threads are managing inventories
+          for a single provider.  In such situations, use the
+          ``PUT /resource_providers/{uuid}/inventories`` API with an empty
+          ``inventories`` dict.
 
 Request
 -------

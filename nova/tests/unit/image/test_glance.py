@@ -19,9 +19,10 @@ import datetime
 
 import cryptography
 from cursive import exception as cursive_exception
+import ddt
 import glanceclient.exc
 from glanceclient.v1 import images
-import glanceclient.v2.schemas as schemas
+from glanceclient.v2 import schemas
 from keystoneauth1 import loading as ks_loading
 import mock
 import six
@@ -187,6 +188,11 @@ image_fixtures = {
         'visibility': 'private'
     }
 }
+
+
+def fake_glance_response(data):
+    with mock.patch('glanceclient.common.utils._extract_request_id'):
+        return glanceclient.common.utils.RequestIdProxy([data, None])
 
 
 class ImageV2(dict):
@@ -395,7 +401,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
         super(TestGlanceClientWrapperRetries, self).setUp()
         self.ctx = context.RequestContext('fake', 'fake')
         api_servers = [
-            'host1:9292',
+            'http://host1:9292',
             'https://host2:9293',
             'http://host3:9294'
         ]
@@ -516,7 +522,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
     def test_download_no_data_no_dest_path_v2(self, show_mock, open_mock):
         client = mock.MagicMock()
-        client.call.return_value = mock.sentinel.image_chunks
+        client.call.return_value = fake_glance_response(
+            mock.sentinel.image_chunks)
         ctx = mock.sentinel.ctx
         service = glance.GlanceImageServiceV2(client)
         res = service.download(ctx, mock.sentinel.image_id)
@@ -531,7 +538,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
     def test_download_data_no_dest_path_v2(self, show_mock, open_mock):
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         data = mock.MagicMock()
         service = glance.GlanceImageServiceV2(client)
@@ -557,7 +564,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     def test_download_no_data_dest_path_v2(self, fsync_mock, show_mock,
                                            open_mock):
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         writer = mock.MagicMock()
         open_mock.return_value = writer
@@ -589,7 +596,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         # #TODO(jaypipes): Fix the aforementioned horrible design of
         # the download() method.
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         data = mock.MagicMock()
         service = glance.GlanceImageServiceV2(client)
@@ -614,7 +621,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
     def test_download_data_dest_path_write_fails_v2(
             self, show_mock, open_mock):
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         service = glance.GlanceImageServiceV2(client)
 
@@ -629,6 +636,19 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
 
         self.assertRaises(FakeDiskException, service.download, ctx,
                           mock.sentinel.image_id, data=Exceptionator())
+
+    @mock.patch.object(six.moves.builtins, 'open')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    def test_download_no_returned_image_data_v2(
+            self, show_mock, open_mock):
+        """Verify images with no data are handled correctly."""
+        client = mock.MagicMock()
+        client.call.return_value = fake_glance_response(None)
+        ctx = mock.sentinel.ctx
+        service = glance.GlanceImageServiceV2(client)
+
+        with testtools.ExpectedException(exception.ImageUnacceptable):
+            service.download(ctx, mock.sentinel.image_id)
 
     @mock.patch('nova.image.glance.GlanceImageServiceV2._get_transfer_module')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
@@ -682,7 +702,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         tran_mod.download.side_effect = Exception
         get_tran_mock.return_value = tran_mod
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         writer = mock.MagicMock()
         open_mock.return_value = writer
@@ -734,7 +754,7 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         }
         get_tran_mock.return_value = None
         client = mock.MagicMock()
-        client.call.return_value = [1, 2, 3]
+        client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         writer = mock.MagicMock()
         open_mock.return_value = writer
@@ -796,7 +816,8 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
         }
         self.fake_img_data = ['A' * 256, 'B' * 256]
         self.client = mock.MagicMock()
-        self.client.call.return_value = self.fake_img_data
+        self.client.call.return_value = fake_glance_response(
+            self.fake_img_data)
 
     @mock.patch('nova.image.glance.LOG')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
@@ -1570,24 +1591,67 @@ class TestDelete(test.NoDBTestCase):
         self.assertRaises(exception.ImageNotFound, service.delete, ctx,
                           mock.sentinel.image_id)
 
+    def test_delete_client_conflict_failure_v2(self):
+        client = mock.MagicMock()
+        fake_details = 'Image %s is in use' % mock.sentinel.image_id
+        client.call.side_effect = glanceclient.exc.HTTPConflict(
+            details=fake_details)
+        ctx = mock.sentinel.ctx
+        service = glance.GlanceImageServiceV2(client)
+        self.assertRaises(exception.ImageDeleteConflict, service.delete, ctx,
+                          mock.sentinel.image_id)
 
+
+@ddt.ddt
 class TestGlanceApiServers(test.NoDBTestCase):
 
-    def test_get_api_servers(self):
-        glance_servers = ['10.0.1.1:9292',
+    def test_get_api_servers_multiple(self):
+        """Test get_api_servers via `api_servers` conf option."""
+        glance_servers = ['http://10.0.1.1:9292',
                           'https://10.0.0.1:9293',
                           'http://10.0.2.2:9294']
-        expected_servers = ['http://10.0.1.1:9292',
-                          'https://10.0.0.1:9293',
-                          'http://10.0.2.2:9294']
+        expected_servers = set(glance_servers)
         self.flags(api_servers=glance_servers, group='glance')
-        api_servers = glance.get_api_servers()
-        i = 0
-        for server in api_servers:
-            i += 1
-            self.assertIn(server, expected_servers)
-            if i > 2:
-                break
+        api_servers = glance.get_api_servers('context')
+        # In len(expected_servers) cycles, we should get all the endpoints
+        self.assertEqual(expected_servers,
+                         {next(api_servers) for _ in expected_servers})
+
+    @ddt.data(['http://158.69.92.100/image/v2/',
+               'http://158.69.92.100/image/'],
+              ['http://158.69.92.100/image/v2',
+               'http://158.69.92.100/image/'],
+              ['http://158.69.92.100/image/v2.0/',
+               'http://158.69.92.100/image/'],
+              ['http://158.69.92.100/image/',
+               'http://158.69.92.100/image/'],
+              ['http://158.69.92.100/image',
+               'http://158.69.92.100/image'],
+              ['http://158.69.92.100/v2',
+               'http://158.69.92.100/'],
+              ['http://thing.novav2.0oh.v2.foo/image/v2/',
+               'http://thing.novav2.0oh.v2.foo/image/'])
+    @ddt.unpack
+    def test_get_api_servers_get_ksa_adapter(self, catalog_url, stripped):
+        """Test get_api_servers via nova.utils.get_ksa_adapter()."""
+        self.flags(api_servers=None, group='glance')
+        with mock.patch('keystoneauth1.adapter.Adapter.'
+                        'get_endpoint_data') as mock_epd:
+            mock_epd.return_value.catalog_url = catalog_url
+            api_servers = glance.get_api_servers(mock.Mock())
+            self.assertEqual(stripped, next(api_servers))
+            # Still get itertools.cycle behavior
+            self.assertEqual(stripped, next(api_servers))
+            mock_epd.assert_called_once_with()
+
+    @mock.patch('keystoneauth1.adapter.Adapter.get_endpoint_data')
+    def test_get_api_servers_get_ksa_adapter_endpoint_override(self,
+                                                               mock_epd):
+        self.flags(endpoint_override='foo', group='glance')
+        api_servers = glance.get_api_servers(mock.Mock())
+        self.assertEqual('foo', next(api_servers))
+        self.assertEqual('foo', next(api_servers))
+        mock_epd.assert_not_called()
 
 
 class TestUpdateGlanceImage(test.NoDBTestCase):

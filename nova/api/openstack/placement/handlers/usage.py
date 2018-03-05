@@ -13,36 +13,16 @@
 
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils import timeutils
 import webob
 
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.schemas import usage as schema
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova import exception
 from nova.i18n import _
 from nova.objects import resource_provider as rp_obj
-
-
-# Represents the allowed query string parameters to GET /usages
-GET_USAGES_SCHEMA_1_9 = {
-    "type": "object",
-    "properties": {
-        "project_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-        },
-        "user_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 255,
-        },
-    },
-    "required": [
-        "project_id"
-     ],
-    "additionalProperties": False,
-}
 
 
 def _serialize_usages(resource_provider, usage):
@@ -64,6 +44,7 @@ def list_usages(req):
     """
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
     # Resource provider object needed for two things: If it is
     # NotFound we'll get a 404 here, which needs to happen because
@@ -85,6 +66,14 @@ def list_usages(req):
     response.body = encodeutils.to_utf8(jsonutils.dumps(
         _serialize_usages(resource_provider, usage)))
     req.response.content_type = 'application/json'
+    if want_version.matches((1, 15)):
+        req.response.cache_control = 'no-cache'
+        # While it would be possible to generate a last-modified time
+        # based on the collection of allocations that result in a usage
+        # value (with some spelunking in the SQL) that doesn't align with
+        # the question that is being asked in a request for usages: What
+        # is the usage, now? So the last-modified time is set to utcnow.
+        req.response.last_modified = timeutils.utcnow(with_timezone=True)
     return req.response
 
 
@@ -99,10 +88,9 @@ def get_total_usages(req):
     Return 404 Not Found if the wanted microversion does not match.
     """
     context = req.environ['placement.context']
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
-    schema = GET_USAGES_SCHEMA_1_9
-
-    util.validate_query_params(req, schema)
+    util.validate_query_params(req, schema.GET_USAGES_SCHEMA_1_9)
 
     project_id = req.GET.get('project_id')
     user_id = req.GET.get('user_id')
@@ -115,4 +103,12 @@ def get_total_usages(req):
                    for resource in usages}}
     response.body = encodeutils.to_utf8(jsonutils.dumps(usages_dict))
     req.response.content_type = 'application/json'
+    if want_version.matches((1, 15)):
+        req.response.cache_control = 'no-cache'
+        # While it would be possible to generate a last-modified time
+        # based on the collection of allocations that result in a usage
+        # value (with some spelunking in the SQL) that doesn't align with
+        # the question that is being asked in a request for usages: What
+        # is the usage, now? So the last-modified time is set to utcnow.
+        req.response.last_modified = timeutils.utcnow(with_timezone=True)
     return req.response

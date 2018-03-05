@@ -118,7 +118,7 @@ class RequestContext(context.RequestContext):
         if service_catalog:
             # Only include required parts of service_catalog
             self.service_catalog = [s for s in service_catalog
-                if s.get('type') in ('volume', 'volumev2', 'volumev3',
+                if s.get('type') in ('image', 'block-storage', 'volumev3',
                                      'key-manager', 'placement')]
         else:
             # if list is empty or none
@@ -390,7 +390,14 @@ def target_cell(context, cell_mapping):
     :param context: The RequestContext to add connection information
     :param cell_mapping: An objects.CellMapping object or None
     """
-    cctxt = copy.copy(context)
+    # Create a sanitized copy of context by serializing and deserializing it
+    # (like we would do over RPC). This help ensure that we have a clean
+    # copy of the context with all the tracked attributes, but without any
+    # of the hidden/private things we cache on a context. We do this to avoid
+    # unintentional sharing of cached thread-local data across threads.
+    # Specifically, this won't include any oslo_db-set transaction context, or
+    # any existing cell targeting.
+    cctxt = RequestContext.from_dict(context.to_dict())
     set_target_cell(cctxt, cell_mapping)
     yield cctxt
 
@@ -419,9 +426,11 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
     queue = eventlet.queue.LightQueue()
     results = {}
 
-    def gather_result(cell_uuid, fn, *args, **kwargs):
+    def gather_result(cell_mapping, fn, context, *args, **kwargs):
+        cell_uuid = cell_mapping.uuid
         try:
-            result = fn(*args, **kwargs)
+            with target_cell(context, cell_mapping) as cctxt:
+                result = fn(cctxt, *args, **kwargs)
         except Exception:
             LOG.exception('Error gathering result from cell %s', cell_uuid)
             result = raised_exception_sentinel
@@ -429,10 +438,9 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
         queue.put((cell_uuid, result))
 
     for cell_mapping in cell_mappings:
-        with target_cell(context, cell_mapping) as cctxt:
-            greenthreads.append((cell_mapping.uuid,
-                                 utils.spawn(gather_result, cell_mapping.uuid,
-                                             fn, cctxt, *args, **kwargs)))
+        greenthreads.append((cell_mapping.uuid,
+                             utils.spawn(gather_result, cell_mapping,
+                                         fn, context, *args, **kwargs)))
 
     with eventlet.timeout.Timeout(timeout, exception.CellTimeout):
         try:

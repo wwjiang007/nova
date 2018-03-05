@@ -640,10 +640,31 @@ class Guest(object):
                 destination, flags=flags, bandwidth=bandwidth)
         else:
             if params:
+                # Due to a quirk in the libvirt python bindings,
+                # VIR_MIGRATE_NON_SHARED_INC with an empty migrate_disks is
+                # interpreted as "block migrate all writable disks" rather than
+                # "don't block migrate any disks". This includes attached
+                # volumes, which will potentially corrupt data on those
+                # volumes. Consequently we need to explicitly unset
+                # VIR_MIGRATE_NON_SHARED_INC if there are no disks to be block
+                # migrated.
+                if (flags & libvirt.VIR_MIGRATE_NON_SHARED_INC != 0 and
+                        not params.get('migrate_disks')):
+                    flags &= ~libvirt.VIR_MIGRATE_NON_SHARED_INC
+
+                # In migrateToURI3 these parameters are extracted from the
+                # `params` dict
                 if migrate_uri:
-                    # In migrateToURI3 this parameter is searched in
-                    # the `params` dict
                     params['migrate_uri'] = migrate_uri
+                params['bandwidth'] = bandwidth
+
+                # In the python2 libvirt bindings, strings passed to
+                # migrateToURI3 via params must not be unicode.
+                if six.PY2:
+                    params = {key: str(value) if isinstance(value, unicode)
+                                              else value
+                              for key, value in params.items()}
+
                 self._domain.migrateToURI3(
                     destination, params=params, flags=flags)
             else:
@@ -661,6 +682,13 @@ class Guest(object):
         :param mstime: Downtime in milliseconds.
         """
         self._domain.migrateSetMaxDowntime(mstime)
+
+    def migrate_configure_max_speed(self, bandwidth):
+        """The maximum bandwidth that will be used to do migration
+
+        :param bw: Bandwidth in MiB/s
+        """
+        self._domain.migrateSetMaxSpeed(bandwidth)
 
     def migrate_start_postcopy(self):
         """Switch running live migration to post-copy mode"""

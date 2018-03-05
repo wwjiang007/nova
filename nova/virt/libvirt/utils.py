@@ -24,10 +24,13 @@ import re
 
 from oslo_concurrency import processutils
 from oslo_log import log as logging
+from oslo_utils import fileutils
 
 import nova.conf
 from nova.i18n import _
 from nova.objects import fields as obj_fields
+import nova.privsep.idmapshift
+import nova.privsep.libvirt
 from nova import utils
 from nova.virt.disk import api as disk
 from nova.virt import images
@@ -103,15 +106,9 @@ def create_ploop_image(disk_format, path, size, fs_type):
     if not fs_type:
         fs_type = CONF.default_ephemeral_format or \
                   disk.FS_FORMAT_EXT4
-    utils.execute('mkdir', '-p', path)
+    fileutils.ensure_tree(path)
     disk_path = os.path.join(path, 'root.hds')
-    utils.execute('ploop', 'init', '-s', size, '-f', disk_format, '-t',
-                  fs_type, disk_path, run_as_root=True, check_exit_code=True)
-    # Add read access for all users, because "ploop init" creates
-    # disk with rw rights only for root. OpenStack user should have access
-    # to the disk to request info via "qemu-img info"
-    utils.execute('chmod', '-R', 'a+r', path,
-                  run_as_root=True, check_exit_code=True)
+    nova.privsep.libvirt.ploop_init(size, disk_format, fs_type, disk_path)
 
 
 def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
@@ -133,8 +130,7 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
             # 4002000 == 4.2.0
             if hypervisor_version >= 4002000:
                 try:
-                    utils.execute('xend', 'status',
-                                  run_as_root=True, check_exit_code=True)
+                    nova.privsep.libvirt.xend_probe()
                 except OSError as exc:
                     if exc.errno == errno.ENOENT:
                         LOG.debug("xend is not found")
@@ -248,10 +244,6 @@ def write_to_file(path, contents, umask=None):
             os.umask(saved_umask)
 
 
-def _id_map_to_config(id_map):
-    return "%s:%s:%s" % (id_map.start, id_map.target, id_map.count)
-
-
 def chown_for_id_maps(path, id_maps):
     """Change ownership of file or directory for an id mapped
     environment
@@ -259,14 +251,11 @@ def chown_for_id_maps(path, id_maps):
     :param path: File or directory whose ownership to change
     :param id_maps: List of type LibvirtConfigGuestIDMap
     """
-    uid_maps_str = ','.join([_id_map_to_config(id_map) for id_map in id_maps if
-                             isinstance(id_map,
-                                        vconfig.LibvirtConfigGuestUIDMap)])
-    gid_maps_str = ','.join([_id_map_to_config(id_map) for id_map in id_maps if
-                             isinstance(id_map,
-                                        vconfig.LibvirtConfigGuestGIDMap)])
-    utils.execute('nova-idmapshift', '-i', '-u', uid_maps_str,
-                  '-g', gid_maps_str, path, run_as_root=True)
+    uid_maps = [id_map for id_map in id_maps if
+                isinstance(id_map, vconfig.LibvirtConfigGuestUIDMap)]
+    gid_maps = [id_map for id_map in id_maps if
+                isinstance(id_map, vconfig.LibvirtConfigGuestGIDMap)]
+    nova.privsep.idmapshift.shift(path, uid_maps, gid_maps)
 
 
 def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):

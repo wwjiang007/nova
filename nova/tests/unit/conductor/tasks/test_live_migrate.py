@@ -29,6 +29,12 @@ from nova.tests import uuidsentinel as uuids
 from nova import utils
 
 
+fake_selection1 = objects.Selection(service_host="host1", nodename="node1",
+        cell_uuid=uuids.cell)
+fake_selection2 = objects.Selection(service_host="host2", nodename="node2",
+        cell_uuid=uuids.cell)
+
+
 class LiveMigrationTaskTestCase(test.NoDBTestCase):
     def setUp(self):
         super(LiveMigrationTaskTestCase, self).setUp()
@@ -60,24 +66,38 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             servicegroup.API(), scheduler_client.SchedulerClient(),
             self.fake_spec)
 
-    def test_execute_with_destination(self):
+    def test_execute_with_destination(self, new_mode=True):
+        dest_node = objects.ComputeNode(hypervisor_hostname='dest_node')
         with test.nested(
             mock.patch.object(self.task, '_check_host_is_up'),
             mock.patch.object(self.task, '_check_requested_destination',
                               return_value=(mock.sentinel.source_node,
-                                            mock.sentinel.dest_node)),
+                                            dest_node)),
             mock.patch.object(scheduler_utils,
                               'claim_resources_on_destination'),
+            mock.patch.object(self.migration, 'save'),
             mock.patch.object(self.task.compute_rpcapi, 'live_migration'),
-        ) as (mock_check_up, mock_check_dest, mock_claim, mock_mig):
+            mock.patch('nova.conductor.tasks.migrate.'
+                       'replace_allocation_with_migration'),
+            mock.patch('nova.conductor.tasks.live_migrate.'
+                       'should_do_migration_allocation')
+        ) as (mock_check_up, mock_check_dest, mock_claim, mock_save, mock_mig,
+              m_alloc, mock_sda):
             mock_mig.return_value = "bob"
+            m_alloc.return_value = (mock.MagicMock(), mock.sentinel.allocs)
+            mock_sda.return_value = new_mode
 
             self.assertEqual("bob", self.task.execute())
             mock_check_up.assert_called_once_with(self.instance_host)
             mock_check_dest.assert_called_once_with()
+            if new_mode:
+                allocs = mock.sentinel.allocs
+            else:
+                allocs = None
             mock_claim.assert_called_once_with(
-                self.task.scheduler_client.reportclient, self.instance,
-                mock.sentinel.source_node, mock.sentinel.dest_node)
+                self.context, self.task.scheduler_client.reportclient,
+                self.instance, mock.sentinel.source_node, dest_node,
+                source_node_allocations=allocs)
             mock_mig.assert_called_once_with(
                 self.context,
                 host=self.instance_host,
@@ -86,6 +106,22 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                 block_migration=self.block_migration,
                 migration=self.migration,
                 migrate_data=None)
+            self.assertTrue(mock_save.called)
+            # make sure the source/dest fields were set on the migration object
+            self.assertEqual(self.instance.node, self.migration.source_node)
+            self.assertEqual(dest_node.hypervisor_hostname,
+                             self.migration.dest_node)
+            self.assertEqual(self.task.destination,
+                             self.migration.dest_compute)
+            if new_mode:
+                m_alloc.assert_called_once_with(self.context,
+                                                self.instance,
+                                                self.migration)
+            else:
+                m_alloc.assert_not_called()
+
+    def test_execute_with_destination_old_school(self):
+        self.test_execute_with_destination(new_mode=False)
 
     def test_execute_without_destination(self):
         self.destination = None
@@ -96,10 +132,17 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             mock.patch.object(self.task, '_check_host_is_up'),
             mock.patch.object(self.task, '_find_destination'),
             mock.patch.object(self.task.compute_rpcapi, 'live_migration'),
-            mock.patch.object(self.migration, 'save')
-        ) as (mock_check, mock_find, mock_mig, mock_save):
-            mock_find.return_value = "found_host"
+            mock.patch.object(self.migration, 'save'),
+            mock.patch('nova.conductor.tasks.migrate.'
+                       'replace_allocation_with_migration'),
+            mock.patch('nova.conductor.tasks.live_migrate.'
+                       'should_do_migration_allocation'),
+        ) as (mock_check, mock_find, mock_mig, mock_save, mock_alloc,
+              mock_sda):
+            mock_find.return_value = ("found_host", "found_node")
             mock_mig.return_value = "bob"
+            mock_alloc.return_value = (mock.MagicMock(), mock.MagicMock())
+            mock_sda.return_value = True
 
             self.assertEqual("bob", self.task.execute())
             mock_check.assert_called_once_with(self.instance_host)
@@ -113,6 +156,9 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                 migrate_data=None)
             self.assertTrue(mock_save.called)
             self.assertEqual('found_host', self.migration.dest_compute)
+            self.assertEqual('found_node', self.migration.dest_node)
+            self.assertEqual(self.instance.node, self.migration.source_node)
+            self.assertTrue(mock_alloc.called)
 
     def test_check_instance_is_active_passes_when_paused(self):
         self.task.instance['power_state'] = power_state.PAUSED
@@ -293,17 +339,20 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.context, self.fake_spec)
         self.fake_spec.reset_forced_destinations()
         self.task.scheduler_client.select_destinations(
-            self.context, self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1'}])
+                self.context, self.fake_spec, [self.instance.uuid],
+                return_objects=True, return_alternates=False).AndReturn(
+                [[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")
 
         self.mox.ReplayAll()
-        self.assertEqual("host1", self.task._find_destination())
+        self.assertEqual(("host1", "node1"), self.task._find_destination())
 
         # Make sure the request_spec was updated to include the cell
         # mapping.
         self.assertIsNotNone(self.fake_spec.requested_destination.cell)
+        # Make sure the spec was updated to include the project_id.
+        self.assertEqual(self.fake_spec.project_id, self.instance.project_id)
 
     def test_find_destination_works_with_no_request_spec(self):
         task = live_migrate.LiveMigrationTask(
@@ -326,14 +375,15 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                     check_compat, call_livem_checks):
             get_image.return_value = "image"
             from_components.return_value = another_spec
-            select_dest.return_value = [{'host': 'host1'}]
+            select_dest.return_value = [[fake_selection1]]
 
-            self.assertEqual("host1", task._find_destination())
+            self.assertEqual(("host1", "node1"), task._find_destination())
 
             get_image.assert_called_once_with(self.instance.system_metadata)
             setup_ig.assert_called_once_with(self.context, another_spec)
             select_dest.assert_called_once_with(self.context, another_spec,
-                    [self.instance.uuid])
+                    [self.instance.uuid], return_objects=True,
+                    return_alternates=False)
             # Make sure the request_spec was updated to include the cell
             # mapping.
             self.assertIsNotNone(another_spec.requested_destination.cell)
@@ -353,13 +403,13 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")
 
         self.mox.ReplayAll()
-        self.assertEqual("host1", self.task._find_destination())
+        self.assertEqual(("host1", "node1"), self.task._find_destination())
 
     def _test_find_destination_retry_hypervisor_raises(self, error):
         self.mox.StubOutWithMock(utils, 'get_image_from_system_metadata')
@@ -374,21 +424,21 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.instance.system_metadata).AndReturn("image")
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1', 'nodename': 'node1'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")\
                 .AndRaise(error)
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host2'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection2]])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
         with mock.patch.object(self.task,
                                '_remove_host_allocations') as remove_allocs:
-            self.assertEqual("host2", self.task._find_destination())
+            self.assertEqual(("host2", "node2"), self.task._find_destination())
         # Should have removed allocations for the first host.
         remove_allocs.assert_called_once_with('host1', 'node1')
 
@@ -414,22 +464,22 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.instance.system_metadata).AndReturn("image")
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1', 'nodename': 'node1'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")\
                 .AndRaise(exception.Invalid)
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host2'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection2]])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
         with mock.patch.object(self.task,
                                '_remove_host_allocations') as remove_allocs:
-            self.assertEqual("host2", self.task._find_destination())
+            self.assertEqual(("host2", "node2"), self.task._find_destination())
         # Should have removed allocations for the first host.
         remove_allocs.assert_called_once_with('host1', 'node1')
 
@@ -447,22 +497,22 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.instance.system_metadata).AndReturn("image")
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1', 'nodename': 'node1'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")\
                 .AndRaise(exception.MigrationPreCheckError("reason"))
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host2'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection2]])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
         with mock.patch.object(self.task,
                                '_remove_host_allocations') as remove_allocs:
-            self.assertEqual("host2", self.task._find_destination())
+            self.assertEqual(("host2", "node2"), self.task._find_destination())
         # Should have removed allocations for the first host.
         remove_allocs.assert_called_once_with('host1', 'node1')
 
@@ -479,8 +529,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.instance.system_metadata).AndReturn("image")
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndReturn(
-                        [{'host': 'host1', 'nodename': 'node1'}])
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndReturn([[fake_selection1]])
         self.task._check_compatible_with_source_hypervisor("host1")\
                 .AndRaise(exception.DestinationHypervisorTooOld)
 
@@ -507,8 +557,9 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.instance.system_metadata).AndReturn("image")
         scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec, [self.instance.uuid]).AndRaise(
-                        exception.NoValidHost(reason=""))
+                self.fake_spec, [self.instance.uuid], return_objects=True,
+                return_alternates=False).AndRaise(
+                exception.NoValidHost(reason=""))
 
         self.mox.ReplayAll()
         self.assertRaises(exception.NoValidHost, self.task._find_destination)

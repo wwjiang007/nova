@@ -26,12 +26,14 @@ class RetryFilter(filters.BaseHostFilter):
     purposes
     """
 
+    # NOTE(danms): This does not affect _where_ an instance lands, so not
+    # related to rebuild.
+    RUN_ON_REBUILD = False
+
     def host_passes(self, host_state, spec_obj):
         """Skip nodes that have already been attempted."""
         retry = spec_obj.retry
         if not retry:
-            # Re-scheduling is disabled
-            LOG.debug("Re-scheduling is disabled")
             return True
 
         # TODO(sbauza): Once the HostState is actually a ComputeNode, we could

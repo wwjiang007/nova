@@ -42,6 +42,7 @@ from nova import exception
 from nova.image import glance
 from nova.network import model as network_model
 from nova import objects
+from nova.objects import fields
 from nova import test
 from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_instance
@@ -388,7 +389,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                               instance_type_updates=instance_type_updates)
         self.assertIsNone(vm_util.vm_ref_cache_get(self.uuid))
         self.conn.spawn(self.context, self.instance, self.image,
-                        injected_files=[], admin_password=None,
+                        injected_files=[], admin_password=None, allocations={},
                         network_info=self.network_info,
                         block_device_info=bdi)
         self._check_vm_record(num_instances=num_instances,
@@ -1145,7 +1146,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
         block_device_info = {'block_device_mapping': root_disk}
         self.conn.spawn(self.context, self.instance, self.image,
-                        injected_files=[], admin_password=None,
+                        injected_files=[], admin_password=None, allocations={},
                         network_info=self.network_info,
                         block_device_info=block_device_info)
 
@@ -1171,7 +1172,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         mock_info_get_mapping.return_value = root_disk
         block_device_info = {'mount_device': 'vda'}
         self.conn.spawn(self.context, self.instance, self.image,
-                        injected_files=[], admin_password=None,
+                        injected_files=[], admin_password=None, allocations={},
                         network_info=self.network_info,
                         block_device_info=block_device_info)
 
@@ -1671,10 +1672,6 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         actual = self.conn.get_instance_diagnostics(instance)
         self.assertDiagnosticsEqual(expected, actual)
 
-    def test_get_console_output(self):
-        self.assertRaises(NotImplementedError, self.conn.get_console_output,
-            None, None)
-
     def test_get_vnc_console_non_existent(self):
         self._create_instance()
         self.assertRaises(exception.InstanceNotFound,
@@ -1701,6 +1698,24 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                           self.conn.get_vnc_console,
                           self.context,
                           self.instance)
+
+    def test_get_console_output(self):
+        self.flags(serial_log_dir='/opt/vspc', group='vmware')
+        self._create_instance()
+        with test.nested(
+            mock.patch('os.path.exists', return_value=True),
+            mock.patch('{}.open'.format(driver.__name__), create=True),
+            mock.patch('nova.privsep.path.last_bytes')
+        ) as (fake_exists, fake_open, fake_last_bytes):
+            fake_open.return_value = mock.MagicMock()
+            fake_fd = fake_open.return_value.__enter__.return_value
+            fake_last_bytes.return_value = b'fira', 0
+            output = self.conn.get_console_output(self.context, self.instance)
+            fname = self.instance.uuid.replace('-', '')
+            fake_exists.assert_called_once_with('/opt/vspc/{}'.format(fname))
+            fake_last_bytes.assert_called_once_with(fake_fd,
+                                                    driver.MAX_CONSOLE_BYTES)
+        self.assertEqual(b'fira', output)
 
     def test_get_volume_connector(self):
         self._create_vm()
@@ -2041,6 +2056,18 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                                                   'find_extension',
                                                   constants.EXTENSION_KEY)
 
+    def test_register_extension_concurrent(self):
+        def fake_call_method(module, method, *args, **kwargs):
+            if method == "find_extension":
+                return None
+            elif method == "register_extension":
+                raise vexc.VimFaultException(['InvalidArgument'], 'error')
+            else:
+                raise Exception()
+        with (mock.patch.object(
+                self.conn._session, '_call_method', fake_call_method)):
+            self.conn._register_openstack_extension()
+
     def test_list_instances(self):
         instances = self.conn.list_instances()
         self.assertEqual(0, len(instances))
@@ -2087,8 +2114,8 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.assertEqual(32, stats['vcpus'])
         self.assertEqual(1024, stats['local_gb'])
         self.assertEqual(1024 - 500, stats['local_gb_used'])
-        self.assertEqual(1000, stats['memory_mb'])
-        self.assertEqual(500, stats['memory_mb_used'])
+        self.assertEqual(2048, stats['memory_mb'])
+        self.assertEqual(1000, stats['memory_mb_used'])
         self.assertEqual('VMware vCenter Server', stats['hypervisor_type'])
         self.assertEqual(5001000, stats['hypervisor_version'])
         self.assertEqual(self.node_name, stats['hypervisor_hostname'])
@@ -2096,6 +2123,41 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.assertEqual(
                 [("i686", "vmware", "hvm"), ("x86_64", "vmware", "hvm")],
                 stats['supported_instances'])
+
+    @mock.patch('nova.virt.vmwareapi.ds_util.get_available_datastores')
+    def test_get_inventory(self, mock_get_avail_ds):
+        ds1 = ds_obj.Datastore(ref='fake-ref', name='datastore1',
+                               capacity=10 * units.Gi, freespace=3 * units.Gi)
+        ds2 = ds_obj.Datastore(ref='fake-ref', name='datastore2',
+                               capacity=35 * units.Gi, freespace=25 * units.Gi)
+        ds3 = ds_obj.Datastore(ref='fake-ref', name='datastore3',
+                               capacity=50 * units.Gi, freespace=15 * units.Gi)
+        mock_get_avail_ds.return_value = [ds1, ds2, ds3]
+        inv = self.conn.get_inventory(self.node_name)
+        expected = {
+            fields.ResourceClass.VCPU: {
+                'total': 32,
+                'reserved': 0,
+                'min_unit': 1,
+                'max_unit': 16,
+                'step_size': 1,
+            },
+            fields.ResourceClass.MEMORY_MB: {
+                'total': 2048,
+                'reserved': 512,
+                'min_unit': 1,
+                'max_unit': 1024,
+                'step_size': 1,
+            },
+            fields.ResourceClass.DISK_GB: {
+                'total': 95,
+                'reserved': 0,
+                'min_unit': 1,
+                'max_unit': 25,
+                'step_size': 1,
+            },
+        }
+        self.assertEqual(expected, inv)
 
     def test_invalid_datastore_regex(self):
 
@@ -2357,7 +2419,8 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         service = self._create_service(disabled=False, host='fake-mini')
         mock_service.return_value = service
 
-        fake_stats = {'vcpus': 4, 'mem': {'total': '8194', 'free': '2048'}}
+        fake_stats = {'cpu': {'vcpus': 4},
+                      'mem': {'total': '8194', 'free': '2048'}}
         with test.nested(
             mock.patch.object(vm_util, 'get_stats_from_cluster',
                               side_effect=[vexc.VimConnectionException('fake'),

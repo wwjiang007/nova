@@ -25,6 +25,7 @@ import six
 import nova.conf
 from nova import exception
 from nova.objects import fields
+import nova.privsep.fs
 from nova import utils
 from nova import version
 
@@ -102,17 +103,14 @@ class ConfigDriveBuilder(object):
         with open(path, 'wb') as f:
             f.truncate(CONFIGDRIVESIZE_BYTES)
 
-        utils.mkfs('vfat', path, label='config-2')
+        nova.privsep.fs.unprivileged_mkfs('vfat', path, label='config-2')
 
         with utils.tempdir() as mountdir:
             mounted = False
             try:
-                _, err = utils.trycmd(
-                    'mount', '-o', 'loop,uid=%d,gid=%d' % (os.getuid(),
-                                                           os.getgid()),
-                    path,
-                    mountdir,
-                    run_as_root=True)
+                _, err = nova.privsep.fs.mount(
+                    None, path, mountdir,
+                    ['-o', 'loop,uid=%d,gid=%d' % (os.getuid(), os.getgid())])
                 if err:
                     raise exception.ConfigDriveMountFailed(operation='mount',
                                                            error=err)
@@ -127,7 +125,7 @@ class ConfigDriveBuilder(object):
 
             finally:
                 if mounted:
-                    utils.execute('umount', mountdir, run_as_root=True)
+                    nova.privsep.fs.umount(mountdir)
 
     def make_drive(self, path):
         """Make the config drive.

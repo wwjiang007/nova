@@ -41,7 +41,7 @@ Notifier object depends on the parameters of the get_notifier call and the
 value of the oslo.messaging configuration options `driver` and `topics`.
 There are notification configuration options in Nova which are specific for
 certain notification types like `notifications.notify_on_state_change`,
-`notifications.notify_on_api_faults`, `notifications.default_level`, etc.
+`notifications.default_level`, etc.
 
 The structure of the payload of the unversioned notifications is defined in the
 code that emits the notification and no documentation or enforced backward
@@ -325,6 +325,11 @@ requires the notification.
 
 Existing versioned notifications
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. note:: Versioned notifications are added in each release, so the samples
+  represented below may not necessarily be in an older version of nova. Ensure
+  you are looking at the correct version of the documentation for the release
+  you are using.
 
 .. This is a reference anchor used in the main index page.
 .. _versioned_notification_samples:

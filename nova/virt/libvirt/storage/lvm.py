@@ -29,7 +29,7 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova import utils
+import nova.privsep.fs
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -72,13 +72,11 @@ def create_volume(vg, lv, size, sparse=False):
                          'free_space': free_space,
                          'size': size,
                          'lv': lv})
-
-        cmd = ('lvcreate', '-L', '%db' % preallocated_space,
-                '--virtualsize', '%db' % size, '-n', lv, vg)
+        nova.privsep.fs.lvcreate(size, lv, vg,
+                                 preallocated=preallocated_space)
     else:
         check_size(vg, lv, size)
-        cmd = ('lvcreate', '-L', '%db' % size, '-n', lv, vg)
-    utils.execute(*cmd, run_as_root=True, attempts=3)
+        nova.privsep.fs.lvcreate(size, lv, vg)
 
 
 def get_volume_group_info(vg):
@@ -91,10 +89,7 @@ def get_volume_group_info(vg):
              :used: How much space is used (in bytes)
     """
 
-    out, err = utils.execute('vgs', '--noheadings', '--nosuffix',
-                       '--separator', '|',
-                       '--units', 'b', '-o', 'vg_size,vg_free', vg,
-                       run_as_root=True)
+    out, err = nova.privsep.fs.vginfo(vg)
 
     info = out.split('|')
     if len(info) != 2:
@@ -113,9 +108,7 @@ def list_volumes(vg):
             : Data format example
             : ['volume-aaa', 'volume-bbb', 'volume-ccc']
     """
-    out, err = utils.execute('lvs', '--noheadings', '-o', 'lv_name', vg,
-                             run_as_root=True)
-
+    out, err = nova.privsep.fs.lvlist(vg)
     return [line.strip() for line in out.splitlines()]
 
 
@@ -135,9 +128,7 @@ def volume_info(path):
             : ...
             : 'LSize': '1.00g', '#PV': '1', '#VMdaCps': 'unmanaged'}
     """
-    out, err = utils.execute('lvs', '-o', 'vg_all,lv_all',
-                             '--separator', '|', path, run_as_root=True)
-
+    out, err = nova.privsep.fs.lvinfo(path)
     info = [line.split('|') for line in out.splitlines()]
 
     if len(info) != 2:
@@ -155,8 +146,7 @@ def get_volume_size(path):
     :raises: exception.VolumeBDMPathNotFound if the volume path does not exist.
     """
     try:
-        out, _err = utils.execute('blockdev', '--getsize64', path,
-                                  run_as_root=True)
+        out, _err = nova.privsep.fs.blockdev_size(path)
     except processutils.ProcessExecutionError:
         if not os.path.exists(path):
             raise exception.VolumeBDMPathNotFound(path=path)
@@ -170,9 +160,7 @@ def clear_volume(path):
 
     :param path: logical volume path
     """
-    volume_clear = CONF.libvirt.volume_clear
-
-    if volume_clear == 'none':
+    if CONF.libvirt.volume_clear == 'none':
         return
 
     volume_clear_size = int(CONF.libvirt.volume_clear_size) * units.Mi
@@ -180,19 +168,14 @@ def clear_volume(path):
     try:
         volume_size = get_volume_size(path)
     except exception.VolumeBDMPathNotFound:
-        LOG.warning('ignoring missing logical volume %(path)s', {'path': path})
+        LOG.warning('Ignoring missing logical volume %(path)s', {'path': path})
         return
 
     if volume_clear_size != 0 and volume_clear_size < volume_size:
         volume_size = volume_clear_size
 
-    cmd = ['shred']
-    if volume_clear == 'zero':
-        cmd.extend(['-n0', '-z'])
-    else:
-        cmd.extend(['-n3'])
-    cmd.extend(['-s%d' % volume_size, path])
-    utils.execute(*cmd, run_as_root=True)
+    nova.privsep.fs.clear(path, volume_size,
+                          shred=(CONF.libvirt.volume_clear == 'shred'))
 
 
 def remove_volumes(paths):
@@ -201,9 +184,8 @@ def remove_volumes(paths):
     errors = []
     for path in paths:
         clear_volume(path)
-        lvremove = ('lvremove', '-f', path)
         try:
-            utils.execute(*lvremove, attempts=3, run_as_root=True)
+            nova.privsep.fs.lvremove(path)
         except processutils.ProcessExecutionError as exp:
             errors.append(six.text_type(exp))
     if errors:

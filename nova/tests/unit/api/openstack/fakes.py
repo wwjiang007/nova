@@ -30,7 +30,6 @@ from nova.api.openstack import compute
 from nova.api.openstack.compute import versions
 from nova.api.openstack import urlmap
 from nova.api.openstack import wsgi as os_wsgi
-from nova.compute import api as compute_api
 from nova.compute import flavors
 from nova.compute import vm_states
 import nova.conf
@@ -90,9 +89,9 @@ def stub_out_key_pair_funcs(testcase, have_key_pair=True, **kwargs):
                      name='key', public_key='public_key', **kwargs)]
 
     def one_key_pair(context, user_id, name):
-        if name == 'key':
+        if name in ['key', 'new-key']:
             return dict(test_keypair.fake_keypair,
-                        name='key', public_key='public_key', **kwargs)
+                        name=name, public_key='public_key', **kwargs)
         else:
             raise exc.KeypairNotFound(user_id=user_id, name=name)
 
@@ -128,7 +127,7 @@ def stub_out_networking(test):
     test.stub_out('oslo_utils.netutils.get_my_ipv4', get_my_ip)
 
 
-def stub_out_compute_api_snapshot(stubs):
+def stub_out_compute_api_snapshot(test):
 
     def snapshot(self, context, instance, name, extra_properties=None):
         # emulate glance rejecting image names which are too long
@@ -137,15 +136,14 @@ def stub_out_compute_api_snapshot(stubs):
         return dict(id='123', status='ACTIVE', name=name,
                     properties=extra_properties)
 
-    stubs.Set(compute_api.API, 'snapshot', snapshot)
+    test.stub_out('nova.compute.api.API.snapshot', snapshot)
 
 
 class stub_out_compute_api_backup(object):
 
-    def __init__(self, stubs):
-        self.stubs = stubs
+    def __init__(self, test):
         self.extra_props_last_call = None
-        stubs.Set(compute_api.API, 'backup', self.backup)
+        test.stub_out('nova.compute.api.API.backup', self.backup)
 
     def backup(self, context, instance, name, backup_type, rotation,
                extra_properties=None):
@@ -271,15 +269,6 @@ class TestRouter(wsgi.Router):
         mapper.resource("test", "tests",
                         controller=os_wsgi.Resource(controller))
         super(TestRouter, self).__init__(mapper)
-
-
-class TestRouterV21(wsgi.Router):
-    def __init__(self, controller, mapper=None):
-        if not mapper:
-            mapper = routes.Mapper()
-        mapper.resource("test", "tests",
-                        controller=os_wsgi.ResourceV21(controller))
-        super(TestRouterV21, self).__init__(mapper)
 
 
 class FakeAuthDatabase(object):
@@ -541,7 +530,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                   "flavor": flavorinfo,
               },
         "cleaned": cleaned,
-        "services": services}
+        "services": services,
+        "tags": []}
 
     instance.update(info_cache)
     instance['info_cache']['instance_uuid'] = instance['uuid']
@@ -552,7 +542,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
 def stub_instance_obj(ctxt, *args, **kwargs):
     db_inst = stub_instance(*args, **kwargs)
     expected = ['metadata', 'system_metadata', 'flavor',
-                'info_cache', 'security_groups']
+                'info_cache', 'security_groups', 'tags']
     inst = objects.Instance._from_db_object(ctxt, objects.Instance(),
                                             db_inst,
                                             expected_attrs=expected)
@@ -582,7 +572,7 @@ def stub_volume(id, **kwargs):
         'volume_type_id': 'fakevoltype',
         'volume_metadata': [],
         'volume_type': {'name': 'vol_type_name'},
-        'multiattach': True,
+        'multiattach': False,
         'attachments': {'fakeuuid': {'mountpoint': '/'},
                         'fakeuuid2': {'mountpoint': '/dev/sdb'}
                         }
@@ -715,6 +705,7 @@ FLAVORS = {
         vcpu_weight=None,
         disabled=False,
         is_public=True,
+        description=None
     ),
     '2': objects.Flavor(
         id=2,
@@ -729,6 +720,7 @@ FLAVORS = {
         vcpu_weight=None,
         disabled=True,
         is_public=True,
+        description='flavor 2 description'
     ),
 }
 

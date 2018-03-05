@@ -475,12 +475,14 @@ class ResourceClass(StringField):
     NUMA_THREAD = 'NUMA_THREAD'
     NUMA_MEMORY_MB = 'NUMA_MEMORY_MB'
     IPV4_ADDRESS = 'IPV4_ADDRESS'
+    VGPU = 'VGPU'
+    VGPU_DISPLAY_HEAD = 'VGPU_DISPLAY_HEAD'
 
     # The ordering here is relevant. If you must add a value, only
     # append.
     STANDARD = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF,
                 NUMA_SOCKET, NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB,
-                IPV4_ADDRESS)
+                IPV4_ADDRESS, VGPU, VGPU_DISPLAY_HEAD)
 
     # This is the set of standard resource classes that existed before
     # we opened up for custom resource classes in version 1.1 of various
@@ -732,6 +734,15 @@ class PciDeviceType(BaseNovaEnum):
     ALL = (STANDARD, SRIOV_PF, SRIOV_VF)
 
 
+class PCINUMAAffinityPolicy(BaseNovaEnum):
+
+    REQUIRED = "required"
+    LEGACY = "legacy"
+    PREFERRED = "preferred"
+
+    ALL = (REQUIRED, LEGACY, PREFERRED)
+
+
 class DiskFormat(BaseNovaEnum):
     RBD = "rbd"
     LVM = "lvm"
@@ -798,8 +809,20 @@ class NotificationSource(BaseNovaEnum):
     API = 'nova-api'
     CONDUCTOR = 'nova-conductor'
     SCHEDULER = 'nova-scheduler'
+    NETWORK = 'nova-network'
+    CONSOLEAUTH = 'nova-consoleauth'
+    CELLS = 'nova-cells'
+    CONSOLE = 'nova-console'
+    METADATA = 'nova-metadata'
 
-    ALL = (API, COMPUTE, CONDUCTOR, SCHEDULER)
+    ALL = (API, COMPUTE, CONDUCTOR, SCHEDULER,
+           NETWORK, CONSOLEAUTH, CELLS, CONSOLE, METADATA)
+
+    @staticmethod
+    def get_source_by_binary(binary):
+        # nova-osapi_compute binary name needs to be translated to nova-api
+        # notification source enum value.
+        return "nova-api" if binary == "nova-osapi_compute" else binary
 
 
 class NotificationAction(BaseNovaEnum):
@@ -816,7 +839,7 @@ class NotificationAction(BaseNovaEnum):
     REBOOT = 'reboot'
     SHUTDOWN = 'shutdown'
     SNAPSHOT = 'snapshot'
-    ADD_FIXED_IP = 'add_fixed_ip'
+    INTERFACE_ATTACH = 'interface_attach'
     SHELVE = 'shelve'
     RESUME = 'resume'
     RESTORE = 'restore'
@@ -825,6 +848,7 @@ class NotificationAction(BaseNovaEnum):
     VOLUME_ATTACH = 'volume_attach'
     VOLUME_DETACH = 'volume_detach'
     CREATE = 'create'
+    IMPORT = 'import'
     EVACUATE = 'evacuate'
     RESIZE_FINISH = 'resize_finish'
     LIVE_MIGRATION_ABORT = 'live_migration_abort'
@@ -834,7 +858,7 @@ class NotificationAction(BaseNovaEnum):
     LIVE_MIGRATION_ROLLBACK_DEST = 'live_migration_rollback_dest'
     LIVE_MIGRATION_ROLLBACK = 'live_migration_rollback'
     REBUILD = 'rebuild'
-    REMOVE_FIXED_IP = 'remove_fixed_ip'
+    INTERFACE_DETACH = 'interface_detach'
     RESIZE_CONFIRM = 'resize_confirm'
     RESIZE_PREP = 'resize_prep'
     RESIZE_REVERT = 'resize_revert'
@@ -847,12 +871,12 @@ class NotificationAction(BaseNovaEnum):
     REMOVE_HOST = 'remove_host'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
-           SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, ADD_FIXED_IP,
+           SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
            POWER_OFF, SHELVE, RESUME, RESTORE, EXISTS, RESCUE, VOLUME_ATTACH,
-           VOLUME_DETACH, CREATE, EVACUATE, RESIZE_FINISH,
+           VOLUME_DETACH, CREATE, IMPORT, EVACUATE, RESIZE_FINISH,
            LIVE_MIGRATION_ABORT, LIVE_MIGRATION_POST_DEST, LIVE_MIGRATION_POST,
            LIVE_MIGRATION_PRE, LIVE_MIGRATION_ROLLBACK,
-           LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, REMOVE_FIXED_IP,
+           LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, INTERFACE_DETACH,
            RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
            SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,
            REMOVE_HOST)
@@ -1185,6 +1209,10 @@ class PciDeviceStatusField(BaseEnumField):
 
 class PciDeviceTypeField(BaseEnumField):
     AUTO_TYPE = PciDeviceType()
+
+
+class PCINUMAAffinityPolicyField(BaseEnumField):
+    AUTO_TYPE = PCINUMAAffinityPolicy()
 
 
 class DiskFormatField(BaseEnumField):

@@ -240,12 +240,6 @@ class TestNewtonCheck(test.TestCase):
             '330_enforce_mitaka_online_migrations')
         self.engine = db_api.get_engine()
 
-    def test_aggregate_not_migrated(self):
-        agg = db_api.aggregate_create(self.context, {"name": "foobar"})
-        db_api.aggregate_update(self.context, agg.id, {'uuid': None})
-        self.assertRaises(exception.ValidationError,
-                          self.migration.upgrade, self.engine)
-
     def setup_pci_device(self, dev_type):
         # NOTE(jaypipes): We cannot use db_api.pci_device_update() here because
         # newer models of PciDevice contain fields (uuid) that are not present
@@ -348,16 +342,6 @@ class TestOcataCheck(test.TestCase):
                                 keypair['user_id'], keypair['name'])
         self.migration.upgrade(self.engine)
 
-    def test_upgrade_dirty_aggregates(self):
-        db_api.aggregate_create(self.context, self.aggregate_values)
-        self.assertRaises(exception.ValidationError,
-                          self.migration.upgrade, self.engine)
-
-    def test_upgrade_with_deleted_aggregates(self):
-        agg = db_api.aggregate_create(self.context, self.aggregate_values)
-        db_api.aggregate_delete(self.context, agg['id'])
-        self.migration.upgrade(self.engine)
-
     def test_upgrade_dirty_instance_groups(self):
         db_api.instance_group_create(self.context, self.ig_values)
         self.assertRaises(exception.ValidationError,
@@ -382,11 +366,14 @@ class TestNewtonCellsCheck(test.NoDBTestCase):
         self.engine = db_api.get_api_engine()
 
     def _flavor_me(self):
-        flavor = objects.Flavor(context=self.context,
-                                name='foo', memory_mb=123,
-                                vcpus=1, root_gb=1,
-                                flavorid='m1.foo')
-        flavor.create()
+        # We can't use the Flavor object or model to create the flavor because
+        # the model and object have the description field now but at this point
+        # we have not run the migration schema to add the description column.
+        flavors = db_utils.get_table(self.engine, 'flavors')
+        values = dict(name='foo', memory_mb=123,
+                      vcpus=1, root_gb=1,
+                      flavorid='m1.foo', swap=0)
+        flavors.insert().execute(values)
 
     def test_upgrade_with_no_cell_mappings(self):
         self._flavor_me()

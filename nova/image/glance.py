@@ -22,6 +22,7 @@ import inspect
 import itertools
 import os
 import random
+import re
 import stat
 import sys
 import time
@@ -47,6 +48,7 @@ import nova.image.download as image_xfers
 from nova import objects
 from nova.objects import fields
 from nova import service_auth
+from nova import utils
 
 
 LOG = logging.getLogger(__name__)
@@ -55,7 +57,8 @@ CONF = nova.conf.CONF
 _SESSION = None
 
 
-def _glanceclient_from_endpoint(context, endpoint, version):
+def _session_and_auth(context):
+    # Session is cached, but auth needs to be pulled from context each time.
     global _SESSION
 
     if not _SESSION:
@@ -64,21 +67,20 @@ def _glanceclient_from_endpoint(context, endpoint, version):
 
     auth = service_auth.get_auth_plugin(context)
 
-    # TODO(johngarbutt) eventually we should default to getting the
-    # endpoint URL from the service catalog.
-    return glanceclient.Client(version, session=_SESSION, auth=auth,
+    return _SESSION, auth
+
+
+def _glanceclient_from_endpoint(context, endpoint, version):
+    sess, auth = _session_and_auth(context)
+
+    return glanceclient.Client(version, session=sess, auth=auth,
                                endpoint_override=endpoint,
                                global_request_id=context.global_id)
 
 
-def generate_glance_url():
+def generate_glance_url(context):
     """Return a random glance url from the api servers we know about."""
-    return next(get_api_servers())
-
-
-def generate_image_url(image_ref):
-    """Generate an image URL from an image_ref."""
-    return "%s/images/%s" % (generate_glance_url(), image_ref)
+    return next(get_api_servers(context))
 
 
 def _endpoint_from_image_ref(image_href):
@@ -105,23 +107,31 @@ def generate_identity_headers(context, status='Confirmed'):
     }
 
 
-def get_api_servers():
-    """Shuffle a list of CONF.glance.api_servers and return an iterator
-    that will cycle through the list, looping around to the beginning
-    if necessary.
+def get_api_servers(context):
+    """Shuffle a list of service endpoints and return an iterator that will
+    cycle through the list, looping around to the beginning if necessary.
     """
-    api_servers = []
+    # NOTE(efried): utils.get_ksa_adapter().get_endpoint() is the preferred
+    # mechanism for endpoint discovery. Only use `api_servers` if you really
+    # need to shuffle multiple endpoints.
+    if CONF.glance.api_servers:
+        api_servers = CONF.glance.api_servers
+        random.shuffle(api_servers)
+    else:
+        sess, auth = _session_and_auth(context)
+        ksa_adap = utils.get_ksa_adapter(
+            nova.conf.glance.DEFAULT_SERVICE_TYPE,
+            ksa_auth=auth, ksa_session=sess,
+            min_version='2.0', max_version='2.latest')
+        endpoint = utils.get_endpoint(ksa_adap)
+        if endpoint:
+            # NOTE(mriedem): Due to python-glanceclient bug 1707995 we have
+            # to massage the endpoint URL otherwise it won't work properly.
+            # We can't use glanceclient.common.utils.strip_version because
+            # of bug 1748009.
+            endpoint = re.sub(r'/v\d+(\.\d+)?/?$', '/', endpoint)
+        api_servers = [endpoint]
 
-    for api_server in CONF.glance.api_servers:
-        if '//' not in api_server:
-            api_server = 'http://' + api_server
-            # NOTE(sdague): remove in O.
-            LOG.warning("No protocol specified in for api_server '%s', "
-                        "please update [glance] api_servers with fully "
-                        "qualified url including scheme (http / https)",
-                        api_server)
-        api_servers.append(api_server)
-    random.shuffle(api_servers)
     return itertools.cycle(api_servers)
 
 
@@ -146,7 +156,7 @@ class GlanceClientWrapper(object):
     def _create_onetime_client(self, context, version):
         """Create a client that will be used for one call."""
         if self.api_servers is None:
-            self.api_servers = get_api_servers()
+            self.api_servers = get_api_servers(context)
         self.api_server = next(self.api_servers)
         return _glanceclient_from_endpoint(context, self.api_server, version)
 
@@ -311,6 +321,12 @@ class GlanceImageServiceV2(object):
             image_chunks = self._client.call(context, 2, 'data', image_id)
         except Exception:
             _reraise_translated_image_exception(image_id)
+
+        if image_chunks.wrapped is None:
+            # None is a valid return value, but there's nothing we can do with
+            # a image with no associated data
+            raise exception.ImageUnacceptable(image_id=image_id,
+                reason='Image has no associated data')
 
         # Retrieve properties for verification of Glance image signature
         verifier = None
@@ -545,6 +561,7 @@ class GlanceImageServiceV2(object):
         :raises: ImageNotFound if the image does not exist.
         :raises: NotAuthorized if the user is not an owner.
         :raises: ImageNotAuthorized if the user is not authorized.
+        :raises: ImageDeleteConflict if the image is conflicted to delete.
 
         """
         try:
@@ -553,6 +570,8 @@ class GlanceImageServiceV2(object):
             raise exception.ImageNotFound(image_id=image_id)
         except glanceclient.exc.HTTPForbidden:
             raise exception.ImageNotAuthorized(image_id=image_id)
+        except glanceclient.exc.HTTPConflict as exc:
+            raise exception.ImageDeleteConflict(reason=six.text_type(exc))
         return True
 
 

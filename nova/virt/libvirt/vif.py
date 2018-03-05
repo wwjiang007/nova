@@ -579,17 +579,17 @@ class LibvirtGenericVIFDriver(object):
         v1_name, v2_name = self.get_veth_pair_names(vif['id'])
 
         if not linux_net.device_exists(br_name):
-            utils.execute('brctl', 'addbr', br_name, run_as_root=True)
-            utils.execute('brctl', 'setfd', br_name, 0, run_as_root=True)
-            utils.execute('brctl', 'stp', br_name, 'off', run_as_root=True)
+            nova.privsep.libvirt.add_bridge(br_name)
+            nova.privsep.libvirt.zero_bridge_forward_delay(br_name)
+            nova.privsep.libvirt.disable_bridge_stp(br_name)
             nova.privsep.libvirt.disable_multicast_snooping(br_name)
             nova.privsep.libvirt.disable_ipv6(br_name)
 
         if not linux_net.device_exists(v2_name):
             mtu = vif['network'].get_meta('mtu')
             linux_net._create_veth_pair(v1_name, v2_name, mtu)
-            utils.execute('ip', 'link', 'set', br_name, 'up', run_as_root=True)
-            utils.execute('brctl', 'addif', br_name, v1_name, run_as_root=True)
+            nova.privsep.libvirt.toggle_interface(br_name, 'up')
+            nova.privsep.libvirt.bridge_add_interface(br_name, v1_name)
             linux_net.create_ivs_vif_port(v2_name, iface_id,
                                           vif['address'], instance.uuid)
 
@@ -616,9 +616,9 @@ class LibvirtGenericVIFDriver(object):
         device_id = instance['uuid']
         vnic_mac = vif['address']
         try:
-            utils.execute('ebrctl', 'add-port', vnic_mac, device_id,
-                          fabric, network_model.VIF_TYPE_IB_HOSTDEV,
-                          pci_slot, run_as_root=True)
+            nova.privsep.libvirt.plug_infiniband_vif(
+                vnic_mac, device_id, fabric,
+                network_model.VIF_TYPE_IB_HOSTDEV, pci_slot)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while plugging ib hostdev vif"),
                           instance=instance)
@@ -660,8 +660,7 @@ class LibvirtGenericVIFDriver(object):
         port_id = vif['id']
         try:
             linux_net.create_tap_dev(dev)
-            utils.execute('mm-ctl', '--bind-port', port_id, dev,
-                          run_as_root=True)
+            nova.privsep.libvirt.plug_midonet_vif(port_id, dev)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while plugging vif"), instance=instance)
 
@@ -677,12 +676,8 @@ class LibvirtGenericVIFDriver(object):
         net_id = vif['network']['id']
         tenant_id = instance.project_id
         try:
-            utils.execute('ifc_ctl', 'gateway', 'add_port', dev,
-                          run_as_root=True)
-            utils.execute('ifc_ctl', 'gateway', 'ifup', dev,
-                          'access_vm', iface_id, vif['address'],
-                          'pgtag2=%s' % net_id, 'pgtag1=%s' % tenant_id,
-                          run_as_root=True)
+            nova.privsep.libvirt.plug_plumgrid_vif(
+                dev, iface_id, vif['address'], net_id, tenant_id)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while plugging vif"), instance=instance)
 
@@ -724,19 +719,22 @@ class LibvirtGenericVIFDriver(object):
         if (CONF.libvirt.virt_type == 'lxc'):
             ptype = 'NameSpacePort'
 
-        cmd_args = ("--oper=add --uuid=%s --instance_uuid=%s --vn_uuid=%s "
-                    "--vm_project_uuid=%s --ip_address=%s --ipv6_address=%s"
-                    " --vm_name=%s --mac=%s --tap_name=%s --port_type=%s "
-                    "--tx_vlan_id=%d --rx_vlan_id=%d" % (vif['id'],
-                    instance.uuid, vif['network']['id'],
-                    instance.project_id, ip_addr, ip6_addr,
-                    instance.display_name, vif['address'],
-                    vif['devname'], ptype, -1, -1))
         try:
             multiqueue = self._is_multiqueue_enabled(instance.image_meta,
                                                      instance.flavor)
             linux_net.create_tap_dev(dev, multiqueue=multiqueue)
-            utils.execute('vrouter-port-control', cmd_args, run_as_root=True)
+            nova.privsep.libvirt.plug_contrail_vif(
+                instance.project_id,
+                instance.uuid,
+                instance.display_name,
+                vif['id'],
+                vif['network']['id'],
+                ptype,
+                dev,
+                vif['address'],
+                ip_addr,
+                ip6_addr,
+            )
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while plugging vif"), instance=instance)
 
@@ -790,10 +788,9 @@ class LibvirtGenericVIFDriver(object):
             br_name = self.get_br_name(vif['id'])
             v1_name, v2_name = self.get_veth_pair_names(vif['id'])
 
-            utils.execute('brctl', 'delif', br_name, v1_name, run_as_root=True)
-            utils.execute('ip', 'link', 'set', br_name, 'down',
-                          run_as_root=True)
-            utils.execute('brctl', 'delbr', br_name, run_as_root=True)
+            nova.privsep.libvirt.bridge_delete_interface(br_name, v1_name)
+            nova.privsep.libvirt.toggle_interface(br_name, 'down')
+            nova.privsep.libvirt.delete_bridge(br_name)
             linux_net.delete_ivs_vif_port(v2_name)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while unplugging vif"), instance=instance)
@@ -819,8 +816,7 @@ class LibvirtGenericVIFDriver(object):
             )
         vnic_mac = vif['address']
         try:
-            utils.execute('ebrctl', 'del-port', fabric, vnic_mac,
-                          run_as_root=True)
+            nova.privsep.libvirt.unplug_infiniband_vif(fabric, vnic_mac)
         except Exception:
             LOG.exception(_("Failed while unplugging ib hostdev vif"))
 
@@ -854,8 +850,7 @@ class LibvirtGenericVIFDriver(object):
         dev = self.get_vif_devname(vif)
         port_id = vif['id']
         try:
-            utils.execute('mm-ctl', '--unbind-port', port_id,
-                          run_as_root=True)
+            nova.privsep.libvirt.unplug_midonet_vif(port_id)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while unplugging vif"), instance=instance)
@@ -876,10 +871,7 @@ class LibvirtGenericVIFDriver(object):
         """
         dev = self.get_vif_devname(vif)
         try:
-            utils.execute('ifc_ctl', 'gateway', 'ifdown',
-                          dev, run_as_root=True)
-            utils.execute('ifc_ctl', 'gateway', 'del_port', dev,
-                          run_as_root=True)
+            nova.privsep.libvirt.unplug_plumgrid_vif(dev)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while unplugging vif"), instance=instance)
@@ -893,9 +885,9 @@ class LibvirtGenericVIFDriver(object):
         Unbind the vif from a Contrail virtual port.
         """
         dev = self.get_vif_devname(vif)
-        cmd_args = ("--oper=delete --uuid=%s" % (vif['id']))
+        port_id = vif['id']
         try:
-            utils.execute('vrouter-port-control', cmd_args, run_as_root=True)
+            nova.privsep.libvirt.unplug_contrail_vif(port_id)
             linux_net.delete_net_dev(dev)
         except processutils.ProcessExecutionError:
             LOG.exception(_("Failed while unplugging vif"), instance=instance)

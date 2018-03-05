@@ -72,7 +72,7 @@ API, which can be used to build more complicated logic or automation with
 nova. This can be consumed directly, or via various SDKs. The following
 resources will help you get started with consuming the API directly.
 
-* `Compute API Guide: <https://developer.openstack.org/api-guide/compute/>`_: The
+* `Compute API Guide <https://developer.openstack.org/api-guide/compute/>`_: The
   concept guide for the API. This helps lay out the concepts behind the API to
   make consuming the API reference easier.
 * `Compute API Reference <http://developer.openstack.org/api-ref/compute/>`_:
@@ -94,6 +94,8 @@ resources will help you get started with consuming the API directly.
 * :doc:`Block Device Mapping </user/block-device-mapping>`: One of the trickier
   parts to understand is the Block Device Mapping parameters used to connect
   specific block devices to computes. This deserves its own deep dive.
+* :doc:`Configuration drive </user/config-drive>`: Provide information to the
+  guest instance when it is created.
 
 Nova can be configured to emit notifications over RPC.
 
@@ -261,6 +263,7 @@ looking parts of our architecture. These are collected below.
    reference/api-microversion-history.rst
    reference/gmr
    reference/i18n
+   reference/live-migration
    reference/notifications
    reference/policy-enforcement
    reference/rpc
@@ -277,13 +280,16 @@ looking parts of our architecture. These are collected below.
    user/cells
    user/cellsv2-layout
    user/conductor
+   user/config-drive
    user/feature-classification
    user/filter-scheduler
    user/flavors
+   user/manage-ip-addresses
    user/placement
    user/quotas
    user/support-matrix
    user/upgrade
+   user/user-data
    user/vendordata
    user/wsgi
 

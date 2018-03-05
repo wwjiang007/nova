@@ -34,12 +34,13 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
-
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
 ----------------
 
-.. literalinclude:: get-resource_provider.json
+.. literalinclude:: ./samples/resource_providers/get-resource_provider.json
    :language: javascript
 
 Update resource provider
@@ -63,11 +64,12 @@ Request
 
   - uuid: resource_provider_uuid_path
   - name: resource_provider_name
+  - parent_provider_uuid: resource_provider_parent_provider_uuid
 
 Request example
 ---------------
 
-.. literalinclude:: update-resource_provider-request.json
+.. literalinclude:: ./samples/resource_providers/update-resource_provider-request.json
    :language: javascript
 
 Response
@@ -79,11 +81,13 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
 ----------------
 
-.. literalinclude:: update-resource_provider.json
+.. literalinclude:: ./samples/resource_providers/update-resource_provider.json
    :language: javascript
 
 Delete resource provider
